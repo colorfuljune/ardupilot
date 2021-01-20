@@ -22,8 +22,6 @@ public:
     // erase handling
     virtual void EraseAll() = 0;
 
-    virtual void Prep() = 0;
-
     /* Write a block of data at current offset */
     bool WriteBlock(const void *pBuffer, uint16_t size) {
         return WritePrioritisedBlock(pBuffer, size, false);
@@ -60,6 +58,8 @@ public:
      * packet from a client.
      */
     virtual void stop_logging(void) = 0;
+    // asynchronously stop logging, status can be determined through logging_started()
+    virtual void stop_logging_async(void) { stop_logging(); }
 
     void Fill_Format(const struct LogStructure *structure, struct log_Format &pkt);
     void Fill_Format_Units(const struct LogStructure *s, struct log_Format_Units &pkt);
@@ -70,7 +70,7 @@ public:
 #endif
 
      // for Logger_MAVlink
-    virtual void remote_log_block_status_msg(const mavlink_channel_t chan,
+    virtual void remote_log_block_status_msg(const GCS_MAVLINK &link,
                                              const mavlink_message_t &msg) { }
     // end for Logger_MAVlink
 
@@ -120,11 +120,17 @@ public:
     virtual bool logging_enabled() const;
     virtual bool logging_failed() const = 0;
 
+    // We may need to make sure data is loggable before starting the
+    // EKF; when allow_start_ekf we should be able to log that data
+    bool allow_start_ekf() const;
+
     virtual void vehicle_was_disarmed();
 
     bool Write_Unit(const struct UnitStructure *s);
     bool Write_Multiplier(const struct MultiplierStructure *s);
     bool Write_Format_Units(const struct LogStructure *structure);
+
+    virtual void io_timer(void) {}
 
 protected:
 

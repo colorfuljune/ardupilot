@@ -242,6 +242,7 @@ public:
     virtual void send_scaled_pressure3(); // allow sub to override this
     void send_sensor_offsets();
     virtual void send_simstate() const;
+    void send_sim_state() const;
     void send_ahrs();
     void send_battery2();
     void send_opticalflow();
@@ -334,6 +335,7 @@ public:
 
     virtual uint64_t capabilities() const;
     uint16_t get_stream_slowdown_ms() const { return stream_slowdown_ms; }
+    uint8_t get_last_txbuf() const { return last_txbuf; }
 
     MAV_RESULT set_message_interval(uint32_t msg_id, int32_t interval_us);
 
@@ -380,6 +382,7 @@ protected:
     virtual bool set_home_to_current_location(bool lock) = 0;
     virtual bool set_home(const Location& loc, bool lock) = 0;
 
+    virtual MAV_RESULT handle_command_component_arm_disarm(const mavlink_command_long_t &packet);
     MAV_RESULT handle_command_do_set_home(const mavlink_command_long_t &packet);
 
     void handle_mission_request_list(const mavlink_message_t &msg);
@@ -416,7 +419,6 @@ protected:
     void handle_common_message(const mavlink_message_t &msg);
     void handle_set_gps_global_origin(const mavlink_message_t &msg);
     void handle_setup_signing(const mavlink_message_t &msg);
-    virtual bool should_zero_rc_outputs_on_reboot() const { return false; }
     virtual MAV_RESULT handle_preflight_reboot(const mavlink_command_long_t &packet);
 
     // reset a message interval via mavlink:
@@ -510,8 +512,6 @@ protected:
     static constexpr const float magic_force_arm_value = 2989.0f;
     static constexpr const float magic_force_disarm_value = 21196.0f;
 
-    virtual bool allow_disarm() const { return true; }
-
     void manual_override(RC_Channel *c, int16_t value_in, uint16_t offset, float scaler, const uint32_t tnow, bool reversed = false);
 
     /*
@@ -572,6 +572,8 @@ private:
 
     // number of extra ms to add to slow things down for the radio
     uint16_t         stream_slowdown_ms;
+    // last reported radio buffer percent available
+    uint8_t          last_txbuf = 100;
 
     // perf counters
     AP_HAL::Util::perf_counter_t _perf_packet;
@@ -597,7 +599,7 @@ private:
     int8_t get_deferred_message_index(const ap_message id) const;
     // returns index of a message in deferred_message[] which should
     // be sent (or -1 if none to send at the moment)
-    int8_t deferred_message_to_send_index();
+    int8_t deferred_message_to_send_index(uint16_t now16_ms);
     // cache of which deferred message should be sent next:
     int8_t next_deferred_message_to_send_cache = -1;
 
@@ -612,8 +614,8 @@ private:
     uint8_t sending_bucket_id = no_bucket_to_send;
     Bitmask<MSG_LAST> bucket_message_ids_to_send;
 
-    ap_message next_deferred_bucket_message_to_send();
-    void find_next_bucket_to_send();
+    ap_message next_deferred_bucket_message_to_send(uint16_t now16_ms);
+    void find_next_bucket_to_send(uint16_t now16_ms);
     void remove_message_from_bucket(int8_t bucket, ap_message id);
 
     // bitmask of IDs the code has spontaneously decided it wants to
@@ -825,8 +827,6 @@ private:
     // no idea where we are:
     struct Location global_position_current_loc;
 
-    void zero_rc_outputs();
-
     uint8_t last_tx_seq;
     uint16_t send_packet_count;
     uint16_t out_of_space_to_send_count; // number of times HAVE_PAYLOAD_SPACE and friends have returned false
@@ -1020,6 +1020,8 @@ private:
         uint32_t start_ms;
         uint32_t last_ms;
         uint32_t last_port1_data_ms;
+        uint32_t baud1;
+        uint32_t baud2;
         uint8_t timeout_s;
         HAL_Semaphore sem;
     } _passthru;
@@ -1038,6 +1040,14 @@ GCS &gcs();
 
 // send text when we do have a GCS
 #define GCS_SEND_TEXT(severity, format, args...) gcs().send_text(severity, format, ##args)
+
+#elif defined(HAL_BUILD_AP_PERIPH) && !defined(STM32F1)
+
+// map send text to can_printf() on larger AP_Periph boards
+extern "C" {
+void can_printf(const char *fmt, ...);
+}
+#define GCS_SEND_TEXT(severity, format, args...) can_printf(format, ##args)
 
 #else // HAL_NO_GCS
 // empty send text when we have no GCS

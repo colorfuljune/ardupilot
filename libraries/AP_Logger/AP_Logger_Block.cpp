@@ -4,6 +4,8 @@
 
 #include "AP_Logger_Block.h"
 
+#if HAL_LOGGING_BLOCK_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include <stdio.h>
 #include <AP_RTC/AP_RTC.h>
@@ -58,7 +60,11 @@ void AP_Logger_Block::Init(void)
 
     WITH_SEMAPHORE(sem);
 
-    hal.scheduler->register_io_process(FUNCTOR_BIND_MEMBER(&AP_Logger_Block::io_timer, void));
+    if (NeedErase()) {
+        EraseAll();
+    } else {
+        validate_log_structure();
+    }
 }
 
 uint32_t AP_Logger_Block::bufferspace_available()
@@ -346,22 +352,6 @@ void AP_Logger_Block::periodic_10Hz(const uint32_t now)
     }
 }
 
-void AP_Logger_Block::Prep()
-{
-    if (hal.util->get_soft_armed()) {
-        // do not want to do any filesystem operations while we are e.g. flying
-        return;
-    }
-
-    WITH_SEMAPHORE(sem);
-
-    if (NeedErase()) {
-        EraseAll();
-    } else {
-        validate_log_structure();
-    }
-}
-
 /*
  *  we need to erase if the logging format has changed
  */
@@ -526,18 +516,21 @@ uint16_t AP_Logger_Block::get_num_logs(void)
     return (last - first + 1);
 }
 
-// stop logging and flush any remaining data
+// stop logging immediately
 void AP_Logger_Block::stop_logging(void)
 {
     WITH_SEMAPHORE(sem);
 
     log_write_started = false;
 
-    // complete writing any previous log
-    while (writebuf.available()) {
-        write_log_page();
-    }
+    // nuke writing any previous log
     writebuf.clear();
+}
+
+// stop logging and flush any remaining data
+void AP_Logger_Block::stop_logging_async(void)
+{
+    stop_log_pending = true;
 }
 
 // This function starts a new log file in the AP_Logger
@@ -819,12 +812,12 @@ bool AP_Logger_Block::logging_failed() const
     return false;
 }
 
+// detect whether the IO thread is running, since this is considered a catastrophic failure for the logging system
+// better be really, really sure
 bool AP_Logger_Block::io_thread_alive() const
 {
-    // if the io thread hasn't had a heartbeat in 5s it is dead
-    // the timeout is longer than might be otherwise required to allow for the FFT running
-    // at the same priority
-    return (AP_HAL::millis() - io_timer_heartbeat) < 5000U;
+    // if the io thread hasn't had a heartbeat in 3s it is dead
+    return (AP_HAL::millis() - io_timer_heartbeat) < 3000U || !hal.scheduler->is_system_initialized();
 }
 
 /*
@@ -871,12 +864,14 @@ void AP_Logger_Block::io_timer(void)
         const uint32_t aligned_sector = sectors - (((df_NumPages - df_EraseFrom + 1) / df_PagePerSector) / sectors_in_64k) * sectors_in_64k;
         while (next_sector < aligned_sector) {
             Sector4kErase(next_sector);
+            io_timer_heartbeat = AP_HAL::millis();
             next_sector++;
         }
         uint16_t blocks_erased = 0;
         while (next_sector < sectors) {
             blocks_erased++;
             SectorErase(next_sector / sectors_in_64k);
+            io_timer_heartbeat = AP_HAL::millis();
             next_sector += sectors_in_64k;
         }
         status_msg = StatusMessage::RECOVERY_COMPLETE;
@@ -887,8 +882,22 @@ void AP_Logger_Block::io_timer(void)
         return;
     }
 
+    // we have been asked to stop logging, flush everything
+    if (stop_log_pending) {
+        WITH_SEMAPHORE(sem);
+
+        log_write_started = false;
+
+        // complete writing any previous log, a page at a time to avoid holding the lock for too long
+        if (writebuf.available()) {
+            write_log_page();
+        } else {
+            writebuf.clear();
+            stop_log_pending = false;
+        }
+
     // write at most one page
-    if (writebuf.available() >= df_PageSize - sizeof(struct PageHeader)) {
+    } else if (writebuf.available() >= df_PageSize - sizeof(struct PageHeader)) {
         WITH_SEMAPHORE(sem);
 
         write_log_page();
@@ -914,3 +923,4 @@ void AP_Logger_Block::write_log_page()
     df_Write_FilePage++;
 }
 
+#endif // HAL_LOGGING_BLOCK_ENABLED

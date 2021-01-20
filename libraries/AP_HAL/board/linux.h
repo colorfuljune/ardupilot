@@ -10,6 +10,7 @@
 
 // make sensor selection clearer
 #define PROBE_IMU_I2C(driver, bus, addr, args ...) ADD_BACKEND(AP_InertialSensor_ ## driver::probe(*this,GET_I2C_DEVICE(bus, addr),##args))
+#define PROBE_IMU_I2C2(driver, bus, addr1, addr2, args ...) ADD_BACKEND(AP_InertialSensor_ ## driver::probe(*this,hal.i2c_mgr->get_device(bus, addr1),hal.i2c_mgr->get_device(bus, addr2),##args))
 #define PROBE_IMU_SPI(driver, devname, args ...) ADD_BACKEND(AP_InertialSensor_ ## driver::probe(*this,hal.spi->get_device(devname),##args))
 #define PROBE_IMU_SPI2(driver, devname1, devname2, args ...) ADD_BACKEND(AP_InertialSensor_ ## driver::probe(*this,hal.spi->get_device(devname1),hal.spi->get_device(devname2),##args))
 
@@ -79,6 +80,14 @@
     #define HAL_FLOW_PX4_FOCAL_LENGTH_MILLIPX (2.21 / (3.6 * 2.0 * 240 / 64))
     #define HAL_RANGEFINDER_LIGHTWARE_I2C_BUS 0
     #define HAL_BATT_MONITOR_DEFAULT AP_BattMonitor::Type::BEBOP
+#elif CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_VNAV
+    // linux SBC with VectorNav AHRS
+    #define HAL_EXTERNAL_AHRS_DEFAULT 1
+    #define HAL_SERIAL3_PROTOCOL 36
+    #define HAL_COMPASS_DEFAULT HAL_COMPASS_NONE
+    #define HAL_AIRSPEED_TYPE_DEFAULT 0
+    #define HAL_GPS_TYPE_DEFAULT 21
+    #define HAL_AHRS_EKF_TYPE_DEFAULT 11
 #elif CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_DISCO
     #define HAL_BOARD_LOG_DIRECTORY "/data/ftp/internal_000/ardupilot/logs"
     #define HAL_BOARD_TERRAIN_DIRECTORY "/data/ftp/internal_000/ardupilot/terrain"

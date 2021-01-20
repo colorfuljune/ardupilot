@@ -46,16 +46,10 @@
 #include <AP_Math/AP_Math.h>
 # include <hal.h>
 #include <AP_CANManager/AP_CANManager.h>
+#include <AP_Common/ExpandingString.h>
 
 # if !defined(STM32H7XX)
 #include "CANIface.h"
-
-#define CAN1_TX_IRQHandler      STM32_CAN1_TX_HANDLER
-#define CAN1_RX0_IRQHandler     STM32_CAN1_RX0_HANDLER
-#define CAN1_RX1_IRQHandler     STM32_CAN1_RX1_HANDLER
-#define CAN2_TX_IRQHandler      STM32_CAN2_TX_HANDLER
-#define CAN2_RX0_IRQHandler     STM32_CAN2_RX0_HANDLER
-#define CAN2_RX1_IRQHandler     STM32_CAN2_RX1_HANDLER
 
 /* STM32F3's only CAN inteface does not have a number. */
 #if defined(STM32F3XX)
@@ -64,18 +58,37 @@
 #define CAN1_TX_IRQn           CAN_TX_IRQn
 #define CAN1_RX0_IRQn          CAN_RX0_IRQn
 #define CAN1_RX1_IRQn          CAN_RX1_IRQn
-#define CAN1_TX_IRQHandler     CAN_TX_IRQHandler
-#define CAN1_RX0_IRQHandler    CAN_RX0_IRQHandler
-#define CAN1_RX1_IRQHandler    CAN_RX1_IRQHandler
+#define CAN1_TX_IRQ_Handler      STM32_CAN1_TX_HANDLER
+#define CAN1_RX0_IRQ_Handler     STM32_CAN1_RX0_HANDLER
+#define CAN1_RX1_IRQ_Handler     STM32_CAN1_RX1_HANDLER
+#else
+#define CAN1_TX_IRQ_Handler      STM32_CAN1_TX_HANDLER
+#define CAN1_RX0_IRQ_Handler     STM32_CAN1_RX0_HANDLER
+#define CAN1_RX1_IRQ_Handler     STM32_CAN1_RX1_HANDLER
+#define CAN2_TX_IRQ_Handler      STM32_CAN2_TX_HANDLER
+#define CAN2_RX0_IRQ_Handler     STM32_CAN2_RX0_HANDLER
+#define CAN2_RX1_IRQ_Handler     STM32_CAN2_RX1_HANDLER
+#endif // #if defined(STM32F3XX)
+
+#if HAL_MAX_CAN_PROTOCOL_DRIVERS
+#define Debug(fmt, args...) do { AP::can().log_text(AP_CANManager::LOG_DEBUG, "CANIface", fmt, ##args); } while (0)
+#else
+#define Debug(fmt, args...)
 #endif
 
-#define Debug(fmt, args...) do { AP::can().log_text(AP_CANManager::LOG_DEBUG, "CANIface", fmt, ##args); } while (0)
+#if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
+#define PERF_STATS(x) (x++)
+#else
+#define PERF_STATS(x)
+#endif
 
-extern const AP_HAL::HAL& hal;
+
+extern AP_HAL::HAL& hal;
 
 using namespace ChibiOS;
 
 constexpr bxcan::CanType* const CANIface::Can[];
+static ChibiOS::CANIface* can_ifaces[HAL_NUM_CAN_IFACES] = {nullptr};
 
 static inline void handleTxInterrupt(uint8_t iface_index)
 {
@@ -86,8 +99,8 @@ static inline void handleTxInterrupt(uint8_t iface_index)
     if (precise_time > 0) {
         precise_time--;
     }
-    if (hal.can[iface_index] != nullptr) {
-        ((ChibiOS::CANIface*)hal.can[iface_index])->handleTxInterrupt(precise_time);
+    if (can_ifaces[iface_index] != nullptr) {
+        can_ifaces[iface_index]->handleTxInterrupt(precise_time);
     }
 }
 
@@ -100,8 +113,8 @@ static inline void handleRxInterrupt(uint8_t iface_index, uint8_t fifo_index)
     if (precise_time > 0) {
         precise_time--;
     }
-    if (hal.can[iface_index] != UAVCAN_NULLPTR) {
-        ((CANIface*)hal.can[iface_index])->handleRxInterrupt(fifo_index, precise_time);
+    if (can_ifaces[iface_index] != nullptr) {
+        can_ifaces[iface_index]->handleRxInterrupt(fifo_index, precise_time);
     }
 }
 
@@ -117,7 +130,8 @@ const uint32_t CANIface::TSR_ABRQx[CANIface::NumTxMailboxes] = {
 
 CANIface::CANIface(uint8_t index) :
     self_index_(index),
-    rx_queue_(HAL_CAN_RX_QUEUE_SIZE)
+    rx_bytebuffer_((uint8_t*)rx_buffer, sizeof(rx_buffer)),
+    rx_queue_(&rx_bytebuffer_)
 {
     if (index >= HAL_NUM_CAN_IFACES) {
         AP_HAL::panic("Bad CANIface index.");
@@ -125,7 +139,6 @@ CANIface::CANIface(uint8_t index) :
         can_ = Can[index];
     }
 }
-
 
 bool CANIface::computeTimings(uint32_t target_bitrate, Timings& out_timings)
 {
@@ -293,7 +306,7 @@ int16_t CANIface::send(const AP_HAL::CANFrame& frame, uint64_t tx_deadline,
     } else if ((can_->TSR & bxcan::TSR_TME2) == bxcan::TSR_TME2) {
         txmailbox = 2;
     } else {
-        stats.tx_rejected++;
+        PERF_STATS(stats.tx_rejected);
         return 0;       // No transmission for you.
     }
 
@@ -350,9 +363,13 @@ int16_t CANIface::receive(AP_HAL::CANFrame& out_frame, uint64_t& out_timestamp_u
     return 1;
 }
 
+#if !defined(HAL_BOOTLOADER_BUILD)
 bool CANIface::configureFilters(const CanFilterConfig* filter_configs,
                                 uint16_t num_configs)
 {
+    if (mode_ != FilteredMode) {
+        return false;
+    }
     if (num_configs <= NumFilters && filter_configs != nullptr) {
         CriticalSectionLocker lock;
 
@@ -418,6 +435,7 @@ bool CANIface::configureFilters(const CanFilterConfig* filter_configs,
 
     return false;
 }
+#endif
 
 bool CANIface::waitMsrINakBitStateChange(bool target_state)
 {
@@ -447,13 +465,13 @@ void CANIface::handleTxMailboxInterrupt(uint8_t mailbox_index, bool txok, const 
         rx_item.frame = txi.frame;
         rx_item.timestamp_us = timestamp_us;
         rx_item.flags = AP_HAL::CANIface::Loopback;
-        stats.tx_loopback++;
+        PERF_STATS(stats.tx_loopback);
         rx_queue_.push(rx_item);
     }
 
     if (txok && !txi.pushed) {
         txi.pushed = true;
-        stats.tx_success++;
+        PERF_STATS(stats.tx_success);
     }
 }
 
@@ -476,10 +494,12 @@ void CANIface::handleTxInterrupt(const uint64_t utc_usec)
         handleTxMailboxInterrupt(2, txok, utc_usec);
     }
 
+#if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
     if (event_handle_ != nullptr) {
-        stats.num_events++;
+        PERF_STATS(stats.num_events);
         evt_src_.signalI(1 << self_index_);
     }
+#endif
     pollErrorFlagsFromISR();
 }
 
@@ -494,13 +514,13 @@ void CANIface::handleRxInterrupt(uint8_t fifo_index, uint64_t timestamp_us)
      * Register overflow as a hardware error
      */
     if ((*rfr_reg & bxcan::RFR_FOVR) != 0) {
-        stats.rx_errors++;
+        PERF_STATS(stats.rx_errors);
     }
 
     /*
      * Read the frame contents
      */
-    AP_HAL::CANFrame frame;
+    AP_HAL::CANFrame &frame = isr_rx_frame;
     const bxcan::RxMailboxType& rf = can_->RxMailbox[fifo_index];
 
     if ((rf.RIR & bxcan::RIR_IDE) == 0) {
@@ -530,23 +550,24 @@ void CANIface::handleRxInterrupt(uint8_t fifo_index, uint64_t timestamp_us)
     /*
      * Store with timeout into the FIFO buffer and signal update event
      */
-    CanRxItem rx_item;
+    CanRxItem &rx_item = isr_rx_item;
     rx_item.frame = frame;
     rx_item.timestamp_us = timestamp_us;
     rx_item.flags = 0;
     if (rx_queue_.push(rx_item)) {
-        stats.rx_received++;
+        PERF_STATS(stats.rx_received);
     } else {
-        stats.rx_overflow++;
+        PERF_STATS(stats.rx_overflow);
     }
 
     had_activity_ = true;
 
+#if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
     if (event_handle_ != nullptr) {
-        stats.num_events++;
+        PERF_STATS(stats.num_events);
         evt_src_.signalI(1 << self_index_);
     }
-
+#endif
     pollErrorFlagsFromISR();
 }
 
@@ -555,7 +576,6 @@ void CANIface::pollErrorFlagsFromISR()
     const uint8_t lec = uint8_t((can_->ESR & bxcan::ESR_LEC_MASK) >> bxcan::ESR_LEC_SHIFT);
     if (lec != 0) {
         can_->ESR = 0;
-        error_cnt_++;
 
         // Serving abort requests
         for (int i = 0; i < NumTxMailboxes; i++) {
@@ -563,7 +583,7 @@ void CANIface::pollErrorFlagsFromISR()
             if (txi.aborted && txi.abort_on_error) {
                 can_->TSR = TSR_ABRQx[i];
                 txi.aborted = true;
-                stats.tx_abort++;
+                PERF_STATS(stats.tx_abort);
             }
         }
     }
@@ -580,7 +600,7 @@ void CANIface::discardTimedOutTxMailboxes(uint64_t current_time)
         if (txi.deadline < current_time) {
             can_->TSR = TSR_ABRQx[i];  // Goodnight sweet transmission
             pending_tx_[i].aborted = true;
-            stats.tx_timedout++;
+            PERF_STATS(stats.tx_timedout);
         }
     }
 }
@@ -637,6 +657,7 @@ bool CANIface::isRxBufferEmpty() const
     return rx_queue_.available() == 0;
 }
 
+#if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
 uint32_t CANIface::getErrorCount() const
 {
     CriticalSectionLocker lock;
@@ -656,6 +677,8 @@ bool CANIface::set_event_handle(AP_HAL::EventHandle* handle)
     event_handle_->set_source(&evt_src_);
     return event_handle_->register_event(1 << self_index_);
 }
+
+#endif // #if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
 
 void CANIface::checkAvailable(bool& read, bool& write, const AP_HAL::CANFrame* pending_tx) const
 {
@@ -687,6 +710,9 @@ bool CANIface::select(bool &read, bool &write,
     if ((read && in_read) || (write && in_write)) {
         return true;
     }
+
+#if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
+    // we don't support blocking select in AP_Periph and bootloader
     while (time < blocking_deadline) {
         if (event_handle_ == nullptr) {
             break;
@@ -698,6 +724,7 @@ bool CANIface::select(bool &read, bool &write,
         }
         time = AP_HAL::micros();
     }
+#endif // #if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
     return true;
 }
 
@@ -750,20 +777,29 @@ bool CANIface::init(const uint32_t bitrate, const CANIface::OperatingMode mode)
         Debug("CAN drv init failed");
         return false;
     }
+    if (can_ifaces[self_index_] == nullptr) {
+        can_ifaces[self_index_] = this;
+#if !defined(HAL_BOOTLOADER_BUILD)
+        hal.can[self_index_] = this;
+#endif
+    }
 
-    if (hal.can[0] == nullptr) {
-        const_cast <AP_HAL::HAL&> (hal).can[0] = new CANIface(0);
+    bitrate_ = bitrate;
+    mode_ = mode;
+
+    if (can_ifaces[0] == nullptr) {
+        can_ifaces[0] = new CANIface(0);
         Debug("Failed to allocate CAN iface 0");
-        if (hal.can[0] == nullptr) {
+        if (can_ifaces[0] == nullptr) {
             return false;
         }
     }
-    if (self_index_ == 1 && !hal.can[0]->is_initialized()) {
+    if (self_index_ == 1 && !can_ifaces[0]->is_initialized()) {
         Debug("Iface 0 is not initialized yet but we need it for Iface 1, trying to init it");
         Debug("Enabling CAN iface 0");
-        ((CANIface*)hal.can[0])->initOnce(false);
+        can_ifaces[0]->initOnce(false);
         Debug("Initing iface 0...");
-        if (!hal.can[0]->init(bitrate, mode)) {
+        if (!can_ifaces[0]->init(bitrate, mode)) {
             Debug("Iface 0 init failed");
             return false;;
         }
@@ -793,7 +829,6 @@ bool CANIface::init(const uint32_t bitrate, const CANIface::OperatingMode mode)
      * Object state - interrupts are disabled, so it's safe to modify it now
      */
     rx_queue_.clear();
-    error_cnt_ = 0;
 
     for (uint32_t i=0; i < NumTxMailboxes; i++) {
         pending_tx_[i] = CanTxItem();
@@ -867,36 +902,33 @@ bool CANIface::init(const uint32_t bitrate, const CANIface::OperatingMode mode)
     return true;
 }
 
-uint32_t CANIface::get_stats(char* data, uint32_t max_size)
+#if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
+void CANIface::get_stats(ExpandingString &str)
 {
-    if (data == nullptr) {
-        return 0;
-    }
     CriticalSectionLocker lock;
-    uint32_t ret = snprintf(data, max_size,
-                            "tx_requests:    %lu\n"
-                            "tx_rejected:    %lu\n"
-                            "tx_success:     %lu\n"
-                            "tx_timedout:    %lu\n"
-                            "tx_abort:       %lu\n"
-                            "rx_received:    %lu\n"
-                            "rx_overflow:    %lu\n"
-                            "rx_errors:      %lu\n"
-                            "num_busoff_err: %lu\n"
-                            "num_events:     %lu\n",
-                            stats.tx_requests,
-                            stats.tx_rejected,
-                            stats.tx_success,
-                            stats.tx_timedout,
-                            stats.tx_abort,
-                            stats.rx_received,
-                            stats.rx_overflow,
-                            stats.rx_errors,
-                            stats.num_busoff_err,
-                            stats.num_events);
+    str.printf("tx_requests:    %lu\n"
+               "tx_rejected:    %lu\n"
+               "tx_success:     %lu\n"
+               "tx_timedout:    %lu\n"
+               "tx_abort:       %lu\n"
+               "rx_received:    %lu\n"
+               "rx_overflow:    %lu\n"
+               "rx_errors:      %lu\n"
+               "num_busoff_err: %lu\n"
+               "num_events:     %lu\n",
+               stats.tx_requests,
+               stats.tx_rejected,
+               stats.tx_success,
+               stats.tx_timedout,
+               stats.tx_abort,
+               stats.rx_received,
+               stats.rx_overflow,
+               stats.rx_errors,
+               stats.num_busoff_err,
+               stats.num_events);
     memset(&stats, 0, sizeof(stats));
-    return ret;
 }
+#endif
 
 /*
  * Interrupt handlers
@@ -904,24 +936,24 @@ uint32_t CANIface::get_stats(char* data, uint32_t max_size)
 extern "C"
 {
 
-    CH_IRQ_HANDLER(CAN1_TX_IRQHandler);
-    CH_IRQ_HANDLER(CAN1_TX_IRQHandler)
+    CH_IRQ_HANDLER(CAN1_TX_IRQ_Handler);
+    CH_IRQ_HANDLER(CAN1_TX_IRQ_Handler)
     {
         CH_IRQ_PROLOGUE();
         handleTxInterrupt(0);
         CH_IRQ_EPILOGUE();
     }
 
-    CH_IRQ_HANDLER(CAN1_RX0_IRQHandler);
-    CH_IRQ_HANDLER(CAN1_RX0_IRQHandler)
+    CH_IRQ_HANDLER(CAN1_RX0_IRQ_Handler);
+    CH_IRQ_HANDLER(CAN1_RX0_IRQ_Handler)
     {
         CH_IRQ_PROLOGUE();
         handleRxInterrupt(0, 0);
         CH_IRQ_EPILOGUE();
     }
 
-    CH_IRQ_HANDLER(CAN1_RX1_IRQHandler);
-    CH_IRQ_HANDLER(CAN1_RX1_IRQHandler)
+    CH_IRQ_HANDLER(CAN1_RX1_IRQ_Handler);
+    CH_IRQ_HANDLER(CAN1_RX1_IRQ_Handler)
     {
         CH_IRQ_PROLOGUE();
         handleRxInterrupt(0, 1);
@@ -930,36 +962,36 @@ extern "C"
 
 #if HAL_NUM_CAN_IFACES > 1
 
-#if !defined(CAN2_TX_IRQHandler)
+#if !defined(CAN2_TX_IRQ_Handler)
 # error "Misconfigured build1"
 #endif
 
-#if !defined(CAN2_RX0_IRQHandler)
+#if !defined(CAN2_RX0_IRQ_Handler)
 # error "Misconfigured build2"
 #endif
 
-#if !defined(CAN2_RX1_IRQHandler)
+#if !defined(CAN2_RX1_IRQ_Handler)
 # error "Misconfigured build3"
 #endif
 
-    CH_IRQ_HANDLER(CAN2_TX_IRQHandler);
-    CH_IRQ_HANDLER(CAN2_TX_IRQHandler)
+    CH_IRQ_HANDLER(CAN2_TX_IRQ_Handler);
+    CH_IRQ_HANDLER(CAN2_TX_IRQ_Handler)
     {
         CH_IRQ_PROLOGUE();
         handleTxInterrupt(1);
         CH_IRQ_EPILOGUE();
     }
 
-    CH_IRQ_HANDLER(CAN2_RX0_IRQHandler);
-    CH_IRQ_HANDLER(CAN2_RX0_IRQHandler)
+    CH_IRQ_HANDLER(CAN2_RX0_IRQ_Handler);
+    CH_IRQ_HANDLER(CAN2_RX0_IRQ_Handler)
     {
         CH_IRQ_PROLOGUE();
         handleRxInterrupt(1, 0);
         CH_IRQ_EPILOGUE();
     }
 
-    CH_IRQ_HANDLER(CAN2_RX1_IRQHandler);
-    CH_IRQ_HANDLER(CAN2_RX1_IRQHandler)
+    CH_IRQ_HANDLER(CAN2_RX1_IRQ_Handler);
+    CH_IRQ_HANDLER(CAN2_RX1_IRQ_Handler)
     {
         CH_IRQ_PROLOGUE();
         handleRxInterrupt(1, 1);

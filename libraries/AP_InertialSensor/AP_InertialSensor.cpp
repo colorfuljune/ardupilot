@@ -9,6 +9,7 @@
 #include <AP_Vehicle/AP_Vehicle.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include <AP_AHRS/AP_AHRS.h>
+#include <AP_ExternalAHRS/AP_ExternalAHRS.h>
 
 #include "AP_InertialSensor.h"
 #include "AP_InertialSensor_BMI160.h"
@@ -24,6 +25,8 @@
 #include "AP_InertialSensor_BMI088.h"
 #include "AP_InertialSensor_Invensensev2.h"
 #include "AP_InertialSensor_ADIS1647x.h"
+#include "AP_InertialSensor_ExternalAHRS.h"
+#include "AP_InertialSensor_Invensensev3.h"
 
 /* Define INS_TIMING_DEBUG to track down scheduling issues with the main loop.
  * Output is on the debug console. */
@@ -61,8 +64,6 @@ extern const AP_HAL::HAL& hal;
 #else
 #define MPU_FIFO_FASTSAMPLE_DEFAULT 0
 #endif
-
-#define SAMPLE_UNIT 1
 
 #define GYRO_INIT_MAX_DIFF_DPS 0.1f
 
@@ -127,7 +128,10 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Units: rad/s
     // @User: Advanced
     // @Calibration: 1
+
+#if INS_MAX_INSTANCES > 1
     AP_GROUPINFO("GYR2OFFS",    7, AP_InertialSensor, _gyro_offset[1],   0),
+#endif
 
     // @Param: GYR3OFFS_X
     // @DisplayName: Gyro3 offsets of X axis
@@ -149,7 +153,10 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Units: rad/s
     // @User: Advanced
     // @Calibration: 1
+
+#if INS_MAX_INSTANCES > 2
     AP_GROUPINFO("GYR3OFFS",   10, AP_InertialSensor, _gyro_offset[2],   0),
+#endif
 
     // @Param: ACCSCAL_X
     // @DisplayName: Accelerometer scaling of X axis
@@ -218,7 +225,10 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Range: 0.8 1.2
     // @User: Advanced
     // @Calibration: 1
+
+#if INS_MAX_INSTANCES > 1
     AP_GROUPINFO("ACC2SCAL",    14, AP_InertialSensor, _accel_scale[1],   0),
+#endif
 
     // @Param: ACC2OFFS_X
     // @DisplayName: Accelerometer2 offsets of X axis
@@ -243,7 +253,10 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Range: -3.5 3.5
     // @User: Advanced
     // @Calibration: 1
+
+#if INS_MAX_INSTANCES > 1
     AP_GROUPINFO("ACC2OFFS",    15, AP_InertialSensor, _accel_offset[1],  0),
+#endif
 
     // @Param: ACC3SCAL_X
     // @DisplayName: Accelerometer3 scaling of X axis
@@ -265,7 +278,10 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Range: 0.8 1.2
     // @User: Advanced
     // @Calibration: 1
+
+#if INS_MAX_INSTANCES > 2
     AP_GROUPINFO("ACC3SCAL",    16, AP_InertialSensor, _accel_scale[2],   0),
+#endif
 
     // @Param: ACC3OFFS_X
     // @DisplayName: Accelerometer3 offsets of X axis
@@ -290,7 +306,10 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Range: -3.5 3.5
     // @User: Advanced
     // @Calibration: 1
+
+#if INS_MAX_INSTANCES > 2
     AP_GROUPINFO("ACC3OFFS",    17, AP_InertialSensor, _accel_offset[2],  0),
+#endif
 
     // @Param: GYRO_FILTER
     // @DisplayName: Gyro filter cutoff frequency
@@ -320,14 +339,20 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Description: Use second IMU for attitude, velocity and position estimates
     // @Values: 0:Disabled,1:Enabled
     // @User: Advanced
+
+#if INS_MAX_INSTANCES > 1
     AP_GROUPINFO("USE2", 21, AP_InertialSensor, _use[1],  1),
+#endif
 
     // @Param: USE3
     // @DisplayName: Use third IMU for attitude, velocity and position estimates
     // @Description: Use third IMU for attitude, velocity and position estimates
     // @Values: 0:Disabled,1:Enabled
     // @User: Advanced
+
+#if INS_MAX_INSTANCES > 2
     AP_GROUPINFO("USE3", 22, AP_InertialSensor, _use[2],  1),
+#endif
 
     // @Param: STILL_THRESH
     // @DisplayName: Stillness threshold for detecting if we are moving
@@ -405,7 +430,10 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Range: -5 5
     // @Increment: 0.01
     // @User: Advanced
+
+#if INS_MAX_INSTANCES > 1
     AP_GROUPINFO("POS2", 28, AP_InertialSensor, _accel_pos[1], 0.0f),
+#endif
 
     // @Param: POS3_X
     // @DisplayName: IMU accelerometer X position
@@ -429,7 +457,10 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Range: -5 5
     // @Increment: 0.01
     // @User: Advanced
+
+#if INS_MAX_INSTANCES > 2
     AP_GROUPINFO("POS3", 29, AP_InertialSensor, _accel_pos[2], 0.0f),
+#endif
 
     // @Param: GYR_ID
     // @DisplayName: Gyro ID
@@ -443,14 +474,20 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Description: Gyro2 sensor ID, taking into account its type, bus and instance
     // @ReadOnly: True
     // @User: Advanced
+
+#if INS_MAX_INSTANCES > 1
     AP_GROUPINFO("GYR2_ID", 31, AP_InertialSensor, _gyro_id[1], 0),
+#endif
 
     // @Param: GYR3_ID
     // @DisplayName: Gyro3 ID
     // @Description: Gyro3 sensor ID, taking into account its type, bus and instance
     // @ReadOnly: True
     // @User: Advanced
+
+#if INS_MAX_INSTANCES > 2
     AP_GROUPINFO("GYR3_ID", 32, AP_InertialSensor, _gyro_id[2], 0),
+#endif
 
     // @Param: ACC_ID
     // @DisplayName: Accelerometer ID
@@ -464,14 +501,20 @@ const AP_Param::GroupInfo AP_InertialSensor::var_info[] = {
     // @Description: Accelerometer2 sensor ID, taking into account its type, bus and instance
     // @ReadOnly: True
     // @User: Advanced
+
+#if INS_MAX_INSTANCES > 1
     AP_GROUPINFO("ACC2_ID", 34, AP_InertialSensor, _accel_id[1], 0),
+#endif
 
     // @Param: ACC3_ID
     // @DisplayName: Accelerometer3 ID
     // @Description: Accelerometer3 sensor ID, taking into account its type, bus and instance
     // @ReadOnly: True
     // @User: Advanced
+
+#if INS_MAX_INSTANCES > 2
     AP_GROUPINFO("ACC3_ID", 35, AP_InertialSensor, _accel_id[2], 0),
+#endif
 
     // @Param: FAST_SAMPLE
     // @DisplayName: Fast sampling mask
@@ -810,6 +853,15 @@ AP_InertialSensor::detect_backends(void)
         ADD_BACKEND(AP_InertialSensor_HIL::detect(*this));
         return;
     }
+
+
+#if HAL_EXTERNAL_AHRS_ENABLED
+    // if enabled, make the first IMU the external AHRS
+    if (int8_t serial_port = AP::externalAHRS().get_port() >= 0) {
+        ADD_BACKEND(new AP_InertialSensor_ExternalAHRS(*this, serial_port));
+    }
+#endif
+
 #if defined(HAL_INS_PROBE_LIST)
     // IMUs defined by IMU lines in hwdef.dat
     HAL_INS_PROBE_LIST;
@@ -817,6 +869,9 @@ AP_InertialSensor::detect_backends(void)
     for (uint8_t i=0; i<AP::sitl()->imu_count; i++) {
         ADD_BACKEND(AP_InertialSensor_SITL::detect(*this, i==1?INS_SITL_SENSOR_B:INS_SITL_SENSOR_A));
     }
+#if defined(HAL_SITL_INVENSENSEV3)
+    ADD_BACKEND(AP_InertialSensor_Invensensev3::probe(*this, hal.i2c_mgr->get_device(1, 1), ROTATION_NONE));
+#endif
 #elif HAL_INS_DEFAULT == HAL_INS_HIL
     ADD_BACKEND(AP_InertialSensor_HIL::detect(*this));
 #elif AP_FEATURE_BOARD_DETECT
@@ -1483,6 +1538,10 @@ check_sample:
         uint8_t gyro_available_mask = 0;
         uint8_t accel_available_mask = 0;
         uint32_t wait_counter = 0;
+        // allow to wait for up to 1/3 of the loop time for samples from all
+        // IMUs to come in
+        const uint8_t wait_per_loop = 100;
+        const uint8_t wait_counter_limit = uint32_t(_loop_delta_t * 1.0e6) / (3*wait_per_loop);
 
         while (true) {
             for (uint8_t i=0; i<_backend_count; i++) {
@@ -1514,10 +1573,10 @@ check_sample:
                 }
             }
 
-            // we wait for up to 800us to get all of the required
+            // we wait for up to 1/3 of the loop time to get all of the required
             // accel and gyro samples. After that we accept at least
             // one of each
-            if (wait_counter < 7) {
+            if (wait_counter < wait_counter_limit) {
                 if (gyro_available_mask &&
                     ((gyro_available_mask & _gyro_wait_mask) == _gyro_wait_mask) &&
                     accel_available_mask &&
@@ -1535,7 +1594,7 @@ check_sample:
                 }
             }
 
-            hal.scheduler->delay_microseconds_boost(100);
+            hal.scheduler->delay_microseconds_boost(wait_per_loop);
             wait_counter++;
         }
     }
@@ -2169,6 +2228,15 @@ void AP_InertialSensor::kill_imu(uint8_t imu_idx, bool kill_it)
 }
 #endif // HAL_MINIMIZE_FEATURES
 
+
+#if HAL_EXTERNAL_AHRS_ENABLED
+void AP_InertialSensor::handle_external(const AP_ExternalAHRS::ins_data_message_t &pkt)
+{
+    for (uint8_t i = 0; i < _backend_count; i++) {
+        _backends[i]->handle_external(pkt);
+    }
+}
+#endif // HAL_EXTERNAL_AHRS_ENABLED
 
 namespace AP {
 

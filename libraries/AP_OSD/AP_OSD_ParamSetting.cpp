@@ -24,6 +24,7 @@
 #include "AP_OSD.h"
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 #include <SRV_Channel/SRV_Channel.h>
+#include <ctype.h>
 
 #if OSD_PARAM_ENABLED
 
@@ -246,6 +247,27 @@ AP_OSD_ParamSetting::AP_OSD_ParamSetting(uint8_t param_number, bool _enabled, ui
     _type = type;
 }
 
+// default constructor that just sets some sensible defaults that exist on all platforms
+AP_OSD_ParamSetting::AP_OSD_ParamSetting(uint8_t param_number)
+    : AP_OSD_Setting(false, 2, param_number + 1), _param_number(param_number)
+{
+    _param_min = 0.0f;
+    _param_max = 1.0f;
+    _param_incr = 0.001f;
+    _type = OSD_PARAM_NONE;
+}
+
+// construct a setting from a compact static initializer structure
+AP_OSD_ParamSetting::AP_OSD_ParamSetting(const Initializer& initializer)
+    : AP_OSD_ParamSetting(initializer.index)
+{
+    _param_group = initializer.token.group_element;
+    _param_idx = initializer.token.idx;
+    _param_key = initializer.token.key;
+    _type = initializer.type;
+    enabled = true;
+}
+
 // update the contained parameter
 void AP_OSD_ParamSetting::update()
 {
@@ -345,7 +367,7 @@ void AP_OSD_ParamSetting::guess_ranges(bool force)
             }
             incr = MAX(1, powf(10, digits - 2));
             max = powf(10, digits + 1);
-            debug("Guessing range for value %d as %f -> %f, %f\n", p->get(), min, max, incr);
+            debug("Guessing range for value %d as %f -> %f, %f\n", int(p->get()), min, max, incr);
             break;
         }
         case AP_PARAM_FLOAT: {
@@ -390,6 +412,23 @@ void AP_OSD_ParamSetting::guess_ranges(bool force)
         }
         if (force || !_param_incr.configured()) {
             _param_incr = incr;
+        }
+    }
+}
+
+// copy the name converting FOO_BAR_BAZ to FooBarBaz
+void AP_OSD_ParamSetting::copy_name_camel_case(char* name, size_t len)
+{
+    char buf[17];
+    _param->copy_name_token(_current_token, buf, 17);
+    buf[16] = 0;
+    name[0] = buf[0];
+    for (uint8_t i = 1, n = 1; i < len; i++, n++) {
+        if (buf[i] == '_') {
+            name[n] = buf[i+1];
+            i++;
+        } else {
+            name[n] = tolower(buf[i]);
         }
     }
 }

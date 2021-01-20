@@ -170,8 +170,8 @@ void AP_InertialSensor_Backend::_notify_new_gyro_raw_sample(uint8_t instance,
         dt = (sample_us - _imu._gyro_last_sample_us[instance]) * 1.0e-6f;
         _imu._gyro_last_sample_us[instance] = sample_us;
     } else {
-        // don't accept below 100Hz
-        if (_imu._gyro_raw_sample_rates[instance] < 100) {
+        // don't accept below 40Hz
+        if (_imu._gyro_raw_sample_rates[instance] < 40) {
             return;
         }
 
@@ -278,9 +278,10 @@ void AP_InertialSensor_Backend::log_gyro_raw(uint8_t instance, const uint64_t sa
     }
     if (should_log_imu_raw()) {
         uint64_t now = AP_HAL::micros64();
-        struct log_GYRO pkt = {
-            LOG_PACKET_HEADER_INIT((uint8_t)(LOG_GYR1_MSG+instance)),
+        const struct log_GYR pkt{
+            LOG_PACKET_HEADER_INIT(LOG_GYR_MSG),
             time_us   : now,
+            instance  : instance,
             sample_us : sample_us?sample_us:now,
             GyrX      : gyro.x,
             GyrY      : gyro.y,
@@ -357,8 +358,8 @@ void AP_InertialSensor_Backend::_notify_new_accel_raw_sample(uint8_t instance,
         dt = (sample_us - _imu._accel_last_sample_us[instance]) * 1.0e-6f;
         _imu._accel_last_sample_us[instance] = sample_us;
     } else {
-        // don't accept below 100Hz
-        if (_imu._accel_raw_sample_rates[instance] < 100) {
+        // don't accept below 40Hz
+        if (_imu._accel_raw_sample_rates[instance] < 40) {
             return;
         }
 
@@ -433,9 +434,10 @@ void AP_InertialSensor_Backend::log_accel_raw(uint8_t instance, const uint64_t s
     }
     if (should_log_imu_raw()) {
         uint64_t now = AP_HAL::micros64();
-        struct log_ACCEL pkt = {
-            LOG_PACKET_HEADER_INIT((uint8_t)(LOG_ACC1_MSG+instance)),
+        const struct log_ACC pkt {
+            LOG_PACKET_HEADER_INIT(LOG_ACC_MSG),
             time_us   : now,
+            instance  : instance,
             sample_us : sample_us?sample_us:now,
             AccX      : accel.x,
             AccY      : accel.y,

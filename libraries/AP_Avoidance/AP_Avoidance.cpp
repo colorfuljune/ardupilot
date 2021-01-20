@@ -1,5 +1,7 @@
 #include "AP_Avoidance.h"
 
+#if HAL_ADSB_ENABLED
+
 extern const AP_HAL::HAL& hal;
 
 #include <limits>
@@ -116,7 +118,7 @@ const AP_Param::GroupInfo AP_Avoidance::var_info[] = {
     
     // @Param: F_ALT_MIN
     // @DisplayName: ADS-B avoidance minimum altitude
-    // @Description: Minimum altitude for ADS-B avoidance. If the vehicle is below this altitude, no avoidance action will take place. Useful to prevent ADS-B avoidance from activating while below the tree line or around structures. Default of 0 is no minimum.
+    // @Description: Minimum AMSL (above mean sea level) altitude for ADS-B avoidance. If the vehicle is below this altitude, no avoidance action will take place. Useful to prevent ADS-B avoidance from activating while below the tree line or around structures. Default of 0 is no minimum.
     // @Units: m
     // @User: Advanced
     AP_GROUPINFO("F_ALT_MIN",    12, AP_Avoidance, _fail_altitude_minimum, 0),
@@ -680,3 +682,5 @@ AP_Avoidance *ap_avoidance()
 }
 
 }
+
+#endif // HAL_ADSB_ENABLED

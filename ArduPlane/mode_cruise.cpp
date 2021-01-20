@@ -3,13 +3,10 @@
 
 bool ModeCruise::_enter()
 {
-    plane.throttle_allows_nudging = false;
-    plane.auto_throttle_mode = true;
-    plane.auto_navigation_mode = false;
     locked_heading = false;
     lock_timer_ms = 0;
 
-#if SOARING_ENABLED == ENABLED
+#if HAL_SOARING_ENABLED
     // for ArduSoar soaring_controller
     plane.g2.soaring_controller.init_cruising();
 #endif

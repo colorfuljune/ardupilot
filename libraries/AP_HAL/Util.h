@@ -3,6 +3,8 @@
 #include <stdarg.h>
 #include "AP_HAL_Namespace.h"
 
+class ExpandingString;
+
 class AP_HAL::Util {
 public:
     int snprintf(char* str, size_t size,
@@ -36,6 +38,9 @@ public:
     virtual const char* get_custom_defaults_file() const {
         return HAL_PARAM_DEFAULTS_PATH;
     }
+
+    // set command line parameters to the eeprom on start
+    virtual void set_cmdline_parameters() {};
 
     // run a debug shall on the given stream if possible. This is used
     // to support dropping into a debug shell to run firmware upgrade
@@ -176,16 +181,14 @@ public:
      */
     virtual uint32_t available_memory(void) { return 4096; }
 
-    /*
-      initialise (or re-initialise) filesystem storage
-     */
-    virtual bool fs_init(void) { return false; }
-
     // attempt to trap the processor, presumably to enter an attached debugger
     virtual bool trap() const { return false; }
 
     // request information on running threads
-    virtual size_t thread_info(char *buf, size_t bufsize) { return 0; }
+    virtual void thread_info(ExpandingString &str) {}
+
+    // request information on dma contention
+    virtual void dma_info(ExpandingString &str) {}
 
 protected:
     // we start soft_armed false, so that actuators don't send any

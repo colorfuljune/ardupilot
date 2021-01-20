@@ -144,6 +144,7 @@ enum {
     USE_REVERSE_THRUST_CRUISE                   = (1<<8),
     USE_REVERSE_THRUST_FBWB                     = (1<<9),
     USE_REVERSE_THRUST_GUIDED                   = (1<<10),
+    USE_REVERSE_THRUST_AUTO_LANDING_PATTERN     = (1<<11),
 };
 
 enum FlightOptions {
@@ -170,4 +171,11 @@ enum guided_heading_type_t {
 enum class AirMode {
     OFF,
     ON,
+};
+
+enum class FenceAutoEnable : uint8_t {
+    OFF=0,
+    Auto=1,
+    AutoDisableFloorOnly=2,
+    WhenArmed=3
 };

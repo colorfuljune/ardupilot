@@ -68,7 +68,9 @@ const AP_Scheduler::Task Plane::scheduler_tasks[] = {
     SCHED_TASK(one_second_loop,         1,    400),
     SCHED_TASK(check_long_failsafe,     3,    400),
     SCHED_TASK(rpm_update,             10,    100),
+#if AP_AIRSPEED_AUTOCAL_ENABLE
     SCHED_TASK(airspeed_ratio_update,   1,    100),
+#endif // AP_AIRSPEED_AUTOCAL_ENABLE
 #if HAL_MOUNT_ENABLED
     SCHED_TASK_CLASS(AP_Mount, &plane.camera_mount, update, 50, 100),
 #endif // HAL_MOUNT_ENABLED
@@ -80,7 +82,7 @@ const AP_Scheduler::Task Plane::scheduler_tasks[] = {
     SCHED_TASK(Log_Write_Fast,         25,    300),
     SCHED_TASK(update_logging1,        25,    300),
     SCHED_TASK(update_logging2,        25,    300),
-#if SOARING_ENABLED == ENABLED
+#if HAL_SOARING_ENABLED
     SCHED_TASK(update_soaring,         50,    400),
 #endif
     SCHED_TASK(parachute_check,        10,    200),
@@ -92,7 +94,9 @@ const AP_Scheduler::Task Plane::scheduler_tasks[] = {
     SCHED_TASK_CLASS(AP_Logger, &plane.logger, periodic_tasks, 50, 400),
 #endif
     SCHED_TASK_CLASS(AP_InertialSensor, &plane.ins, periodic, 50, 50),
+#if HAL_ADSB_ENABLED    
     SCHED_TASK(avoidance_adsb_update,  10,    100),
+#endif
     SCHED_TASK_CLASS(RC_Channels,       (RC_Channels*)&plane.g2.rc_channels, read_aux_all,           10,    200),
     SCHED_TASK_CLASS(AP_Button, &plane.button, update, 5, 100),
 #if STATS_ENABLED == ENABLED
@@ -100,12 +104,6 @@ const AP_Scheduler::Task Plane::scheduler_tasks[] = {
 #endif
 #if GRIPPER_ENABLED == ENABLED
     SCHED_TASK_CLASS(AP_Gripper, &plane.g2.gripper, update, 10, 75),
-#endif
-#if OSD_ENABLED == ENABLED
-    SCHED_TASK(publish_osd_info, 1, 10),
-#endif
-#if GENERATOR_ENABLED
-    SCHED_TASK_CLASS(AP_Generator_RichenPower,          &plane.generator,      update,    10,     50),
 #endif
 #if LANDING_GEAR_ENABLED == ENABLED
     SCHED_TASK(landing_gear_update, 5, 50),
@@ -171,7 +169,7 @@ void Plane::ahrs_update()
  */
 void Plane::update_speed_height(void)
 {
-    if (auto_throttle_mode) {
+    if (control_mode->does_auto_throttle()) {
 	    // Call TECS 50Hz update. Note that we call this regardless of
 	    // throttle suppressed, as this needs to be running for
 	    // takeoff detection
@@ -208,7 +206,7 @@ void Plane::update_logging1(void)
         logger.Write_IMU();
 
     if (should_log(MASK_LOG_ATTITUDE_MED))
-        logger.Write_AOA_SSA(ahrs);
+        ahrs.Write_AOA_SSA();
 }
 
 /*
@@ -265,10 +263,10 @@ void Plane::one_second_loop()
 
     // make it possible to change orientation at runtime
     ahrs.update_orientation();
-
+#if HAL_ADSB_ENABLED
     adsb.set_stall_speed_cm(aparm.airspeed_min);
     adsb.set_max_speed(aparm.airspeed_max);
-
+#endif
     ahrs.writeDefaultAirSpeed((float)((aparm.airspeed_min + aparm.airspeed_max)/2));
 
     // sync MAVLink system ID
@@ -319,6 +317,7 @@ void Plane::efi_update(void)
 #endif
 }
 
+#if AP_AIRSPEED_AUTOCAL_ENABLE
 /*
   once a second update the airspeed calibration ratio
  */
@@ -347,7 +346,7 @@ void Plane::airspeed_ratio_update(void)
     const Vector3f &vg = gps.velocity();
     airspeed.update_calibration(vg, aparm.airspeed_max);
 }
-
+#endif // AP_AIRSPEED_AUTOCAL_ENABLE
 
 /*
   read the GPS and update position
@@ -482,7 +481,7 @@ void Plane::update_alt()
 
     update_flight_stage();
 
-    if (auto_throttle_mode && !throttle_suppressed) {        
+    if (control_mode->does_auto_throttle() && !throttle_suppressed) {
 
         float distance_beyond_land_wp = 0;
         if (flight_stage == AP_Vehicle::FixedWing::FLIGHT_LAND && current_loc.past_interval_finish_line(prev_WP_loc, next_WP_loc)) {
@@ -515,7 +514,7 @@ void Plane::update_alt()
 void Plane::update_flight_stage(void)
 {
     // Update the speed & height controller states
-    if (auto_throttle_mode && !throttle_suppressed) {        
+    if (control_mode->does_auto_throttle() && !throttle_suppressed) {
         if (control_mode == &mode_auto) {
             if (quadplane.in_vtol_auto()) {
                 set_flight_stage(AP_Vehicle::FixedWing::FLIGHT_VTOL);
@@ -599,17 +598,49 @@ float Plane::tecs_hgt_afe(void)
     return hgt_afe;
 }
 
-#if OSD_ENABLED == ENABLED
-void Plane::publish_osd_info()
+// vehicle specific waypoint info helpers
+bool Plane::get_wp_distance_m(float &distance) const
 {
-    AP_OSD::NavInfo nav_info;
-    nav_info.wp_distance = auto_state.wp_distance;
-    nav_info.wp_bearing = nav_controller->target_bearing_cd();
-    nav_info.wp_xtrack_error = nav_controller->crosstrack_error();
-    nav_info.wp_number = mission.get_current_nav_index();
-    osd.set_nav_info(nav_info);
+    // see GCS_MAVLINK_Plane::send_nav_controller_output()
+    if (control_mode == &mode_manual) {
+        return false;
+    }
+    if (quadplane.in_vtol_mode()) {
+        distance = quadplane.using_wp_nav() ? quadplane.wp_nav->get_wp_distance_to_destination() : 0;
+    } else {
+        distance = auto_state.wp_distance;
+    }
+    return true;
 }
-#endif
+
+bool Plane::get_wp_bearing_deg(float &bearing) const
+{
+    // see GCS_MAVLINK_Plane::send_nav_controller_output()
+    if (control_mode == &mode_manual) {
+        return false;
+    }
+    if (quadplane.in_vtol_mode()) {
+        bearing = quadplane.using_wp_nav() ? quadplane.wp_nav->get_wp_bearing_to_destination() : 0;
+    } else {
+        bearing = nav_controller->target_bearing_cd() * 0.01;
+    }
+    return true;
+}
+
+bool Plane::get_wp_crosstrack_error_m(float &xtrack_error) const
+{
+    // see GCS_MAVLINK_Plane::send_nav_controller_output()
+    if (control_mode == &mode_manual) {
+        return false;
+    }
+    if (quadplane.in_vtol_mode()) {
+        xtrack_error = quadplane.using_wp_nav() ? quadplane.wp_nav->crosstrack_error() : 0;
+    } else {
+        xtrack_error = nav_controller->crosstrack_error();
+    }
+    return true;
+}
+
 
 // set target location (for use by scripting)
 bool Plane::set_target_location(const Location& target_loc)

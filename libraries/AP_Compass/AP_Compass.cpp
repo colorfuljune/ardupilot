@@ -6,6 +6,7 @@
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include <AP_Logger/AP_Logger.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
+#include <AP_ExternalAHRS/AP_ExternalAHRS.h>
 
 #include "AP_Compass_SITL.h"
 #include "AP_Compass_AK8963.h"
@@ -28,6 +29,9 @@
 #include "AP_Compass_RM3100.h"
 #if HAL_MSP_COMPASS_ENABLED
 #include "AP_Compass_MSP.h"
+#endif
+#if HAL_EXTERNAL_AHRS_ENABLED
+#include "AP_Compass_ExternalAHRS.h"
 #endif
 #include "AP_Compass.h"
 #include "Compass_learn.h"
@@ -488,7 +492,7 @@ const AP_Param::GroupInfo Compass::var_info[] = {
     // @Param: TYPEMASK
     // @DisplayName: Compass disable driver type mask
     // @Description: This is a bitmask of driver types to disable. If a driver type is set in this mask then that driver will not try to find a sensor at startup
-    // @Bitmask: 0:HMC5883,1:LSM303D,2:AK8963,3:BMM150,4:LSM9DS1,5:LIS3MDL,6:AK09916,7:IST8310,8:ICM20948,9:MMC3416,11:UAVCAN,12:QMC5883,14:MAG3110,15:IST8308
+    // @Bitmask: 0:HMC5883,1:LSM303D,2:AK8963,3:BMM150,4:LSM9DS1,5:LIS3MDL,6:AK09916,7:IST8310,8:ICM20948,9:MMC3416,11:UAVCAN,12:QMC5883,14:MAG3110,15:IST8308,16:RM3100,17:MSP,18:ExternalAHRS
     // @User: Advanced
     AP_GROUPINFO("TYPEMASK", 33, Compass, _driver_type_mask, 0),
 
@@ -1014,6 +1018,8 @@ bool Compass::_have_i2c_driver(uint8_t bus, uint8_t address) const
 void Compass::_probe_external_i2c_compasses(void)
 {
     bool all_external = (AP_BoardConfig::get_board_type() == AP_BoardConfig::PX4_BOARD_PIXHAWK2);
+
+#if !defined(HAL_DISABLE_I2C_MAGS_BY_DEFAULT) || defined(HAL_USE_I2C_MAG_HMC5843)
     // external i2c bus
     FOREACH_I2C_EXTERNAL(i) {
         ADD_BACKEND(DRIVER_HMC5843, AP_Compass_HMC5843::probe(GET_I2C_DEVICE(i, HAL_COMPASS_HMC5843_I2C_ADDR),
@@ -1028,7 +1034,9 @@ void Compass::_probe_external_i2c_compasses(void)
                         all_external, all_external?ROTATION_ROLL_180:ROTATION_YAW_270));
         }
     }
+#endif
 
+#if !defined(HAL_DISABLE_I2C_MAGS_BY_DEFAULT) || defined(HAL_USE_I2C_MAG_QMC5883L)
     //external i2c bus
     FOREACH_I2C_EXTERNAL(i) {
         ADD_BACKEND(DRIVER_QMC5883L, AP_Compass_QMC5883L::probe(GET_I2C_DEVICE(i, HAL_COMPASS_QMC5883L_I2C_ADDR),
@@ -1044,6 +1052,7 @@ void Compass::_probe_external_i2c_compasses(void)
                         all_external?HAL_COMPASS_QMC5883L_ORIENTATION_EXTERNAL:HAL_COMPASS_QMC5883L_ORIENTATION_INTERNAL));
         }
     }
+#endif
 
 #ifndef HAL_BUILD_AP_PERIPH
     // AK09916 on ICM20948
@@ -1060,6 +1069,7 @@ void Compass::_probe_external_i2c_compasses(void)
     }
 #endif // HAL_BUILD_AP_PERIPH
 
+#if !defined(HAL_DISABLE_I2C_MAGS_BY_DEFAULT) || defined(HAL_USE_I2C_MAG_LIS3MDL)
     // lis3mdl on bus 0 with default address
     FOREACH_I2C_INTERNAL(i) {
         ADD_BACKEND(DRIVER_LIS3MDL, AP_Compass_LIS3MDL::probe(GET_I2C_DEVICE(i, HAL_COMPASS_LIS3MDL_I2C_ADDR),
@@ -1083,7 +1093,9 @@ void Compass::_probe_external_i2c_compasses(void)
         ADD_BACKEND(DRIVER_LIS3MDL, AP_Compass_LIS3MDL::probe(GET_I2C_DEVICE(i, HAL_COMPASS_LIS3MDL_I2C_ADDR2),
                     true, ROTATION_YAW_90));
     }
+#endif
 
+#if !defined(HAL_DISABLE_I2C_MAGS_BY_DEFAULT) || defined(HAL_USE_I2C_MAG_AK09916)
     // AK09916. This can be found twice, due to the ICM20948 i2c bus pass-thru, so we need to be careful to avoid that
     FOREACH_I2C_EXTERNAL(i) {
         ADD_BACKEND(DRIVER_AK09916, AP_Compass_AK09916::probe(GET_I2C_DEVICE(i, HAL_COMPASS_AK09916_I2C_ADDR),
@@ -1093,7 +1105,9 @@ void Compass::_probe_external_i2c_compasses(void)
         ADD_BACKEND(DRIVER_AK09916, AP_Compass_AK09916::probe(GET_I2C_DEVICE(i, HAL_COMPASS_AK09916_I2C_ADDR),
                     all_external, all_external?ROTATION_YAW_270:ROTATION_NONE));
     }
+#endif
 
+#if !defined(HAL_DISABLE_I2C_MAGS_BY_DEFAULT) || defined(HAL_USE_I2C_MAG_IST8310)
     // IST8310 on external and internal bus
     if (AP_BoardConfig::get_board_type() != AP_BoardConfig::PX4_BOARD_FMUV5 &&
         AP_BoardConfig::get_board_type() != AP_BoardConfig::PX4_BOARD_FMUV6) {
@@ -1118,13 +1132,17 @@ void Compass::_probe_external_i2c_compasses(void)
             }
         }
     }
+#endif
 
+#if !defined(HAL_DISABLE_I2C_MAGS_BY_DEFAULT) || defined(HAL_USE_I2C_MAG_IST8308)
     // external i2c bus
     FOREACH_I2C_EXTERNAL(i) {
         ADD_BACKEND(DRIVER_IST8308, AP_Compass_IST8308::probe(GET_I2C_DEVICE(i, HAL_COMPASS_IST8308_I2C_ADDR),
                     true, ROTATION_NONE));
     }
+#endif
 
+#if !defined(HAL_DISABLE_I2C_MAGS_BY_DEFAULT) || defined(HAL_USE_I2C_MAG_RM3100)
 #ifdef HAL_COMPASS_RM3100_I2C_ADDR
     const uint8_t rm3100_addresses[] = { HAL_COMPASS_RM3100_I2C_ADDR };
 #else
@@ -1140,11 +1158,23 @@ void Compass::_probe_external_i2c_compasses(void)
             ADD_BACKEND(DRIVER_RM3100, AP_Compass_RM3100::probe(GET_I2C_DEVICE(i, rm3100_addresses[j]), true, ROTATION_NONE));
         }
     }
+
     FOREACH_I2C_INTERNAL(i) {
         for (uint8_t j=0; j<ARRAY_SIZE(rm3100_addresses); j++) {
             ADD_BACKEND(DRIVER_RM3100, AP_Compass_RM3100::probe(GET_I2C_DEVICE(i, rm3100_addresses[j]), all_external, ROTATION_NONE));
         }
     }
+#endif
+
+#if !defined(HAL_DISABLE_I2C_MAGS_BY_DEFAULT) && !defined(STM32F1)
+    // BMM150 on I2C, not on F1 to save flash
+    FOREACH_I2C_EXTERNAL(i) {
+        for (uint8_t addr=BMM150_I2C_ADDR_MIN; addr <= BMM150_I2C_ADDR_MAX; addr++) {
+            ADD_BACKEND(DRIVER_BMM150,
+                        AP_Compass_BMM150::probe(GET_I2C_DEVICE(i, addr), true, ROTATION_NONE));
+        }
+    }
+#endif // HAL_BUILD_AP_PERIPH
 }
 
 /*
@@ -1159,6 +1189,12 @@ void Compass::_detect_backends(void)
     }
 #endif
 
+#if HAL_EXTERNAL_AHRS_ENABLED
+    if (int8_t serial_port = AP::externalAHRS().get_port() >= 0) {
+        ADD_BACKEND(DRIVER_SERIAL, new AP_Compass_ExternalAHRS(serial_port));
+    }
+#endif
+    
 #if AP_FEATURE_BOARD_DETECT
     if (AP_BoardConfig::get_board_type() == AP_BoardConfig::PX4_BOARD_PIXHAWK2) {
         // default to disabling LIS3MDL on pixhawk2 due to hardware issue
@@ -1168,7 +1204,6 @@ void Compass::_detect_backends(void)
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
     ADD_BACKEND(DRIVER_SITL, new AP_Compass_SITL());
-    return;
 #endif
 
 #ifdef HAL_PROBE_EXTERNAL_I2C_COMPASSES
@@ -1209,7 +1244,7 @@ void Compass::_detect_backends(void)
 
     case AP_BoardConfig::PX4_BOARD_PCNC1:
         ADD_BACKEND(DRIVER_BMM150,
-                    AP_Compass_BMM150::probe(GET_I2C_DEVICE(0, 0x10), ROTATION_NONE));
+                    AP_Compass_BMM150::probe(GET_I2C_DEVICE(0, 0x10), false, ROTATION_NONE));
         break;
     case AP_BoardConfig::VRX_BOARD_BRAIN54: {
         // external i2c bus
@@ -1511,7 +1546,7 @@ Compass::read(void)
     }
 #endif
 #ifndef HAL_NO_LOGGING
-    if (any_healthy && _log_bit != (uint32_t)-1 && AP::logger().should_log(_log_bit) && !AP::ahrs().have_ekf_logging()) {
+    if (any_healthy && _log_bit != (uint32_t)-1 && AP::logger().should_log(_log_bit)) {
         AP::logger().Write_Compass();
     }
 #endif
@@ -1971,6 +2006,18 @@ void Compass::handle_msp(const MSP::msp_compass_data_message_t &pkt)
     }
 }
 #endif // HAL_MSP_COMPASS_ENABLED
+
+#if HAL_EXTERNAL_AHRS_ENABLED
+void Compass::handle_external(const AP_ExternalAHRS::mag_data_message_t &pkt)
+{
+    if (!_driver_enabled(DRIVER_SERIAL)) {
+        return;
+    }
+    for (uint8_t i=0; i<_backend_count; i++) {
+        _backends[i]->handle_external(pkt);
+    }
+}
+#endif // HAL_EXTERNAL_AHRS_ENABLED
 
 // singleton instance
 Compass *Compass::_singleton;

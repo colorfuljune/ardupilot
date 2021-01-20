@@ -29,7 +29,7 @@ const AP_Param::GroupInfo AC_Autorotation::var_info[] = {
     AP_GROUPINFO_FLAGS("ENABLE", 1, AC_Autorotation, _param_enable, 0, AP_PARAM_FLAG_ENABLE),
 
     // @Param: HS_P
-    // @DisplayName: P gain for head spead controller
+    // @DisplayName: P gain for head speed controller
     // @Description: Increase value to increase sensitivity of head speed controller during autonomous autorotation.
     // @Range: 0.3 1
     // @Increment: 0.01
@@ -119,8 +119,7 @@ const AP_Param::GroupInfo AC_Autorotation::var_info[] = {
 };
 
 // Constructor
-AC_Autorotation::AC_Autorotation(AP_InertialNav& inav) :
-    _inav(inav),
+AC_Autorotation::AC_Autorotation() :
     _p_hs(HS_CONTROLLER_HEADSPEED_P),
     _p_fw_vel(AP_FW_VEL_P)
     {

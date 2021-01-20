@@ -3,18 +3,8 @@
 
 bool ModeLoiter::_enter()
 {
-    plane.throttle_allows_nudging = true;
-    plane.auto_throttle_mode = true;
-    plane.auto_navigation_mode = true;
     plane.do_loiter_at_location();
     plane.loiter_angle_reset();
-
-#if SOARING_ENABLED == ENABLED
-    if (plane.g2.soaring_controller.is_active()) {
-        plane.g2.soaring_controller.init_thermalling();
-        plane.g2.soaring_controller.get_target(plane.next_WP_loc); // ahead on flight path
-    }
-#endif
 
     return true;
 }

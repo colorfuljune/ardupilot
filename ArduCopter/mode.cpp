@@ -121,7 +121,7 @@ Mode *Copter::mode_from_mode_num(const Mode::Number mode)
             break;
 #endif
 
-#if ADSB_ENABLED == ENABLED
+#if HAL_ADSB_ENABLED
         case Mode::Number::AVOID_ADSB:
             ret = &mode_avoid_adsb;
             break;
@@ -280,7 +280,7 @@ bool Copter::set_mode(Mode::Number mode, ModeReason reason)
     logger.Write_Mode((uint8_t)control_mode, reason);
     gcs().send_message(MSG_HEARTBEAT);
 
-#if ADSB_ENABLED == ENABLED
+#if HAL_ADSB_ENABLED
     adsb.set_is_auto_mode((mode == Mode::Number::AUTO) || (mode == Mode::Number::RTL) || (mode == Mode::Number::GUIDED));
 #endif
 
@@ -502,7 +502,7 @@ void Mode::make_safe_spool_down()
     case AP_Motors::SpoolState::SHUT_DOWN:
     case AP_Motors::SpoolState::GROUND_IDLE:
         // relax controllers during idle states
-        attitude_control->reset_rate_controller_I_terms();
+        attitude_control->reset_rate_controller_I_terms_smoothly();
         attitude_control->set_yaw_target_to_current_heading();
         break;
 

@@ -54,7 +54,7 @@ void Plane::throttle_slew_limit(SRV_Channel::Aux_servo_function_t func)
 bool Plane::suppress_throttle(void)
 {
 #if PARACHUTE == ENABLED
-    if (auto_throttle_mode && parachute.release_initiated()) {
+    if (control_mode->does_auto_throttle() && parachute.release_initiated()) {
         // throttle always suppressed in auto-throttle modes after parachute release initiated
         throttle_suppressed = true;
         return true;
@@ -69,7 +69,7 @@ bool Plane::suppress_throttle(void)
         // we've previously met a condition for unsupressing the throttle
         return false;
     }
-    if (!auto_throttle_mode) {
+    if (!control_mode->does_auto_throttle()) {
         // the user controls the throttle
         throttle_suppressed = false;
         return false;
@@ -169,10 +169,6 @@ void Plane::channel_function_mixer(SRV_Channel::Aux_servo_function_t func1_in, S
  */
 void Plane::flaperon_update(int8_t flap_percent)
 {
-    if (!SRV_Channels::function_assigned(SRV_Channel::k_flaperon_left) &&
-        !SRV_Channels::function_assigned(SRV_Channel::k_flaperon_right)) {
-        return;
-    }
     /*
       flaperons are implemented as a mixer between aileron and a
       percentage of flaps. Flap input can come from a manual channel
@@ -194,11 +190,6 @@ void Plane::flaperon_update(int8_t flap_percent)
  */
 void Plane::dspoiler_update(void)
 {
-    // just check we have a left dspoiler, and if so calculate all outputs
-    if (!SRV_Channels::function_assigned(SRV_Channel::k_dspoilerLeft1)) {
-        return;
-    }
-
     const int8_t bitmask = g2.crow_flap_options.get();
     const bool flying_wing       = (bitmask & CrowFlapOptions::FLYINGWING) != 0;
     const bool full_span_aileron = (bitmask & CrowFlapOptions::FULLSPAN) != 0;
@@ -548,7 +539,7 @@ void Plane::set_servos_controlled(void)
             SRV_Channels::set_output_scaled(SRV_Channel::k_throttle,
                                             constrain_int16(get_throttle_input(true), min_throttle, max_throttle));
         }
-    } else if ((control_mode == &mode_guided || control_mode == &mode_avoidADSB) &&
+    } else if (control_mode->is_guided_mode() &&
                guided_throttle_passthru) {
         // manual pass through of throttle while in GUIDED
         SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, get_throttle_input(true));
@@ -588,7 +579,7 @@ void Plane::set_servos_flaps(void)
         manual_flap_percent = channel_flap->percent_input();
     }
 
-    if (auto_throttle_mode) {
+    if (control_mode->does_auto_throttle()) {
         int16_t flapSpeedSource = 0;
         if (ahrs.airspeed_sensor_enabled()) {
             flapSpeedSource = target_airspeed_cm * 0.01f;
@@ -727,9 +718,38 @@ void Plane::servos_twin_engine_mix(void)
     }
 }
 
-
 /*
-  Set the flight control servos based on the current calculated values
+  Set throttle,attitude(in Attitude.cpp), and tilt servos for forced flare by RCx_OPTION switch for landing in FW mode
+  For Fixed Wind modes with manual throttle control only. Forces tilts up and throttle to THR_MIN.
+  Throttle stick must be in idle deadzone. This allows non-momentary switch to be used and quick bailouts
+  for go-arounds. Also helps prevent propstrike after landing with switch release on ground.
+*/
+void Plane::force_flare(void)
+{
+    if (!quadplane.in_transition() && !control_mode->is_vtol_mode() && !control_mode->does_auto_throttle() && channel_throttle->in_trim_dz() && flare_mode != FlareMode::FLARE_DISABLED) {
+        int32_t tilt = -SERVO_MAX;  //this is tilts up for a normal tiltrotor
+        if (quadplane.tilt.tilt_type == QuadPlane::TILT_TYPE_BICOPTER) {
+            tilt = 0; // this is tilts up for a Bicopter
+        }
+        if (quadplane.is_tailsitter()) {
+            tilt = SERVO_MAX; //this is tilts up for a tailsitter
+        }
+        SRV_Channels::set_output_scaled(SRV_Channel::k_motor_tilt, tilt);
+        SRV_Channels::set_output_scaled(SRV_Channel::k_tiltMotorLeft, tilt);
+        SRV_Channels::set_output_scaled(SRV_Channel::k_tiltMotorRight, tilt);
+        SRV_Channels::set_output_scaled(SRV_Channel::k_tiltMotorRear, tilt);
+        SRV_Channels::set_output_scaled(SRV_Channel::k_tiltMotorRearLeft, tilt);
+        SRV_Channels::set_output_scaled(SRV_Channel::k_tiltMotorRearRight, tilt);
+        float throttle_min = MAX(aparm.throttle_min.get(),0); //allows ICE to run if used but accounts for reverse thrust setups
+        if (arming.is_armed()) {  //prevent running motors if unarmed
+            SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, throttle_min);
+            SRV_Channels::set_output_scaled(SRV_Channel::k_throttleLeft, throttle_min);
+            SRV_Channels::set_output_scaled(SRV_Channel::k_throttleRight, throttle_min);
+        }
+     }
+}
+
+/* Set the flight control servos based on the current calculated values
 
   This function operates by first building up output values for
   channels using set_servo() and set_radio_out(). Using
@@ -810,8 +830,8 @@ void Plane::set_servos(void)
 
     // set airbrake outputs
     airbrake_update();
-    
-    if (auto_throttle_mode ||
+
+    if (control_mode->does_auto_throttle() ||
         quadplane.in_assisted_flight() ||
         quadplane.in_vtol_mode()) {
         /* only do throttle slew limiting in modes where throttle
@@ -885,7 +905,6 @@ void Plane::set_servos(void)
     servos_output();
 }
 
-
 /*
   run configured output mixer. This takes calculated servo_out values
   for each channel and calculates PWM values, then pushes them to
@@ -902,6 +921,9 @@ void Plane::servos_output(void)
     quadplane.tailsitter_output();
     quadplane.tiltrotor_bicopter();
 
+    // support forced flare option
+    force_flare();
+ 
     // run vtail and elevon mixers
     servo_output_mixers();
 
@@ -934,7 +956,7 @@ void Plane::update_throttle_hover() {
 void Plane::servos_auto_trim(void)
 {
     // only in auto modes and FBWA
-    if (!auto_throttle_mode && control_mode != &mode_fbwa) {
+    if (!control_mode->does_auto_throttle() && control_mode != &mode_fbwa) {
         return;
     }
     if (!hal.util->get_soft_armed()) {

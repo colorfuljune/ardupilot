@@ -55,14 +55,14 @@ void Sub::Log_Write_Attitude()
 {
     Vector3f targets = attitude_control.get_att_target_euler_cd();
     targets.z = wrap_360_cd(targets.z);
-    logger.Write_Attitude(targets);
+    ahrs.Write_Attitude(targets);
 
     AP::ahrs_navekf().Log_Write();
-    logger.Write_AHRS2();
+    ahrs.Write_AHRS2();
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
     sitl.Log_Write_SIMSTATE();
 #endif
-    logger.Write_POS();
+    ahrs.Write_POS();
 }
 
 struct PACKED log_MotBatt {
@@ -349,11 +349,11 @@ void Sub::Log_Write_Control_Tuning() {}
 void Sub::Log_Write_Performance() {}
 void Sub::Log_Write_Attitude(void) {}
 void Sub::Log_Write_MotBatt() {}
-void Sub::Log_Write_Data(uint8_t id, int32_t value) {}
-void Sub::Log_Write_Data(uint8_t id, uint32_t value) {}
-void Sub::Log_Write_Data(uint8_t id, int16_t value) {}
-void Sub::Log_Write_Data(uint8_t id, uint16_t value) {}
-void Sub::Log_Write_Data(uint8_t id, float value) {}
+void Sub::Log_Write_Data(LogDataID id, int32_t value) {}
+void Sub::Log_Write_Data(LogDataID id, uint32_t value) {}
+void Sub::Log_Write_Data(LogDataID id, int16_t value) {}
+void Sub::Log_Write_Data(LogDataID id, uint16_t value) {}
+void Sub::Log_Write_Data(LogDataID id, float value) {}
 void Sub::Log_Sensor_Health() {}
 void Sub::Log_Write_GuidedTarget(uint8_t target_type, const Vector3f& pos_target, const Vector3f& vel_target) {}
 void Sub::Log_Write_Vehicle_Startup_Messages() {}

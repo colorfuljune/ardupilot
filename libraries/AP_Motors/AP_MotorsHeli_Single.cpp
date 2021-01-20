@@ -161,7 +161,7 @@ void AP_MotorsHeli_Single::set_update_rate( uint16_t speed_hz )
 // init_outputs - initialise Servo/PWM ranges and endpoints
 bool AP_MotorsHeli_Single::init_outputs()
 {
-    if (!_flags.initialised_ok) {
+    if (!initialised_ok()) {
         // map primary swash servos
         for (uint8_t i=0; i<AP_MOTORS_HELI_SINGLE_NUM_SWASHPLATE_SERVOS; i++) {
             add_motor_num(CH_1+i);
@@ -215,7 +215,7 @@ bool AP_MotorsHeli_Single::init_outputs()
     // yaw servo is an angle from -4500 to 4500
     SRV_Channels::set_angle(SRV_Channel::k_motor4, YAW_SERVO_MAX_ANGLE);
 
-    _flags.initialised_ok = true;
+    set_initialised_ok(true);
 
     return true;
 }
@@ -294,7 +294,7 @@ void AP_MotorsHeli_Single::calculate_armed_scalars()
         _heliflags.save_rsc_mode = true;
     }
     // saves rsc mode parameter when disarmed if it had been reset while armed
-    if (_heliflags.save_rsc_mode && !_flags.armed) {
+    if (_heliflags.save_rsc_mode && !armed()) {
         _main_rotor._rsc_mode.save();
         _heliflags.save_rsc_mode = false;
     }
@@ -373,7 +373,7 @@ uint16_t AP_MotorsHeli_Single::get_motor_mask()
         mask |= 1U << AP_MOTORS_HELI_SINGLE_TAILRSC;
     }
 
-    return rc_map_mask(mask);
+    return motor_mask_to_srv_channel_mask(mask);
 }
 
 // update_motor_controls - sends commands to motor controllers
@@ -408,9 +408,6 @@ void AP_MotorsHeli_Single::move_actuators(float roll_out, float pitch_out, float
     float yaw_offset = 0.0f;
 
     // initialize limits flag
-    limit.roll = false;
-    limit.pitch = false;
-    limit.yaw = false;
     limit.throttle_lower = false;
     limit.throttle_upper = false;
 
@@ -447,7 +444,18 @@ void AP_MotorsHeli_Single::move_actuators(float roll_out, float pitch_out, float
     if (_heliflags.landing_collective && collective_out < _collective_mid_pct && !_heliflags.in_autorotation) {
         collective_out = _collective_mid_pct;
         limit.throttle_lower = true;
+
     }
+
+    // updates below mid collective flag
+    if (collective_out <= _collective_mid_pct) {
+        _heliflags.below_mid_collective = true;
+    } else {
+        _heliflags.below_mid_collective = false;
+    }
+
+    // updates takeoff collective flag based on 50% hover collective
+    update_takeoff_collective_flag(collective_out);
 
     // if servo output not in manual mode and heli is not in autorotation, process pre-compensation factors
     if (_servo_mode == SERVO_CONTROL_MODE_AUTOMATED && !_heliflags.in_autorotation) {
@@ -503,7 +511,7 @@ void AP_MotorsHeli_Single::move_yaw(float yaw_out)
 
 void AP_MotorsHeli_Single::output_to_motors()
 {
-    if (!_flags.initialised_ok) {
+    if (!initialised_ok()) {
         return;
     }
 
