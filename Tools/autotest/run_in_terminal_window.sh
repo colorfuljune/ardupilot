@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Try to run a command in an appropriate type of terminal window
 # depending on whats available
@@ -28,8 +28,13 @@ if [ -n "$SITL_RITW_TERMINAL" ]; then
   printf "%q " "$@" >>"$FILEPATH"
   chmod +x "$FILEPATH"
   $SITL_RITW_TERMINAL "$FILEPATH" &
+elif [ -n "$TMUX" ]; then
+  # tmux starts the pane's command from the *server's* environment, and parents
+  # it to the server, so sim_vehicle.py's cleanup paths do not reach it. Poll 
+  # whether sim_vehicle.py has died and if so close yourself too.
+  tmux new-window -dn "$name" "$TMUX_PREFIX $* & c=\$!; while kill -0 $PPID 2>/dev/null && kill -0 \$c 2>/dev/null; do sleep 1; done; kill \$c 2>/dev/null"
 elif [ -n "$DISPLAY" -a -n "$(which osascript)" ]; then
-  osascript -e 'tell application "Terminal" to do script "'"$* "'"'
+  osascript -e 'tell application "Terminal" to do script "'"cd $(pwd) && clear && $* "'"'
 elif [ -n "$DISPLAY" -a -n "$(which xterm)" ]; then
   if [ $SITL_RITW_MINIMIZE -eq 1 ]; then
       ICONIC=-iconic
@@ -41,9 +46,15 @@ elif [ -n "$DISPLAY" -a -n "$(which gnome-terminal)" ]; then
   gnome-terminal -e "$*"
 elif [ -n "$STY" ]; then
   # We are running inside of screen, try to start it there
-  screen -X screen -t "$name" $*
+  screen -X screen -t "$name" bash -c "cd $PWD; $*"
+elif [ -n "$ZELLIJ" ]; then
+  # Create a new pane to run
+  zellij run -n "$name" -- "$1" "${@:2}"
+elif [ -n "$(which mintty 2>/dev/null)" ]; then
+  # Cygwin native terminal - no X11 fonts required
+  mintty --hold always -T "$name" -e "$@" &
 else
-  filename="/tmp/$name.log"
+  filename="${TMPDIR:-/tmp}/$name.log"
   echo "RiTW: Window access not found, logging to $filename"
   cmd="$1"
   shift

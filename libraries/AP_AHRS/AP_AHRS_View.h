@@ -22,6 +22,10 @@
 
 #include "AP_AHRS.h"
 
+// fwd declarations to avoid include errors
+class AC_AttitudeControl;
+class AC_PosControl;
+
 class AP_AHRS_View
 {
 public:
@@ -29,7 +33,7 @@ public:
     AP_AHRS_View(AP_AHRS &ahrs, enum Rotation rotation, float pitch_trim_deg=0);
 
     // update state
-    void update(bool skip_ins_update=false);
+    void update();
 
     // empty virtual destructor
     virtual ~AP_AHRS_View() {}
@@ -54,6 +58,11 @@ public:
 
     // apply pitch trim
     void set_pitch_trim(float trim_deg);
+
+    // roll/pitch/yaw euler angles, all in radians
+    float get_roll_rad() const { return roll; }
+    float get_pitch_rad() const { return pitch; }
+    float get_yaw_rad() const { return yaw; }
 
     // helper trig value accessors
     float cos_roll() const {
@@ -80,20 +89,20 @@ public:
       wrappers around ahrs functions which pass-thru directly. See
       AP_AHRS.h for description of each function
      */
-    bool get_position(struct Location &loc) const WARN_IF_UNUSED {
-        return ahrs.get_position(loc);
+    bool get_location(Location &loc) const WARN_IF_UNUSED {
+        return ahrs.get_location(loc);
     }
 
-    Vector3f wind_estimate(void) {
-        return ahrs.wind_estimate();
+    bool get_wind(Vector3f &wind) {
+        return ahrs.get_wind(wind);
     }
 
-    bool airspeed_estimate(float &airspeed_ret) const WARN_IF_UNUSED {
-        return ahrs.airspeed_estimate(airspeed_ret);
+    bool airspeed_EAS(float &airspeed_ret) const WARN_IF_UNUSED {
+        return ahrs.airspeed_EAS(airspeed_ret);
     }
 
-    bool airspeed_estimate_true(float &airspeed_ret) const WARN_IF_UNUSED {
-        return ahrs.airspeed_estimate_true(airspeed_ret);
+    bool airspeed_TAS(float &airspeed_ret) const WARN_IF_UNUSED {
+        return ahrs.airspeed_TAS(airspeed_ret);
     }
 
     float get_EAS2TAS(void) const {
@@ -108,55 +117,51 @@ public:
         return ahrs.get_velocity_NED(vec);
     }
 
-    bool get_expected_mag_field_NED(Vector3f &ret) const WARN_IF_UNUSED {
-        return ahrs.get_expected_mag_field_NED(ret);
-    }
-
     bool get_relative_position_NED_home(Vector3f &vec) const WARN_IF_UNUSED {
         return ahrs.get_relative_position_NED_home(vec);
     }
 
-    bool get_relative_position_NED_origin(Vector3f &vec) const WARN_IF_UNUSED {
-        return ahrs.get_relative_position_NED_origin(vec);
+    bool get_relative_position_NED_origin_float(Vector3f &vec) const WARN_IF_UNUSED {
+        return ahrs.get_relative_position_NED_origin_float(vec);
     }
 
     bool get_relative_position_NE_home(Vector2f &vecNE) const WARN_IF_UNUSED {
         return ahrs.get_relative_position_NE_home(vecNE);
     }
 
-    bool get_relative_position_NE_origin(Vector2f &vecNE) const WARN_IF_UNUSED {
-        return ahrs.get_relative_position_NE_origin(vecNE);
+    bool get_relative_position_NE_origin_float(Vector2f &vecNE) const WARN_IF_UNUSED {
+        return ahrs.get_relative_position_NE_origin_float(vecNE);
     }
 
     void get_relative_position_D_home(float &posD) const {
         ahrs.get_relative_position_D_home(posD);
     }
 
-    bool get_relative_position_D_origin(float &posD) const WARN_IF_UNUSED {
-        return ahrs.get_relative_position_D_origin(posD);
+    bool get_relative_position_D_origin_float(float &posD) const WARN_IF_UNUSED {
+        return ahrs.get_relative_position_D_origin_float(posD);
     }
 
     float groundspeed(void) {
         return ahrs.groundspeed();
     }
 
-    const Vector3f &get_accel_ef_blended(void) const {
-        return ahrs.get_accel_ef_blended();
+    const Vector3f &get_accel_ef(void) const {
+        return ahrs.get_accel_ef();
     }
 
-    uint32_t getLastPosNorthEastReset(Vector2f &pos) WARN_IF_UNUSED {
-        return ahrs.getLastPosNorthEastReset(pos);
+    uint16_t get_position_NE_reset_count(void) WARN_IF_UNUSED {
+        return ahrs.get_position_NE_reset_count();
     }
 
-    uint32_t getLastPosDownReset(float &posDelta) WARN_IF_UNUSED {
-        return ahrs.getLastPosDownReset(posDelta);
+    uint16_t get_position_D_reset_count(void) WARN_IF_UNUSED {
+        return ahrs.get_position_D_reset_count();
     }
 
     // rotate a 2D vector from earth frame to body frame
     // in result, x is forward, y is right
     Vector2f earth_to_body2D(const Vector2f &ef_vector) const;
 
-    // rotate a 2D vector from earth frame to body frame
+    // rotate a 2D vector from body frame to earth frame
     // in input, x is forward, y is right
     Vector2f body_to_earth2D(const Vector2f &bf) const;
 
@@ -172,12 +177,28 @@ public:
         return ahrs.get_error_yaw();
     }
 
+    // Logging Functions
+    void Write_AttitudeView(const Vector3f &targets) const;    
+
     float roll;
     float pitch;
     float yaw;
     int32_t roll_sensor;
     int32_t pitch_sensor;
     int32_t yaw_sensor;
+
+
+    // get current rotation
+    // note that this may not be the rotation were actually using, see _pitch_trim_deg
+    enum Rotation get_rotation(void) const {
+        return rotation;
+    }
+
+    // get pitch trim (deg)
+    float get_pitch_trim() const { return _pitch_trim_deg; }
+
+    // Rotate vector from AHRS reference frame to AHRS view refences frame
+    void rotate(Vector3f &vec) const;
 
 private:
     const enum Rotation rotation;

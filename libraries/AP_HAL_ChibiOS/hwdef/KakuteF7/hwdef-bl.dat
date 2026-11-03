@@ -4,8 +4,8 @@
 # MCU class and specific type
 MCU STM32F7xx STM32F745xx
 
-# board ID for firmware load
-APJ_BOARD_ID 123
+# board ID. See Tools/AP_Bootloader/board_types.txt
+APJ_BOARD_ID TARGET_HW_KAKUTEF7
 
 # crystal frequency, setup to use external oscillator
 OSCILLATOR_HZ 8000000
@@ -37,9 +37,13 @@ PD15 BUZZER OUTPUT LOW PULLDOWN
 PA2 LED_BOOTLOADER OUTPUT LOW
 define HAL_LED_ON 0
 
-define HAL_USE_EMPTY_STORAGE 1
-define HAL_STORAGE_SIZE 16384
-
+# Motors for esc init
+PB1  PWMOUT1 OUTPUT LOW
+PE9  PWMOUT2 OUTPUT LOW
+PE11 PWMOUT3 OUTPUT LOW
+PB0  PWMOUT4 OUTPUT LOW
+PC9  PWMOUT5 OUTPUT LOW
+PA3  PWMOUT6 OUTPUT LOW
 
 # Add CS pins to ensure they are high in bootloader
 PA4 SDCARD_CS CS

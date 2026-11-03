@@ -27,18 +27,22 @@ local function write_to_dataflash()
 
   -- care must be taken when selecting a name, must be less than four characters and not clash with an existing log type
   -- format characters specify the type of variable to be logged, see AP_Logger/README.md
+  -- https://github.com/ArduPilot/ardupilot/tree/master/libraries/AP_Logger
   -- not all format types are supported by scripting only: i, L, e, f, n, M, B, I, E, and N
   -- lua automatically adds a timestamp in micro seconds
-  logger.write('SCR','roll(deg),pitch(deg),yaw(deg)','fff',interesting_data[roll],interesting_data[pitch],interesting_data[yaw])
+  logger:write('SCR1','roll(deg),pitch(deg),yaw(deg)','fff',interesting_data[roll],interesting_data[pitch],interesting_data[yaw])
+
+  -- it is also possible to give units and multipliers
+  logger:write('SCR2','roll,pitch,yaw','fff','ddd','---',interesting_data[roll],interesting_data[pitch],interesting_data[yaw])
 
 end
 
 function update()
 
   -- get some interesting data
-  interesting_data[roll] = math.deg(ahrs:get_roll())
-  interesting_data[pitch] = math.deg(ahrs:get_pitch())
-  interesting_data[yaw] = math.deg(ahrs:get_yaw())
+  interesting_data[roll] = math.deg(ahrs:get_roll_rad())
+  interesting_data[pitch] = math.deg(ahrs:get_pitch_rad())
+  interesting_data[yaw] = math.deg(ahrs:get_yaw_rad())
 
   -- write to then new file the SD card
   write_to_file()

@@ -14,6 +14,10 @@
  */
 #pragma once
 
+#include "AP_RangeFinder_config.h"
+
+#if AP_RANGEFINDER_PWM_ENABLED
+
 #include "AP_RangeFinder.h"
 #include "AP_RangeFinder_Backend.h"
 
@@ -22,8 +26,7 @@ class AP_RangeFinder_PWM : public AP_RangeFinder_Backend
 public:
     // constructor
     AP_RangeFinder_PWM(RangeFinder::RangeFinder_State &_state,
-                       AP_RangeFinder_Params &_params,
-                       float &_estimated_terrain_height);
+                       AP_RangeFinder_Params &_params);
 
     // destructor
     ~AP_RangeFinder_PWM(void) {};
@@ -36,15 +39,13 @@ public:
 
 protected:
 
-    bool get_reading(uint16_t &reading_cm);
+    bool get_reading(float &reading_m);
 
     MAV_DISTANCE_SENSOR _get_mav_distance_sensor_type() const override {
         return MAV_DISTANCE_SENSOR_UNKNOWN;
     }
 
 private:
-
-    int8_t last_warn_pin; // last pin used for reading pwm (used to recognise change in pin assignment)
 
     bool check_pin();
     void check_stop_pin();
@@ -53,10 +54,9 @@ private:
 
     AP_HAL::PWMSource pwm_source;
 
-    float &estimated_terrain_height;
-
     // return true if we are beyond the power saving range
-    bool out_of_range(void) const;
     bool was_out_of_range = -1; // this odd initialisation ensures we transition to new state
 
 };
+
+#endif  // AP_RANGEFINDER_PWM_ENABLED

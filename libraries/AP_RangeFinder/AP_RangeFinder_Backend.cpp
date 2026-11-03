@@ -13,6 +13,10 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "AP_RangeFinder_config.h"
+
+#if AP_RANGEFINDER_ENABLED
+
 #include <AP_Common/AP_Common.h>
 #include <AP_HAL/AP_HAL.h>
 #include "AP_RangeFinder.h"
@@ -47,36 +51,84 @@ RangeFinder::Status AP_RangeFinder_Backend::status() const {
 }
 
 // true if sensor is returning data
-bool AP_RangeFinder_Backend::has_data() const {
-    return ((state.status != RangeFinder::Status::NotConnected) &&
-            (state.status != RangeFinder::Status::NoData));
+bool AP_RangeFinder_Backend::has_data() const
+{
+    switch (state.status) {
+        case RangeFinder::Status::NotConnected:
+        case RangeFinder::Status::NoData:
+        case RangeFinder::Status::PoweredDown:
+            break;
+
+        case RangeFinder::Status::OutOfRangeLow:
+        case RangeFinder::Status::OutOfRangeHigh:
+        case RangeFinder::Status::Good:
+            return true;
+    }
+
+    return false;
 }
 
 // update status based on distance measurement
-void AP_RangeFinder_Backend::update_status()
+void AP_RangeFinder_Backend::update_status(RangeFinder::RangeFinder_State &state_arg) const
 {
     // check distance
-    if ((int16_t)state.distance_cm > params.max_distance_cm) {
-        set_status(RangeFinder::Status::OutOfRangeHigh);
-    } else if ((int16_t)state.distance_cm < params.min_distance_cm) {
-        set_status(RangeFinder::Status::OutOfRangeLow);
+    if (state_arg.distance_m > max_distance()) {
+        set_status(state_arg, RangeFinder::Status::OutOfRangeHigh);
+    } else if (state_arg.distance_m < min_distance()) {
+        set_status(state_arg, RangeFinder::Status::OutOfRangeLow);
     } else {
-        set_status(RangeFinder::Status::Good);
+        set_status(state_arg, RangeFinder::Status::Good);
     }
 }
 
 // set status and update valid count
-void AP_RangeFinder_Backend::set_status(RangeFinder::Status _status)
+void AP_RangeFinder_Backend::set_status(RangeFinder::RangeFinder_State &state_arg, RangeFinder::Status _status)
 {
-    state.status = _status;
+    state_arg.status = _status;
 
     // update valid count
     if (_status == RangeFinder::Status::Good) {
-        if (state.range_valid_count < 10) {
-            state.range_valid_count++;
+        if (state_arg.range_valid_count < 10) {
+            state_arg.range_valid_count++;
         }
     } else {
-        state.range_valid_count = 0;
+        state_arg.range_valid_count = 0;
     }
 }
 
+// get temperature reading in C.  returns true on success and populates temp argument
+// checks external temperature source first, then falls back to backend-specific reading
+bool AP_RangeFinder_Backend::get_temp(float &temp) const
+{
+#if AP_TEMPERATURE_SENSOR_ENABLED
+    if (state.temperature_valid && (AP_HAL::millis() - state.temperature_update_ms < 5000U)) {
+        temp = state.temperature_C;
+        return true;
+    }
+#endif
+    return _get_temp(temp);
+}
+
+// return true if rangefinder should be powered down
+bool AP_RangeFinder_Backend::should_power_down() const
+{
+    // Power saving range must be configured
+    if (params.powersave_range <= 0) {
+        return false;
+    }
+
+    // Must be above configured height
+    RangeFinder &frontend = *AP::rangefinder();
+    return frontend.estimated_terrain_height > params.powersave_range;
+}
+
+#if AP_SCRIPTING_ENABLED
+// get a copy of state structure
+void AP_RangeFinder_Backend::get_state(RangeFinder::RangeFinder_State &state_arg)
+{
+    WITH_SEMAPHORE(_sem);
+    state_arg = state;
+}
+#endif
+
+#endif  // AP_RANGEFINDER_ENABLED

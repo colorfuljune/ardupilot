@@ -27,7 +27,7 @@ function update()
     if pwm6 and pwm6 > 1800 then    -- check if RC6 input has moved high
       if (stage == 0) then          -- change to guided mode
         if (vehicle:set_mode(copter_guided_mode_num)) then  -- change to Guided mode
-          local yaw_rad = ahrs:get_yaw()
+          local yaw_rad = ahrs:get_yaw_rad()
           yaw_cos = math.cos(yaw_rad)
           yaw_sin = math.sin(yaw_rad)
           stage = stage + 1
@@ -38,7 +38,7 @@ function update()
         end
       elseif (stage == 2) then      -- Stage2: check if vehicle has reached target altitude
         local home = ahrs:get_home()
-        local curr_loc = ahrs:get_position()
+        local curr_loc = ahrs:get_location()
         if home and curr_loc then
           local vec_from_home = home:get_distance_NED(curr_loc)
           gcs:send_text(0, "alt above home: " .. tostring(math.floor(-vec_from_home:z())))

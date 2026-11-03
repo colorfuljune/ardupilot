@@ -12,12 +12,15 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+
+#include "AP_Compass_LSM303D.h"
+
+#if AP_COMPASS_LSM303D_ENABLED
+
 #include <utility>
 
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Math/AP_Math.h>
-
-#include "AP_Compass_LSM303D.h"
 
 extern const AP_HAL::HAL &hal;
 
@@ -124,7 +127,7 @@ extern const AP_HAL::HAL &hal;
 
 #define REG5_ENABLE_T           (1<<7)
 
-#define REG5_RES_HIGH_M         ((1<<6) | (1<<5))
+#define REG5_RES_HIGH_M         ((1<<6) | (1<<5) | (1<<7))
 #define REG5_RES_LOW_M          ((0<<6) | (0<<5))
 
 #define REG5_RATE_BITS_M        ((1<<4) | (1<<3) | (1<<2))
@@ -161,7 +164,7 @@ AP_Compass_Backend *AP_Compass_LSM303D::probe(AP_HAL::OwnPtr<AP_HAL::Device> dev
     if (!dev) {
         return nullptr;
     }
-    AP_Compass_LSM303D *sensor = new AP_Compass_LSM303D(std::move(dev));
+    AP_Compass_LSM303D *sensor = NEW_NOTHROW AP_Compass_LSM303D(std::move(dev));
     if (!sensor || !sensor->init(rotation)) {
         delete sensor;
         return nullptr;
@@ -222,7 +225,7 @@ bool AP_Compass_LSM303D::_read_sample()
     } rx;
 
     if (_register_read(ADDR_CTRL_REG7) != _reg7_expected) {
-        hal.console->printf("LSM303D _read_data_transaction_accel: _reg7_expected unexpected\n");
+        DEV_PRINTF("LSM303D _read_data_transaction_accel: _reg7_expected unexpected\n");
         return false;
     }
 
@@ -267,12 +270,11 @@ bool AP_Compass_LSM303D::init(enum Rotation rotation)
 
     /* register the compass instance in the frontend */
     _dev->set_device_type(DEVTYPE_LSM303D);
-    if (!register_compass(_dev->get_bus_id(), _compass_instance)) {
+    if (!register_compass(_dev->get_bus_id())) {
         return false;
     }
-    set_dev_id(_compass_instance, _dev->get_bus_id());
 
-    set_rotation(_compass_instance, rotation);
+    set_rotation(rotation);
 
     // read at 91Hz. We don't run at 100Hz as fetching data too fast can cause some very
     // odd periodic changes in the output data
@@ -316,7 +318,7 @@ bool AP_Compass_LSM303D::_hardware_init()
         }
     }
     if (tries == 5) {
-        hal.console->printf("Failed to boot LSM303D 5 times\n");
+        DEV_PRINTF("Failed to boot LSM303D 5 times\n");
         goto fail_tries;
     }
 
@@ -340,7 +342,7 @@ void AP_Compass_LSM303D::_update()
 
     Vector3f raw_field = Vector3f(_mag_x, _mag_y, _mag_z) * _mag_range_scale;
 
-    accumulate_sample(raw_field, _compass_instance, 10);
+    accumulate_sample(raw_field, 10);
 }
 
 // Read Sensor data
@@ -350,7 +352,7 @@ void AP_Compass_LSM303D::read()
         return;
     }
 
-    drain_accumulated_samples(_compass_instance);
+    drain_accumulated_samples();
 }
 
 void AP_Compass_LSM303D::_disable_i2c()
@@ -428,3 +430,5 @@ bool AP_Compass_LSM303D::_mag_set_samplerate(uint16_t frequency)
 
     return true;
 }
+
+#endif  // AP_COMPASS_LSM303D_ENABLED

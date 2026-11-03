@@ -15,11 +15,13 @@
 
 //  Novatel/Tersus/ComNav GPS driver for ArduPilot.
 //  Code by Michael Oborne
-//  Derived from http://www.novatel.com/assets/Documents/Manuals/om-20000129.pdf
+//  Derived from https://hexagondownloads.blob.core.windows.net/public/Novatel/assets/Documents/Manuals/om-20000129/om-20000129.pdf
 
 #include "AP_GPS.h"
 #include "AP_GPS_NOVA.h"
 #include <AP_Logger/AP_Logger.h>
+
+#if AP_GPS_NOVA_ENABLED
 
 extern const AP_HAL::HAL& hal;
 
@@ -38,26 +40,32 @@ do {                                            \
  # define Debug(fmt, args ...)
 #endif
 
-AP_GPS_NOVA::AP_GPS_NOVA(AP_GPS &_gps, AP_GPS::GPS_State &_state,
-                       AP_HAL::UARTDriver *_port) :
-    AP_GPS_Backend(_gps, _state, _port)
+AP_GPS_NOVA::AP_GPS_NOVA(AP_GPS &_gps,
+                         AP_GPS::Params &_params,
+                         AP_GPS::GPS_State &_state,
+                         AP_HAL::UARTDriver *_port) :
+    AP_GPS_Backend(_gps, _params, _state, _port)
 {
     nova_msg.nova_state = nova_msg_parser::PREAMBLE1;
 
-    const char *init_str = _initialisation_blob[0];
-    const char *init_str1 = _initialisation_blob[1];
-    
-    port->write((const uint8_t*)init_str, strlen(init_str));
-    port->write((const uint8_t*)init_str1, strlen(init_str1));
+    nova_msg.header.data[0] = NOVA_PREAMBLE1;
+    nova_msg.header.data[1] = NOVA_PREAMBLE2;
+    nova_msg.header.data[2] = NOVA_PREAMBLE3;
+
+    if (gps._auto_config != AP_GPS::GPS_AUTO_CONFIG_DISABLE) {
+        const char *init_str = _initialisation_blob[0];
+        const char *init_str1 = _initialisation_blob[1];
+
+        port->write((const uint8_t*)init_str, strlen(init_str));
+        port->write((const uint8_t*)init_str1, strlen(init_str1));
+    }
 }
 
-const char* const AP_GPS_NOVA::_initialisation_blob[6] {
+const char* const AP_GPS_NOVA::_initialisation_blob[4] {
     "\r\n\r\nunlogall\r\n", // cleanup enviroment
-    "log bestposb ontime 0.2 0 nohold\r\n", // get bestpos
-    "log bestvelb ontime 0.2 0 nohold\r\n", // get bestvel
-    "log psrdopb onchanged\r\n", // tersus
-    "log psrdopb ontime 0.2\r\n", // comnav
-    "log psrdopb\r\n" // poll message, as dop only changes when a sat is dropped/added to the visible list
+    "log bestposb ontime 0.2 0 nohold\r\n",
+    "log bestvelb ontime 0.2 0 nohold\r\n",
+    "log psrdopb ontime 0.2 0 nohold\r\n",
 };
 
 // Process all bytes available from the stream
@@ -65,21 +73,29 @@ const char* const AP_GPS_NOVA::_initialisation_blob[6] {
 bool
 AP_GPS_NOVA::read(void)
 {
-    uint32_t now = AP_HAL::millis();
+    if (gps._auto_config != AP_GPS::GPS_AUTO_CONFIG_DISABLE) {
+        const uint32_t now = AP_HAL::millis();
 
-    if (_init_blob_index < (sizeof(_initialisation_blob) / sizeof(_initialisation_blob[0]))) {
-        const char *init_str = _initialisation_blob[_init_blob_index];
+        if (_init_blob_index < (sizeof(_initialisation_blob) / sizeof(_initialisation_blob[0]))) {
+            const char *init_str = _initialisation_blob[_init_blob_index];
 
-        if (now > _init_blob_time) {
-            port->write((const uint8_t*)init_str, strlen(init_str));
-            _init_blob_time = now + 200;
-            _init_blob_index++;
+            if (now > _init_blob_time) {
+                port->write((const uint8_t*)init_str, strlen(init_str));
+                _init_blob_time = now + 200;
+                _init_blob_index++;
+            }
         }
     }
 
     bool ret = false;
-    while (port->available() > 0) {
-        uint8_t temp = port->read();
+    for (uint16_t i=0; i<8192; i++) {
+        uint8_t temp;
+        if (!port->read(temp)) {
+            break;
+        }
+#if AP_GPS_DEBUG_LOGGING_ENABLED
+        log_data(&temp, 1);
+#endif
         ret |= parse(temp);
     }
     
@@ -93,35 +109,27 @@ AP_GPS_NOVA::parse(uint8_t temp)
     {
         default:
         case nova_msg_parser::PREAMBLE1:
-            if (temp == NOVA_PREAMBLE1)
+            if (temp == NOVA_PREAMBLE1) {
                 nova_msg.nova_state = nova_msg_parser::PREAMBLE2;
+            }
             nova_msg.read = 0;
             break;
         case nova_msg_parser::PREAMBLE2:
-            if (temp == NOVA_PREAMBLE2)
-            {
+            if (temp == NOVA_PREAMBLE2) {
                 nova_msg.nova_state = nova_msg_parser::PREAMBLE3;
-            }
-            else
-            {
+            } else {
                 nova_msg.nova_state = nova_msg_parser::PREAMBLE1;
             }
             break;
         case nova_msg_parser::PREAMBLE3:
-            if (temp == NOVA_PREAMBLE3)
-            {
+            if (temp == NOVA_PREAMBLE3) {
                 nova_msg.nova_state = nova_msg_parser::HEADERLENGTH;
-            }
-            else
-            {
+            } else {
                 nova_msg.nova_state = nova_msg_parser::PREAMBLE1;
             }
             break;
         case nova_msg_parser::HEADERLENGTH:
             Debug("NOVA HEADERLENGTH\n");
-            nova_msg.header.data[0] = NOVA_PREAMBLE1;
-            nova_msg.header.data[1] = NOVA_PREAMBLE2;
-            nova_msg.header.data[2] = NOVA_PREAMBLE3;
             nova_msg.header.data[3] = temp;
             nova_msg.header.nova_headeru.headerlength = temp;
             nova_msg.nova_state = nova_msg_parser::HEADERDATA;
@@ -135,8 +143,7 @@ AP_GPS_NOVA::parse(uint8_t temp)
             }
             nova_msg.header.data[nova_msg.read] = temp;
             nova_msg.read++;
-            if (nova_msg.read >= nova_msg.header.nova_headeru.headerlength)
-            {
+            if (nova_msg.read >= nova_msg.header.nova_headeru.headerlength) {
                 nova_msg.nova_state = nova_msg_parser::DATA;
             }
             break;
@@ -148,8 +155,7 @@ AP_GPS_NOVA::parse(uint8_t temp)
             }
             nova_msg.data.bytes[nova_msg.read - nova_msg.header.nova_headeru.headerlength] = temp;
             nova_msg.read++;
-            if (nova_msg.read >= (nova_msg.header.nova_headeru.messagelength + nova_msg.header.nova_headeru.headerlength))
-            {
+            if (nova_msg.read >= (nova_msg.header.nova_headeru.messagelength + nova_msg.header.nova_headeru.headerlength)) {
                 Debug("NOVA DATA exit\n");
                 nova_msg.nova_state = nova_msg_parser::CRC1;
             }
@@ -170,15 +176,12 @@ AP_GPS_NOVA::parse(uint8_t temp)
             nova_msg.crc += (uint32_t) (temp << 24);
             nova_msg.nova_state = nova_msg_parser::PREAMBLE1;
 
-            uint32_t crc = CalculateBlockCRC32((uint32_t)nova_msg.header.nova_headeru.headerlength, (uint8_t *)&nova_msg.header.data, (uint32_t)0);
-            crc = CalculateBlockCRC32((uint32_t)nova_msg.header.nova_headeru.messagelength, (uint8_t *)&nova_msg.data, crc);
+            uint32_t crc = crc_crc32((uint32_t)0, (uint8_t *)&nova_msg.header.data, (uint32_t)nova_msg.header.nova_headeru.headerlength);
+            crc = crc_crc32(crc, (uint8_t *)&nova_msg.data, (uint32_t)nova_msg.header.nova_headeru.messagelength);
 
-            if (nova_msg.crc == crc)
-            {
+            if (nova_msg.crc == crc) {
                 return process_message();
-            }
-            else
-            {
+            } else {
                 Debug("crc failed");
                 crc_error_counter++;
             }
@@ -191,14 +194,14 @@ AP_GPS_NOVA::parse(uint8_t temp)
 bool
 AP_GPS_NOVA::process_message(void)
 {
-    uint16_t messageid = nova_msg.header.nova_headeru.messageid;
+    const uint16_t messageid = nova_msg.header.nova_headeru.messageid;
 
     Debug("NOVA process_message messid=%u\n",messageid);
 
     check_new_itow(nova_msg.header.nova_headeru.tow, nova_msg.header.nova_headeru.messagelength + nova_msg.header.nova_headeru.headerlength);
-    
-    if (messageid == 42) // bestpos
-    {
+ 
+    switch (messageid) {
+    case NOVA_BESTPOS: {  // bestpos
         const bestpos &bestposu = nova_msg.data.bestposu;
 
         state.time_week = nova_msg.header.nova_headeru.week;
@@ -207,11 +210,13 @@ AP_GPS_NOVA::process_message(void)
 
         state.location.lat = (int32_t) (bestposu.lat * (double)1e7);
         state.location.lng = (int32_t) (bestposu.lng * (double)1e7);
-        state.location.alt = (int32_t) (bestposu.hgt * 100);
+        state.have_undulation = true;
+        state.undulation = -bestposu.undulation;
+        set_alt_amsl_cm(state, bestposu.hgt * 100);
 
         state.num_sats = bestposu.svsused;
 
-        state.horizontal_accuracy = (float) ((bestposu.latsdev + bestposu.lngsdev)/2);
+        state.horizontal_accuracy =  norm(bestposu.latsdev, bestposu.lngsdev);
         state.vertical_accuracy = (float) bestposu.hgtsdev;
         state.have_horizontal_accuracy = true;
         state.have_vertical_accuracy = true;
@@ -223,42 +228,39 @@ AP_GPS_NOVA::process_message(void)
             switch (bestposu.postype)
             {
                 case 16:
-                    state.status = AP_GPS::GPS_OK_FIX_3D;
+                    state.status = AP_GPS_FixType::FIX_3D;
                     break;
                 case 17: // psrdiff
                 case 18: // waas
                 case 20: // omnistar
                 case 68: // ppp_converg
                 case 69: // ppp
-                    state.status = AP_GPS::GPS_OK_FIX_3D_DGPS;
+                    state.status = AP_GPS_FixType::DGPS;
                     break;
                 case 32: // l1 float
                 case 33: // iono float
                 case 34: // narrow float
-                    state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FLOAT;
+                    state.status = AP_GPS_FixType::RTK_FLOAT;
                     break;
                 case 48: // l1 int
                 case 50: // narrow int
-                    state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FIXED;
+                    state.status = AP_GPS_FixType::RTK_FIXED;
                     break;
                 case 0: // NONE
                 case 1: // FIXEDPOS
                 case 2: // FIXEDHEIGHT
                 default:
-                    state.status = AP_GPS::NO_FIX;
+                    state.status = AP_GPS_FixType::NONE;
                     break;
             }
-        }
-        else
-        {
-            state.status = AP_GPS::NO_FIX;
+        } else {
+            state.status = AP_GPS_FixType::NONE;
         }
         
         _new_position = true;
+        break;
     }
-
-    if (messageid == 99) // bestvel
-    {
+    case NOVA_BESTVEL: {  // bestvel
         const bestvel &bestvelu = nova_msg.data.bestvelu;
 
         state.ground_speed = (float) bestvelu.horspd;
@@ -269,15 +271,17 @@ AP_GPS_NOVA::process_message(void)
         
         _last_vel_time = (uint32_t) nova_msg.header.nova_headeru.tow;
         _new_speed = true;
+        break;
     }
-
-    if (messageid == 174) // psrdop
-    {
+    case NOVA_PSRDOP: {  // psrdop
         const psrdop &psrdopu = nova_msg.data.psrdopu;
 
         state.hdop = (uint16_t) (psrdopu.hdop*100);
         state.vdop = (uint16_t) (psrdopu.htdop*100);
         return false;
+    }
+    default:
+        break;
     }
 
     // ensure out position and velocity stay insync
@@ -290,37 +294,4 @@ AP_GPS_NOVA::process_message(void)
     return false;
 }
 
-void
-AP_GPS_NOVA::inject_data(const uint8_t *data, uint16_t len)
-{
-    if (port->txspace() > len) {
-        last_injected_data_ms = AP_HAL::millis();
-        port->write(data, len);
-    } else {
-        Debug("NOVA: Not enough TXSPACE");
-    }
-}
-
-#define CRC32_POLYNOMIAL 0xEDB88320L
-uint32_t AP_GPS_NOVA::CRC32Value(uint32_t icrc)
-{
-    int i;
-    uint32_t crc = icrc;
-    for ( i = 8 ; i > 0; i-- )
-    {
-        if ( crc & 1 )
-            crc = ( crc >> 1 ) ^ CRC32_POLYNOMIAL;
-        else
-            crc >>= 1;
-    }
-    return crc;
-}
-
-uint32_t AP_GPS_NOVA::CalculateBlockCRC32(uint32_t length, uint8_t *buffer, uint32_t crc)
-{
-    while ( length-- != 0 )
-    {
-        crc = ((crc >> 8) & 0x00FFFFFFL) ^ (CRC32Value(((uint32_t) crc ^ *buffer++) & 0xff));
-    }
-    return( crc );
-}
+#endif

@@ -31,23 +31,23 @@ class MultiCopter : public Aircraft {
 public:
     MultiCopter(const char *frame_str);
 
+    ~MultiCopter() {
+        delete frame;
+    }
+
     /* update model by one time step */
     void update(const struct sitl_input &input) override;
 
-    // get motor offset for model
-    virtual uint16_t get_motors_offset() const override {
-        return frame->motor_offset;
-    }
-
     /* static object creator */
     static Aircraft *create(const char *frame_str) {
-        return new MultiCopter(frame_str);
+        return NEW_NOTHROW MultiCopter(frame_str);
     }
 
 protected:
     // calculate rotational and linear accelerations
     void calculate_forces(const struct sitl_input &input, Vector3f &rot_accel, Vector3f &body_accel);
     Frame *frame;
+    void update_battery() override;
 };
 
 }

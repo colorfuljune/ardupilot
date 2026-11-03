@@ -1,19 +1,17 @@
 // -*- tab-width: 4; Mode: C++; c-basic-offset: 4; indent-tabs-mode: nil -*-
 #pragma once
 
-#include <AP_Common/AP_Common.h>
-#include <AP_HAL/AP_HAL.h>
-#include <GCS_MAVLink/GCS.h>
-#include <SRV_Channel/SRV_Channel.h>
+#include "AP_Generator_config.h"
 
+#if AP_GENERATOR_RICHENPOWER_ENABLED
+
+#include "AP_Generator_Backend.h"
+
+#include <AP_Logger/AP_Logger_config.h>
+#include <AP_Common/AP_Common.h>
 #include <stdint.h>
 #include <stdio.h>
 
-#ifndef GENERATOR_ENABLED
-#define GENERATOR_ENABLED !HAL_MINIMIZE_FEATURES
-#endif
-
-#if GENERATOR_ENABLED
 
 /*
  *  Example setup:
@@ -23,49 +21,39 @@
  *  param set SERVO8_FUNCTION 42   # autopilot directive to generator
  */
 
-class AP_Generator_RichenPower
+class AP_Generator_RichenPower : public AP_Generator_Backend
 {
 
 public:
-
-    AP_Generator_RichenPower();
-
-    /* Do not allow copies */
-    AP_Generator_RichenPower(const AP_Generator_RichenPower &other) = delete;
-    AP_Generator_RichenPower &operator=(const AP_Generator_RichenPower&) = delete;
-
-    static AP_Generator_RichenPower *get_singleton();
+    // constructor
+    using AP_Generator_Backend::AP_Generator_Backend;
 
     // init should be called at vehicle startup to get the generator library ready
-    void init();
-    // update should be called regulkarly to update the generator state
-    void update(void);
+    __INITFUNC__ void init(void) override;
+    // update should be called regularly to update the generator state
+    void update(void) override;
 
     // methods to control the generator state:
-    void stop() { set_pilot_desired_runstate(RunState::STOP); }
-    void idle() { set_pilot_desired_runstate(RunState::IDLE); }
-    void run() { set_pilot_desired_runstate(RunState::RUN); }
+    bool stop(void) override;
+    bool idle(void) override;
+    bool run(void) override;
 
     // method to send a GENERATOR_STATUS mavlink message
-    void send_generator_status(const GCS_MAVLINK &channel);
+    void send_generator_status(const GCS_MAVLINK &channel) override;
 
     // prearm checks to ensure generator is good for arming.  Note
     // that if the generator has never sent us a message then these
     // automatically pass!
-    bool pre_arm_check(char *failmsg, uint8_t failmsg_len) const;
+    bool pre_arm_check(char *failmsg, uint8_t failmsg_len) const override;
 
-    // these return false if a reading is not available.  They do not
-    // modify the passed-in value if they return false.
-    bool voltage(float &voltage) const;
-    bool current(float &current) const;
+    // Update front end with voltage, current, and rpm values
+    void update_frontend_readings(void);
 
     // healthy returns true if the generator is not present, or it is
     // present, providing telemetry and not indicating an errors.
-    bool healthy() const;
+    bool healthy() const override;
 
 private:
-
-    static AP_Generator_RichenPower *_singleton;
 
     // read - read serial port, return true if a new reading has been found
     bool get_reading();
@@ -80,7 +68,7 @@ private:
     RunState pilot_desired_runstate = RunState::STOP;
     RunState commanded_runstate = RunState::STOP;  // output is based on this
     void set_pilot_desired_runstate(RunState newstate) {
-        // gcs().send_text(MAV_SEVERITY_INFO, "RichenPower: Moving to state (%u) from (%u)\n", (unsigned)newstate, (unsigned)runstate);
+        // GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RichenPower: Moving to state (%u) from (%u)", (unsigned)newstate, (unsigned)runstate);
         pilot_desired_runstate = newstate;
     }
     void update_runstate();
@@ -108,18 +96,20 @@ private:
         Mode        mode;
     };
 
+#if HAL_LOGGING_ENABLED
     // method and state to write and entry to the onboard log:
     void Log_Write();
     uint32_t last_logged_reading_ms;
+#endif
 
     struct Reading last_reading;
     uint32_t last_reading_ms;
 
-    const uint8_t HEADER_MAGIC1 = 0xAA;
-    const uint8_t HEADER_MAGIC2 = 0x55;
+    static constexpr uint8_t HEADER_MAGIC1 = 0xAA;
+    static constexpr uint8_t HEADER_MAGIC2 = 0x55;
 
-    const uint8_t FOOTER_MAGIC1 = 0x55;
-    const uint8_t FOOTER_MAGIC2 = 0xAA;
+    static constexpr uint8_t FOOTER_MAGIC1 = 0x55;
+    static constexpr uint8_t FOOTER_MAGIC2 = 0xAA;
 
     // reported errors from the generator:
     enum class Errors { // bitmask
@@ -165,7 +155,6 @@ private:
         uint8_t footermagic1;
         uint8_t footermagic2;
     };
-    assert_storage_size<RichenPacket, 70> _assert_storage_size_RichenPacket;
 
     union RichenUnion {
         uint8_t parse_buffer[70];
@@ -179,9 +168,6 @@ private:
     // move the expected header bytes into &buffer[0], adjusting
     // body_length as appropriate.
     void move_header_in_buffer(uint8_t initial_offset);
-
-    // RC input generator for pilot to specify desired generator state
-    RC_Channel *_rc_channel;
 
     // a simple heat model to avoid the motor moving to run too fast
     // or being stopped before cooldown.  The generator itself does
@@ -221,10 +207,11 @@ private:
         }
         return AP_HAL::millis() - idle_state_start_ms;
     }
-};
 
-namespace AP {
-    AP_Generator_RichenPower *generator();
+    // check if the generator requires maintenance and send a message if it does:
+    void check_maintenance_required();
+    // if we are emitting warnings about the generator requiring
+    // maintenamce, this is the last time we sent the warning:
+    uint32_t last_maintenance_warning_ms;
 };
-
-#endif
+#endif  // AP_GENERATOR_RICHENPOWER_ENABLED

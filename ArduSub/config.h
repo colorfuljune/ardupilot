@@ -14,7 +14,6 @@
 
 // run at 400Hz on all systems
 # define MAIN_LOOP_RATE    400
-# define MAIN_LOOP_SECONDS 0.0025f
 
 #ifndef SURFACE_DEPTH_DEFAULT
 # define SURFACE_DEPTH_DEFAULT -10.0f // pressure sensor reading 10cm depth means craft is considered surfaced
@@ -32,43 +31,34 @@
 //
 
 #ifndef CIRCLE_NAV_ENABLED
-# define CIRCLE_NAV_ENABLED ENABLED
+# define CIRCLE_NAV_ENABLED 1
 #endif
 
 //////////////////////////////////////////////////////////////////////////////
-// RPM
+// RC
 //
 
-#ifndef RPM_ENABLED
-# define RPM_ENABLED DISABLED
+#ifndef AP_SUB_RC_ENABLED
+# define AP_SUB_RC_ENABLED 1
 #endif
-
-//////////////////////////////////////////////////////////////////////////////
-// RCMAP
-//
-
 #ifndef RCMAP_ENABLED
-# define RCMAP_ENABLED DISABLED
+# define RCMAP_ENABLED AP_SUB_RC_ENABLED
 #endif
+
+//////////////////////////////////////////////////////////////////////////////
+// Throttle Failsafe
+//
+#ifndef FS_THR_VALUE_DEFAULT
+ # define FS_THR_VALUE_DEFAULT             975
+#endif
+
 
 //////////////////////////////////////////////////////////////////////////////
 // Rangefinder
 //
 
-#ifndef RANGEFINDER_ENABLED
-# define RANGEFINDER_ENABLED ENABLED
-#endif
-
 #ifndef RANGEFINDER_HEALTH_MAX
 # define RANGEFINDER_HEALTH_MAX 3          // number of good reads that indicates a healthy rangefinder
-#endif
-
-#ifndef RANGEFINDER_GAIN_DEFAULT
-# define RANGEFINDER_GAIN_DEFAULT 0.8f     // gain for controlling how quickly rangefinder range adjusts target altitude (lower means slower reaction)
-#endif
-
-#ifndef THR_SURFACE_TRACKING_VELZ_MAX
-# define THR_SURFACE_TRACKING_VELZ_MAX 150 // max vertical speed change while surface tracking with rangefinder
 #endif
 
 #ifndef RANGEFINDER_TIMEOUT_MS
@@ -79,63 +69,31 @@
 # define RANGEFINDER_WPNAV_FILT_HZ   0.25f // filter frequency for rangefinder altitude provided to waypoint navigation class
 #endif
 
-#ifndef RANGEFINDER_TILT_CORRECTION         // by disable tilt correction for use of range finder data by EKF
-# define RANGEFINDER_TILT_CORRECTION ENABLED
+#ifndef RANGEFINDER_TILT_CORRECTION        // by disable tilt correction for use of range finder data by EKF
+# define RANGEFINDER_TILT_CORRECTION 0
+#endif
+
+#ifndef RANGEFINDER_SIGNAL_MIN_DEFAULT
+# define RANGEFINDER_SIGNAL_MIN_DEFAULT 90 // rangefinder readings with signal quality below this value are ignored
+#endif
+
+#ifndef SURFTRAK_DEPTH_DEFAULT
+# define SURFTRAK_DEPTH_DEFAULT -50.0f     // surftrak will try to keep the sub below this depth
 #endif
 
 // Avoidance (relies on Proximity and Fence)
 #ifndef AVOIDANCE_ENABLED
-# define AVOIDANCE_ENABLED DISABLED
+# define AVOIDANCE_ENABLED 0
 #endif
 
-#if AVOIDANCE_ENABLED == ENABLED // Avoidance Library relies on Proximity and Fence
-# define PROXIMITY_ENABLED ENABLED
-# define FENCE_ENABLED ENABLED
-#endif
-
-// Proximity sensor
-//
-#ifndef PROXIMITY_ENABLED
-# define PROXIMITY_ENABLED DISABLED
-#endif
-
-#ifndef MAV_SYSTEM_ID
-# define MAV_SYSTEM_ID          1
-#endif
-
-#ifndef EKF_ORIGIN_MAX_DIST_M
-# define EKF_ORIGIN_MAX_DIST_M         50000   // EKF origin and waypoints (including home) must be within 50km
-#endif
-
-//////////////////////////////////////////////////////////////////////////////
-//  MAGNETOMETER
-#ifndef MAGNETOMETER
-# define MAGNETOMETER                   ENABLED
-#endif
-
-//////////////////////////////////////////////////////////////////////////////
-//  OPTICAL_FLOW
-#ifndef OPTFLOW
-# define OPTFLOW       DISABLED
-#endif
-
-//////////////////////////////////////////////////////////////////////////////
-//  gripper
-#ifndef GRIPPER_ENABLED
-# define GRIPPER_ENABLED DISABLED
+#if AVOIDANCE_ENABLED // Avoidance Library relies on Fence
+# define FENCE_ENABLED 1
 #endif
 
 //////////////////////////////////////////////////////////////////////////////
 // Nav-Guided - allows external nav computer to control vehicle
 #ifndef NAV_GUIDED
-# define NAV_GUIDED    ENABLED
-#endif
-
-//////////////////////////////////////////////////////////////////////////////
-// CAMERA TRIGGER AND CONTROL
-//
-#ifndef CAMERA
-# define CAMERA        DISABLED
+# define NAV_GUIDED    1
 #endif
 
 //////////////////////////////////////////////////////////////////////////////
@@ -186,10 +144,6 @@
 #ifndef ROLL_PITCH_INPUT_MAX
 # define ROLL_PITCH_INPUT_MAX      4500            // roll, pitch input range
 #endif
-#ifndef DEFAULT_ANGLE_MAX
-# define DEFAULT_ANGLE_MAX         4500            // ANGLE_MAX parameters default value
-#endif
-
 //////////////////////////////////////////////////////////////////////////////
 // Loiter position control gains
 //
@@ -201,7 +155,7 @@
 // PosHold parameter defaults
 //
 #ifndef POSHOLD_ENABLED
-# define POSHOLD_ENABLED               ENABLED // PosHold flight mode enabled by default
+# define POSHOLD_ENABLED               1 // PosHold flight mode enabled by default
 #endif
 
 //////////////////////////////////////////////////////////////////////////////
@@ -212,9 +166,12 @@
 # define THR_DZ_DEFAULT         100             // the deadzone above and below mid throttle while in althold or loiter
 #endif
 
-// default maximum vertical velocity and acceleration the pilot may request
+// default maximum velocities and acceleration the pilot may request
 #ifndef PILOT_VELZ_MAX
 # define PILOT_VELZ_MAX    500     // maximum vertical velocity in cm/s
+#endif
+#ifndef PILOT_SPEED_DEFAULT
+# define PILOT_SPEED_DEFAULT 200 // maximum horizontal velocity in cm/s while under pilot control
 #endif
 #ifndef PILOT_ACCEL_Z_DEFAULT
 # define PILOT_ACCEL_Z_DEFAULT 100 // vertical acceleration in cm/s/s while altitude is under pilot control
@@ -224,12 +181,13 @@
 # define AUTO_DISARMING_DELAY  0
 #endif
 
+#ifndef NEUTRAL_THROTTLE
+# define NEUTRAL_THROTTLE (0.5f)   // Throttle output for "no vertical thrust"
+#endif
+
 //////////////////////////////////////////////////////////////////////////////
 // Logging control
 //
-#ifndef LOGGING_ENABLED
-# define LOGGING_ENABLED                ENABLED
-#endif
 
 // Default logging bitmask
 #ifndef DEFAULT_LOG_BITMASK
@@ -250,15 +208,23 @@
     MASK_LOG_MOTBATT
 #endif
 
-// Enable/disable Fence
-#ifndef AC_FENCE
-#define AC_FENCE ENABLED
+//Default flight modes
+#ifndef FLIGHT_MODE_1
+# define FLIGHT_MODE_1 Mode::Number::MANUAL
+#endif
+#ifndef FLIGHT_MODE_2
+# define FLIGHT_MODE_2 Mode::Number::MANUAL
+#endif
+#ifndef FLIGHT_MODE_3
+# define FLIGHT_MODE_3 Mode::Number::STABILIZE
+#endif
+#ifndef FLIGHT_MODE_4
+# define FLIGHT_MODE_4 Mode::Number::STABILIZE
+#endif
+#ifndef FLIGHT_MODE_5
+# define FLIGHT_MODE_5 Mode::Number::SURFACE
+#endif
+#ifndef FLIGHT_MODE_6
+# define FLIGHT_MODE_6 Mode::Number::SURFACE
 #endif
 
-#ifndef AC_RALLY
-#define AC_RALLY   DISABLED
-#endif
-
-#ifndef AC_TERRAIN
-#define AC_TERRAIN DISABLED // Requires Rally enabled as well
-#endif

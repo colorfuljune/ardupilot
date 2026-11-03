@@ -16,6 +16,10 @@
   simulator connector for Scrimmage simulator
 */
 
+#include "SIM_config.h"
+
+#if AP_SIM_SCRIMMAGE_ENABLED
+
 #include "SIM_Scrimmage.h"
 
 #include <stdio.h>
@@ -33,8 +37,7 @@ Scrimmage::Scrimmage(const char *_frame_str) :
     Aircraft(_frame_str),
     prev_timestamp_us(0),
     recv_sock(true),
-    send_sock(true),
-    frame_str(_frame_str)
+    send_sock(true)
 {
 }
 
@@ -98,20 +101,23 @@ void Scrimmage::recv_fdm(const struct sitl_input &input)
 
     velocity_ef = Vector3f(pkt.speedN, pkt.speedE, pkt.speedD);
 
-    location.lat = pkt.latitude * 1.0e7;
-    location.lng = pkt.longitude * 1.0e7;
-    location.alt = pkt.altitude * 1.0e2;
-    position.z = (home.alt - location.alt) * 1.0e-2;
-
+    location = {
+        int32_t(pkt.latitude * 1.0e7),
+        int32_t(pkt.longitude * 1.0e7),
+        int32_t(pkt.altitude * 1.0e2),
+        Location::AltFrame::ABSOLUTE
+    };
+    UNUSED_RESULT(home.get_height_above(location, position.z));
 
     // velocity relative to air mass, in earth frame TODO
-    velocity_air_ef = velocity_ef;
+    velocity_air_ef = velocity_ef - wind_ef;
 
     // velocity relative to airmass in body frame TODO
     velocity_air_bf = dcm.transposed() * velocity_air_ef;
 
     battery_voltage = 0;
     battery_current = 0;
+    battery_temperature_degC = 0;
     rpm[0] = 0;
     rpm[1] = 0;
 
@@ -130,3 +136,5 @@ void Scrimmage::update(const struct sitl_input &input)
 }
 
 } // namespace SITL
+
+#endif  // AP_SIM_SCRIMMAGE_ENABLED

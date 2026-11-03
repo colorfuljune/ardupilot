@@ -41,12 +41,11 @@
 #pragma once
 
 #include "AP_HAL_ChibiOS.h"
-# if defined(STM32H7XX)
+# if defined(STM32H7XX) || defined(STM32G4)
 #include "CANFDIface.h"
 # else
 #if HAL_NUM_CAN_IFACES
 #include "bxcan.hpp"
-#include "EventSource.h"
 
 #ifndef HAL_CAN_RX_QUEUE_SIZE
 #define HAL_CAN_RX_QUEUE_SIZE 128
@@ -69,11 +68,11 @@ class ChibiOS::CANIface : public AP_HAL::CANIface
     struct CriticalSectionLocker {
         CriticalSectionLocker()
         {
-            chSysSuspend();
+            chSysLock();
         }
         ~CriticalSectionLocker()
         {
-            chSysEnable();
+            chSysUnlock();
         }
     };
 
@@ -96,14 +95,20 @@ class ChibiOS::CANIface : public AP_HAL::CANIface
     static const uint32_t TSR_ABRQx[NumTxMailboxes];
 
     ChibiOS::bxcan::CanType* can_;
-    uint64_t error_cnt_;
+
+    // state for ISR RX handler. We put this in the class to avoid
+    // having to expand the stack size for all threads
+    AP_HAL::CANFrame isr_rx_frame;
+    CanRxItem isr_rx_item;
+
+    CanRxItem rx_buffer[HAL_CAN_RX_QUEUE_SIZE];
+    ByteBuffer rx_bytebuffer_;
     ObjectBuffer<CanRxItem> rx_queue_;
     CanTxItem pending_tx_[NumTxMailboxes];
-    bool irq_init_;
-    bool initialised_;
-    bool had_activity_;
-    AP_HAL::EventHandle* event_handle_;
-    static ChibiOS::EventSource evt_src_;
+    bool irq_init_:1;
+    bool initialised_:1;
+    bool had_activity_:1;
+    AP_HAL::BinarySemaphore *sem_handle;
 
     const uint8_t self_index_;
 
@@ -115,7 +120,7 @@ class ChibiOS::CANIface : public AP_HAL::CANIface
 
     void discardTimedOutTxMailboxes(uint64_t current_time);
 
-    bool canAcceptNewTxFrame(const AP_HAL::CANFrame& frame) const;
+    bool canAcceptNewTxFrame() const;
 
     bool isRxBufferEmpty() const;
 
@@ -132,28 +137,26 @@ class ChibiOS::CANIface : public AP_HAL::CANIface
 
     void initOnce(bool enable_irq);
 
-    struct {
-        uint32_t tx_requests;
-        uint32_t tx_rejected;
-        uint32_t tx_success;
-        uint32_t tx_timedout;
-        uint32_t tx_loopback;
-        uint32_t tx_abort;
-        uint32_t rx_received;
-        uint32_t rx_overflow;
-        uint32_t rx_errors;
-        uint32_t num_busoff_err;
+#if !defined(HAL_BOOTLOADER_BUILD)
+    /*
+      additional statistics
+     */
+    struct bus_stats : public AP_HAL::CANIface::bus_stats_t {
         uint32_t num_events;
+        uint32_t esr;
     } stats;
+#endif
 
 public:
     /******************************************
      *   Common CAN methods                   *
      * ****************************************/
     CANIface(uint8_t index);
+    CANIface();
+    static uint8_t next_interface;
 
     // Initialise CAN Peripheral
-    bool init(const uint32_t bitrate, const OperatingMode mode) override;
+    __INITFUNC__ bool init(const uint32_t bitrate) override;
 
     // Put frame into Tx FIFO returns negative on error, 0 on buffer full, 
     // 1 on successfully pushing a frame into FIFO
@@ -165,10 +168,6 @@ public:
     int16_t receive(AP_HAL::CANFrame& out_frame, uint64_t& out_timestamp_us,
                     CanIOFlags& out_flags) override;
 
-    // Set Filters to ignore frames not to be handled by us
-    bool configureFilters(const CanFilterConfig* filter_configs,
-                          uint16_t num_configs) override;
-
     // In BxCAN the Busoff error is cleared automatically,
     // so always return false
     bool is_busoff() const override
@@ -178,14 +177,10 @@ public:
 
     void clear_rx() override;
 
-    // Get number of Filter configurations
-    uint16_t getNumFilters() const override
-    {
-        return NumFilters;
-    }
-
     // Get total number of Errors discovered
+#if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
     uint32_t getErrorCount() const override;
+#endif
 
     // returns true if init was successfully called
     bool is_initialized() const override
@@ -202,11 +197,22 @@ public:
                 uint64_t blocking_deadline) override;
     
     // setup event handle for waiting on events
-    bool set_event_handle(AP_HAL::EventHandle* handle) override;
+    bool set_event_handle(AP_HAL::BinarySemaphore *handle) override;
 
+#if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD)
     // fetch stats text and return the size of the same,
     // results available via @SYS/can0_stats.txt or @SYS/can1_stats.txt 
-    uint32_t get_stats(char* data, uint32_t max_size) override;
+    void get_stats(ExpandingString &str) override;
+#endif
+
+#if !defined(HAL_BOOTLOADER_BUILD)
+    /*
+      return statistics structure
+     */
+    const bus_stats_t *get_statistics(void) const override {
+        return &stats;
+    }
+#endif
 
     /************************************
      * Methods used inside interrupt    *
@@ -219,13 +225,16 @@ public:
     void pollErrorFlagsFromISR(void);
 
     // CAN Peripheral register structure
-    static constexpr bxcan::CanType* const Can[HAL_NUM_CAN_IFACES] = {
-        reinterpret_cast<bxcan::CanType*>(0x40006400)
-#if HAL_NUM_CAN_IFACES > 1
-        ,
-        reinterpret_cast<bxcan::CanType*>(0x40006800)
-#endif
-    };
+    static constexpr bxcan::CanType* const Can[HAL_NUM_CAN_IFACES] = { HAL_CAN_BASE_LIST };
+
+protected:
+    bool add_to_rx_queue(const CanRxItem &rx_item) override {
+        return rx_queue_.push(rx_item);
+    }
+
+    int8_t get_iface_num(void) const override {
+        return self_index_;
+    }
 };
 #endif //HAL_NUM_CAN_IFACES
-#endif //# if defined(STM32H7XX)
+#endif //# if defined(STM32H7XX) || defined(STM32G4)

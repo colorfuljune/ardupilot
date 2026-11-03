@@ -101,7 +101,6 @@
  *  by the non-zero coefficient.
  */
 
-#include <assert.h>
 
 #include "AP_GeodesicGrid.h"
 
@@ -419,8 +418,6 @@ int AP_GeodesicGrid::_triangle_index(const Vector3f &v, bool inclusive)
 
         break;
     }
-
-    assert(umbrella >= 0);
 
     switch (umbrella % 3) {
     case 0:

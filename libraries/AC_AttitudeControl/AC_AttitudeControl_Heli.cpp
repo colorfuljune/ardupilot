@@ -1,5 +1,6 @@
 #include "AC_AttitudeControl_Heli.h"
 #include <AP_HAL/AP_HAL.h>
+#include <AP_Scheduler/AP_Scheduler.h>
 
 // table of user settable parameters
 const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
@@ -10,27 +11,30 @@ const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
     // @DisplayName: Hover Roll Trim
     // @Description: Trim the hover roll angle to counter tail rotor thrust in a hover
     // @Units: cdeg
+    // @Increment: 10
     // @Range: 0 1000
     // @User: Advanced
-    AP_GROUPINFO("HOVR_ROL_TRM",    1, AC_AttitudeControl_Heli, _hover_roll_trim, AC_ATTITUDE_HELI_HOVER_ROLL_TRIM_DEFAULT),
+    AP_GROUPINFO("HOVR_ROL_TRM",    1, AC_AttitudeControl_Heli, _hover_roll_trim_cd, AC_ATTITUDE_HELI_HOVER_ROLL_TRIM_DEFAULT),
 
     // @Param: RAT_RLL_P
     // @DisplayName: Roll axis rate controller P gain
-    // @Description: Roll axis rate controller P gain.  Converts the difference between desired roll rate and actual roll rate into a motor speed output
-    // @Range: 0.08 0.35
+    // @Description: Roll axis rate controller P gain.  Corrects in proportion to the difference between the desired roll rate vs actual roll rate
+    // @Units: s/rad
+    // @Range: 0.0 0.35
     // @Increment: 0.005
     // @User: Standard
 
     // @Param: RAT_RLL_I
     // @DisplayName: Roll axis rate controller I gain
     // @Description: Roll axis rate controller I gain.  Corrects long-term difference in desired roll rate vs actual roll rate
-    // @Range: 0.01 0.6
+    // @Units: 1/rad
+    // @Range: 0.0 0.6
     // @Increment: 0.01
     // @User: Standard
 
     // @Param: RAT_RLL_IMAX
     // @DisplayName: Roll axis rate controller I gain maximum
-    // @Description: Roll axis rate controller I gain maximum.  Constrains the maximum motor output that the I gain will output
+    // @Description: Roll axis rate controller I gain maximum.  Constrains the maximum that the I term will output
     // @Range: 0 1
     // @Increment: 0.01
     // @User: Standard
@@ -44,14 +48,16 @@ const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
     // @Param: RAT_RLL_D
     // @DisplayName: Roll axis rate controller D gain
     // @Description: Roll axis rate controller D gain.  Compensates for short-term change in desired roll rate vs actual roll rate
-    // @Range: 0.001 0.03
+    // @Units: s^2/rad
+    // @Range: 0.0 0.03
     // @Increment: 0.001
     // @User: Standard
 
-    // @Param: RAT_RLL_VFF
+    // @Param: RAT_RLL_FF
     // @DisplayName: Roll axis rate controller feed forward
     // @Description: Roll axis rate controller feed forward
-    // @Range: 0 0.5
+    // @Units: s/rad
+    // @Range: 0.05 0.5
     // @Increment: 0.001
     // @User: Standard
 
@@ -78,25 +84,55 @@ const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
     // @Increment: 1
     // @Units: Hz
     // @User: Standard
+
+    // @Param: RAT_RLL_SMAX
+    // @DisplayName: Roll slew rate limit
+    // @Description: Sets an upper limit on the slew rate produced by the combined P and D gains. If the amplitude of the control action produced by the rate feedback exceeds this value, then the D+P gain is reduced to respect the limit. This limits the amplitude of high frequency oscillations caused by an excessive gain. The limit should be set to no more than 25% of the actuators maximum slew rate to allow for load effects. Note: The gain will not be reduced to less than 10% of the nominal value. A value of zero will disable this feature.
+    // @Range: 0 200
+    // @Increment: 0.5
+    // @User: Advanced
+
+    // @Param: RAT_RLL_D_FF
+    // @DisplayName: Roll Derivative FeedForward Gain
+    // @Description: FF D Gain which produces an output that is proportional to the rate of change of the target
+    // @Units: s^2/rad
+    // @Range: 0 0.02
+    // @Increment: 0.0001
+    // @User: Advanced
+
+    // @Param: RAT_RLL_NTF
+    // @DisplayName: Roll Target notch filter index
+    // @Description: Roll Target notch filter index, zero disables
+    // @Range: 0 8
+    // @User: Advanced
+
+    // @Param: RAT_RLL_NEF
+    // @DisplayName: Roll Error notch filter index
+    // @Description: Roll Error notch filter index, zero disables
+    // @Range: 0 8
+    // @User: Advanced
+
     AP_SUBGROUPINFO(_pid_rate_roll, "RAT_RLL_", 2, AC_AttitudeControl_Heli, AC_HELI_PID),
 
     // @Param: RAT_PIT_P
     // @DisplayName: Pitch axis rate controller P gain
-    // @Description: Pitch axis rate controller P gain.  Converts the difference between desired pitch rate and actual pitch rate into a motor speed output
-    // @Range: 0.08 0.35
+    // @Description: Pitch axis rate controller P gain.  Corrects in proportion to the difference between the desired pitch rate vs actual pitch rate
+    // @Units: s/rad
+    // @Range: 0.0 0.35
     // @Increment: 0.005
     // @User: Standard
 
     // @Param: RAT_PIT_I
     // @DisplayName: Pitch axis rate controller I gain
     // @Description: Pitch axis rate controller I gain.  Corrects long-term difference in desired pitch rate vs actual pitch rate
-    // @Range: 0.01 0.6
+    // @Units: 1/rad
+    // @Range: 0.0 0.6
     // @Increment: 0.01
     // @User: Standard
 
     // @Param: RAT_PIT_IMAX
     // @DisplayName: Pitch axis rate controller I gain maximum
-    // @Description: Pitch axis rate controller I gain maximum.  Constrains the maximum motor output that the I gain will output
+    // @Description: Pitch axis rate controller I gain maximum.  Constrains the maximum that the I term will output
     // @Range: 0 1
     // @Increment: 0.01
     // @User: Standard
@@ -110,14 +146,16 @@ const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
     // @Param: RAT_PIT_D
     // @DisplayName: Pitch axis rate controller D gain
     // @Description: Pitch axis rate controller D gain.  Compensates for short-term change in desired pitch rate vs actual pitch rate
-    // @Range: 0.001 0.03
+    // @Units: s^2/rad
+    // @Range: 0.0 0.03
     // @Increment: 0.001
     // @User: Standard
 
-    // @Param: RAT_PIT_VFF
+    // @Param: RAT_PIT_FF
     // @DisplayName: Pitch axis rate controller feed forward
     // @Description: Pitch axis rate controller feed forward
-    // @Range: 0 0.5
+    // @Units: s/rad
+    // @Range: 0.05 0.5
     // @Increment: 0.001
     // @User: Standard
 
@@ -144,11 +182,40 @@ const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
     // @Increment: 1
     // @Units: Hz
     // @User: Standard
+
+    // @Param: RAT_PIT_SMAX
+    // @DisplayName: Pitch slew rate limit
+    // @Description: Sets an upper limit on the slew rate produced by the combined P and D gains. If the amplitude of the control action produced by the rate feedback exceeds this value, then the D+P gain is reduced to respect the limit. This limits the amplitude of high frequency oscillations caused by an excessive gain. The limit should be set to no more than 25% of the actuators maximum slew rate to allow for load effects. Note: The gain will not be reduced to less than 10% of the nominal value. A value of zero will disable this feature.
+    // @Range: 0 200
+    // @Increment: 0.5
+    // @User: Advanced
+
+    // @Param: RAT_PIT_D_FF
+    // @DisplayName: Pitch Derivative FeedForward Gain
+    // @Description: FF D Gain which produces an output that is proportional to the rate of change of the target
+    // @Units: s^2/rad
+    // @Range: 0 0.02
+    // @Increment: 0.0001
+    // @User: Advanced
+
+    // @Param: RAT_PIT_NTF
+    // @DisplayName: Pitch Target notch filter index
+    // @Description: Pitch Target notch filter index, zero disables
+    // @Range: 0 8
+    // @User: Advanced
+
+    // @Param: RAT_PIT_NEF
+    // @DisplayName: Pitch Error notch filter index
+    // @Description: Pitch Error notch filter index, zero disables
+    // @Range: 0 8
+    // @User: Advanced
+
     AP_SUBGROUPINFO(_pid_rate_pitch, "RAT_PIT_", 3, AC_AttitudeControl_Heli, AC_HELI_PID),
 
     // @Param: RAT_YAW_P
     // @DisplayName: Yaw axis rate controller P gain
-    // @Description: Yaw axis rate controller P gain.  Converts the difference between desired yaw rate and actual yaw rate into a motor speed output
+    // @Description: Yaw axis rate controller P gain.  Corrects in proportion to the difference between the desired yaw rate vs actual yaw rate
+    // @Units: s/rad
     // @Range: 0.180 0.60
     // @Increment: 0.005
     // @User: Standard
@@ -156,13 +223,14 @@ const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
     // @Param: RAT_YAW_I
     // @DisplayName: Yaw axis rate controller I gain
     // @Description: Yaw axis rate controller I gain.  Corrects long-term difference in desired yaw rate vs actual yaw rate
-    // @Range: 0.01 0.06
+    // @Units: 1/rad
+    // @Range: 0.01 0.2
     // @Increment: 0.01
     // @User: Standard
 
     // @Param: RAT_YAW_IMAX
     // @DisplayName: Yaw axis rate controller I gain maximum
-    // @Description: Yaw axis rate controller I gain maximum.  Constrains the maximum motor output that the I gain will output
+    // @Description: Yaw axis rate controller I gain maximum.  Constrains the maximum that the I term will output
     // @Range: 0 1
     // @Increment: 0.01
     // @User: Standard
@@ -176,13 +244,15 @@ const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
     // @Param: RAT_YAW_D
     // @DisplayName: Yaw axis rate controller D gain
     // @Description: Yaw axis rate controller D gain.  Compensates for short-term change in desired yaw rate vs actual yaw rate
+    // @Units: s^2/rad
     // @Range: 0.000 0.02
     // @Increment: 0.001
     // @User: Standard
 
-    // @Param: RAT_YAW_VFF
+    // @Param: RAT_YAW_FF
     // @DisplayName: Yaw axis rate controller feed forward
     // @Description: Yaw axis rate controller feed forward
+    // @Units: s/rad
     // @Range: 0 0.5
     // @Increment: 0.001
     // @User: Standard
@@ -210,6 +280,34 @@ const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
     // @Increment: 1
     // @Units: Hz
     // @User: Standard
+
+    // @Param: RAT_YAW_SMAX
+    // @DisplayName: Yaw slew rate limit
+    // @Description: Sets an upper limit on the slew rate produced by the combined P and D gains. If the amplitude of the control action produced by the rate feedback exceeds this value, then the D+P gain is reduced to respect the limit. This limits the amplitude of high frequency oscillations caused by an excessive gain. The limit should be set to no more than 25% of the actuators maximum slew rate to allow for load effects. Note: The gain will not be reduced to less than 10% of the nominal value. A value of zero will disable this feature.
+    // @Range: 0 200
+    // @Increment: 0.5
+    // @User: Advanced
+
+    // @Param: RAT_YAW_D_FF
+    // @DisplayName: Yaw Derivative FeedForward Gain
+    // @Description: FF D Gain which produces an output that is proportional to the rate of change of the target
+    // @Units: s^2/rad
+    // @Range: 0 0.02
+    // @Increment: 0.0001
+    // @User: Advanced
+
+    // @Param: RAT_YAW_NTF
+    // @DisplayName: Yaw Target notch filter index
+    // @Description: Yaw Target notch filter index, zero disables
+    // @Range: 0 8
+    // @User: Advanced
+
+    // @Param: RAT_YAW_NEF
+    // @DisplayName: Yaw Error notch filter index
+    // @Description: Yaw Error notch filter index, zero disables
+    // @Range: 0 8
+    // @User: Advanced
+
     AP_SUBGROUPINFO(_pid_rate_yaw, "RAT_YAW_", 4, AC_AttitudeControl_Heli, AC_HELI_PID),
 
     // @Param: PIRO_COMP
@@ -222,91 +320,16 @@ const AP_Param::GroupInfo AC_AttitudeControl_Heli::var_info[] = {
     AP_GROUPEND
 };
 
-// passthrough_bf_roll_pitch_rate_yaw - passthrough the pilots roll and pitch inputs directly to swashplate for flybar acro mode
-void AC_AttitudeControl_Heli::passthrough_bf_roll_pitch_rate_yaw(float roll_passthrough, float pitch_passthrough, float yaw_rate_bf_cds)
+AC_AttitudeControl_Heli::AC_AttitudeControl_Heli(AP_AHRS_View &ahrs, AP_MotorsHeli& motors) :
+    AC_AttitudeControl(ahrs, motors)
 {
-    // convert from centidegrees on public interface to radians
-    float yaw_rate_bf_rads = radians(yaw_rate_bf_cds * 0.01f);
+    AP_Param::setup_object_defaults(this, var_info);
 
-    // store roll, pitch and passthroughs
-    // NOTE: this abuses yaw_rate_bf_rads
-    _passthrough_roll = roll_passthrough;
-    _passthrough_pitch = pitch_passthrough;
-    _passthrough_yaw = degrees(yaw_rate_bf_rads) * 100.0f;
-
-    // set rate controller to use pass through
-    _flags_heli.flybar_passthrough = true;
-
-    // set bf rate targets to current body frame rates (i.e. relax and be ready for vehicle to switch out of acro)
-    _attitude_target_ang_vel.x = _ahrs.get_gyro().x;
-    _attitude_target_ang_vel.y = _ahrs.get_gyro().y;
-
-    // accel limit desired yaw rate
-    if (get_accel_yaw_max_radss() > 0.0f) {
-        float rate_change_limit_rads = get_accel_yaw_max_radss() * _dt;
-        float rate_change_rads = yaw_rate_bf_rads - _attitude_target_ang_vel.z;
-        rate_change_rads = constrain_float(rate_change_rads, -rate_change_limit_rads, rate_change_limit_rads);
-        _attitude_target_ang_vel.z += rate_change_rads;
-    } else {
-        _attitude_target_ang_vel.z = yaw_rate_bf_rads;
-    }
-
-    integrate_bf_rate_error_to_angle_errors();
-    _att_error_rot_vec_rad.x = 0;
-    _att_error_rot_vec_rad.y = 0;
-
-    // update our earth-frame angle targets
-    Vector3f att_error_euler_rad;
-
-    // convert angle error rotation vector into 321-intrinsic euler angle difference
-    // NOTE: this results an an approximation linearized about the vehicle's attitude
-    if (ang_vel_to_euler_rate(Vector3f(_ahrs.roll, _ahrs.pitch, _ahrs.yaw), _att_error_rot_vec_rad, att_error_euler_rad)) {
-        _attitude_target_euler_angle.x = wrap_PI(att_error_euler_rad.x + _ahrs.roll);
-        _attitude_target_euler_angle.y = wrap_PI(att_error_euler_rad.y + _ahrs.pitch);
-        _attitude_target_euler_angle.z = wrap_2PI(att_error_euler_rad.z + _ahrs.yaw);
-    }
-
-    // handle flipping over pitch axis
-    if (_attitude_target_euler_angle.y > M_PI / 2.0f) {
-        _attitude_target_euler_angle.x = wrap_PI(_attitude_target_euler_angle.x + M_PI);
-        _attitude_target_euler_angle.y = wrap_PI(M_PI - _attitude_target_euler_angle.x);
-        _attitude_target_euler_angle.z = wrap_2PI(_attitude_target_euler_angle.z + M_PI);
-    }
-    if (_attitude_target_euler_angle.y < -M_PI / 2.0f) {
-        _attitude_target_euler_angle.x = wrap_PI(_attitude_target_euler_angle.x + M_PI);
-        _attitude_target_euler_angle.y = wrap_PI(-M_PI - _attitude_target_euler_angle.x);
-        _attitude_target_euler_angle.z = wrap_2PI(_attitude_target_euler_angle.z + M_PI);
-    }
-
-    // convert body-frame angle errors to body-frame rate targets
-    _rate_target_ang_vel = update_ang_vel_target_from_att_error(_att_error_rot_vec_rad);
-
-    // set body-frame roll/pitch rate target to current desired rates which are the vehicle's actual rates
-    _rate_target_ang_vel.x = _attitude_target_ang_vel.x;
-    _rate_target_ang_vel.y = _attitude_target_ang_vel.y;
-
-    // add desired target to yaw
-    _rate_target_ang_vel.z += _attitude_target_ang_vel.z;
-    _thrust_error_angle = norm(_att_error_rot_vec_rad.x, _att_error_rot_vec_rad.y);
-}
-
-void AC_AttitudeControl_Heli::integrate_bf_rate_error_to_angle_errors()
-{
-    // Integrate the angular velocity error into the attitude error
-    _att_error_rot_vec_rad += (_attitude_target_ang_vel - _ahrs.get_gyro()) * _dt;
-
-    // Constrain attitude error
-    _att_error_rot_vec_rad.x = constrain_float(_att_error_rot_vec_rad.x, -AC_ATTITUDE_HELI_ACRO_OVERSHOOT_ANGLE_RAD, AC_ATTITUDE_HELI_ACRO_OVERSHOOT_ANGLE_RAD);
-    _att_error_rot_vec_rad.y = constrain_float(_att_error_rot_vec_rad.y, -AC_ATTITUDE_HELI_ACRO_OVERSHOOT_ANGLE_RAD, AC_ATTITUDE_HELI_ACRO_OVERSHOOT_ANGLE_RAD);
-    _att_error_rot_vec_rad.z = constrain_float(_att_error_rot_vec_rad.z, -AC_ATTITUDE_HELI_ACRO_OVERSHOOT_ANGLE_RAD, AC_ATTITUDE_HELI_ACRO_OVERSHOOT_ANGLE_RAD);
-}
-
-// subclass non-passthrough too, for external gyro, no flybar
-void AC_AttitudeControl_Heli::input_rate_bf_roll_pitch_yaw(float roll_rate_bf_cds, float pitch_rate_bf_cds, float yaw_rate_bf_cds)
-{
-    _passthrough_yaw = yaw_rate_bf_cds;
-
-    AC_AttitudeControl::input_rate_bf_roll_pitch_yaw(roll_rate_bf_cds, pitch_rate_bf_cds, yaw_rate_bf_cds);
+    // initialise flags
+    _flags_heli.leaky_i = true;
+#if AP_FILTER_ENABLED
+    set_notch_sample_rate(AP::scheduler().get_loop_rate_hz());
+#endif
 }
 
 //
@@ -317,34 +340,25 @@ void AC_AttitudeControl_Heli::input_rate_bf_roll_pitch_yaw(float roll_rate_bf_cd
 // should be called at 100hz or more
 void AC_AttitudeControl_Heli::rate_controller_run()
 {	
-    _rate_target_ang_vel += _rate_sysid_ang_vel;
+    _ang_vel_body_rads += _sysid_ang_vel_body_rads;
 
-    Vector3f gyro_latest = _ahrs.get_gyro_latest();
+    _rate_gyro_rads = _ahrs.get_gyro_latest();
+    _rate_gyro_time_us = AP_HAL::micros64();
 
     // call rate controllers and send output to motors object
-    // if using a flybar passthrough roll and pitch directly to motors
-    if (_flags_heli.flybar_passthrough) {
-        _motors.set_roll(_passthrough_roll / 4500.0f);
-        _motors.set_pitch(_passthrough_pitch / 4500.0f);
-    } else {
-        rate_bf_to_motor_roll_pitch(gyro_latest, _rate_target_ang_vel.x, _rate_target_ang_vel.y);
-    }
-    if (_flags_heli.tail_passthrough) {
-        _motors.set_yaw(_passthrough_yaw / 4500.0f);
-    } else {
-        _motors.set_yaw(rate_target_to_motor_yaw(gyro_latest.z, _rate_target_ang_vel.z));
-    }
+    rate_bf_to_motor_roll_pitch(_rate_gyro_rads, _ang_vel_body_rads.x, _ang_vel_body_rads.y);
+    _motors.set_yaw(rate_target_to_motor_yaw(_rate_gyro_rads.z, _ang_vel_body_rads.z));
 
-    _rate_sysid_ang_vel.zero();
-    _actuator_sysid.zero();
-
+    _pd_scale_used = _pd_scale;
+    _i_scale_used = _i_scale;
+    _angle_P_scale_used = _angle_P_scale;
 }
 
 // Update Alt_Hold angle maximum
 void AC_AttitudeControl_Heli::update_althold_lean_angle_max(float throttle_in)
 {
     float althold_lean_angle_max = acosf(constrain_float(throttle_in / AC_ATTITUDE_HELI_ANGLE_LIMIT_THROTTLE_MAX, 0.0f, 1.0f));
-    _althold_lean_angle_max = _althold_lean_angle_max + (_dt / (_dt + _angle_limit_tc)) * (althold_lean_angle_max - _althold_lean_angle_max);
+    _althold_lean_angle_max_rad = _althold_lean_angle_max_rad + (_dt_s / (_dt_s + _angle_limit_tc)) * (althold_lean_angle_max - _althold_lean_angle_max_rad);
 }
 
 //
@@ -358,17 +372,16 @@ void AC_AttitudeControl_Heli::update_althold_lean_angle_max(float throttle_in)
 // rate_bf_to_motor_roll_pitch - ask the rate controller to calculate the motor outputs to achieve the target rate in radians/second
 void AC_AttitudeControl_Heli::rate_bf_to_motor_roll_pitch(const Vector3f &rate_rads, float rate_roll_target_rads, float rate_pitch_target_rads)
 {
-
     if (_flags_heli.leaky_i) {
         _pid_rate_roll.update_leaky_i(AC_ATTITUDE_HELI_RATE_INTEGRATOR_LEAK_RATE);
     }
-    float roll_pid = _pid_rate_roll.update_all(rate_roll_target_rads, rate_rads.x, _flags_heli.limit_roll) + _actuator_sysid.x;
+    float roll_pid = _pid_rate_roll.update_all(rate_roll_target_rads, rate_rads.x, _dt_s, _motors.limit.roll, _pd_scale.x, _i_scale.x) + _actuator_sysid.x;
 
     if (_flags_heli.leaky_i) {
         _pid_rate_pitch.update_leaky_i(AC_ATTITUDE_HELI_RATE_INTEGRATOR_LEAK_RATE);
     }
 
-    float pitch_pid = _pid_rate_pitch.update_all(rate_pitch_target_rads, rate_rads.y, _flags_heli.limit_pitch) + _actuator_sysid.y;
+    float pitch_pid = _pid_rate_pitch.update_all(rate_pitch_target_rads, rate_rads.y, _dt_s, _motors.limit.pitch, _pd_scale.y, _i_scale.y) + _actuator_sysid.y;
 
     // use pid library to calculate ff
     float roll_ff = _pid_rate_roll.get_ff();
@@ -378,19 +391,9 @@ void AC_AttitudeControl_Heli::rate_bf_to_motor_roll_pitch(const Vector3f &rate_r
     float roll_out = roll_pid + roll_ff;
     float pitch_out = pitch_pid + pitch_ff;
 
-    // constrain output and update limit flags
-    if (fabsf(roll_out) > AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX) {
-        roll_out = constrain_float(roll_out, -AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX, AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX);
-        _flags_heli.limit_roll = true;
-    } else {
-        _flags_heli.limit_roll = false;
-    }
-    if (fabsf(pitch_out) > AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX) {
-        pitch_out = constrain_float(pitch_out, -AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX, AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX);
-        _flags_heli.limit_pitch = true;
-    } else {
-        _flags_heli.limit_pitch = false;
-    }
+    // constrain output
+    roll_out = constrain_float(roll_out, -AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX, AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX);
+    pitch_out = constrain_float(pitch_out, -AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX, AC_ATTITUDE_RATE_RP_CONTROLLER_OUT_MAX);
 
     // output to motors
     _motors.set_roll(roll_out);
@@ -407,8 +410,8 @@ void AC_AttitudeControl_Heli::rate_bf_to_motor_roll_pitch(const Vector3f &rate_r
         const float piro_pitch_i = _pid_rate_pitch.get_i();
 
         Vector2f yawratevector;
-        yawratevector.x     = cosf(-rate_rads.z * _dt);
-        yawratevector.y     = sinf(-rate_rads.z * _dt);
+        yawratevector.x     = cosf(-rate_rads.z * _dt_s);
+        yawratevector.y     = sinf(-rate_rads.z * _dt_s);
         yawratevector.normalize();
 
         _pid_rate_roll.set_integrator(piro_roll_i * yawratevector.x - piro_pitch_i * yawratevector.y);
@@ -420,11 +423,11 @@ void AC_AttitudeControl_Heli::rate_bf_to_motor_roll_pitch(const Vector3f &rate_r
 // rate_bf_to_motor_yaw - ask the rate controller to calculate the motor outputs to achieve the target rate in radians/second
 float AC_AttitudeControl_Heli::rate_target_to_motor_yaw(float rate_yaw_actual_rads, float rate_target_rads)
 {
-    if (!((AP_MotorsHeli&)_motors).rotor_runup_complete()) {
+    if (_motors.get_spool_state() != AP_Motors::SpoolState::THROTTLE_UNLIMITED) {
         _pid_rate_yaw.update_leaky_i(AC_ATTITUDE_HELI_RATE_INTEGRATOR_LEAK_RATE);
     }
 
-    float pid = _pid_rate_yaw.update_all(rate_target_rads, rate_yaw_actual_rads, _flags_heli.limit_yaw) + _actuator_sysid.z;
+    float pid = _pid_rate_yaw.update_all(rate_target_rads, rate_yaw_actual_rads, _dt_s, _motors.limit.yaw, _pd_scale.z, _i_scale.z) + _actuator_sysid.z;
 
     // use pid library to calculate ff
     float vff = _pid_rate_yaw.get_ff()*_feedforward_scalar;
@@ -432,13 +435,8 @@ float AC_AttitudeControl_Heli::rate_target_to_motor_yaw(float rate_yaw_actual_ra
     // add feed forward
     float yaw_out = pid + vff;
 
-    // constrain output and update limit flag
-    if (fabsf(yaw_out) > AC_ATTITUDE_RATE_YAW_CONTROLLER_OUT_MAX) {
-        yaw_out = constrain_float(yaw_out, -AC_ATTITUDE_RATE_YAW_CONTROLLER_OUT_MAX, AC_ATTITUDE_RATE_YAW_CONTROLLER_OUT_MAX);
-        _flags_heli.limit_yaw = true;
-    } else {
-        _flags_heli.limit_yaw = false;
-    }
+    // constrain output
+    yaw_out = constrain_float(yaw_out, -AC_ATTITUDE_RATE_YAW_CONTROLLER_OUT_MAX, AC_ATTITUDE_RATE_YAW_CONTROLLER_OUT_MAX);
 
     // output to motors
     return yaw_out;
@@ -452,26 +450,113 @@ void AC_AttitudeControl_Heli::set_throttle_out(float throttle_in, bool apply_ang
 {
     _throttle_in = throttle_in;
     update_althold_lean_angle_max(throttle_in);
+
     _motors.set_throttle_filter_cutoff(filter_cutoff);
+    if (apply_angle_boost && !((AP_MotorsHeli&)_motors).in_autorotation()) {
+        // Apply angle boost
+        throttle_in = get_throttle_boosted(throttle_in);
+    } else {
+        // Clear angle_boost for logging purposes
+        _angle_boost = 0.0f;
+    }
     _motors.set_throttle(throttle_in);
-    // Clear angle_boost for logging purposes
-    _angle_boost = 0.0f;
 }
 
-// Command an euler roll and pitch angle and an euler yaw rate with angular velocity feedforward and smoothing
-void AC_AttitudeControl_Heli::input_euler_angle_roll_pitch_euler_rate_yaw(float euler_roll_angle_cd, float euler_pitch_angle_cd, float euler_yaw_rate_cds)
+// returns a throttle including compensation for roll/pitch angle
+// throttle value should be 0 ~ 1
+float AC_AttitudeControl_Heli::get_throttle_boosted(float throttle_in)
 {
-    if (_inverted_flight) {
-        euler_roll_angle_cd = wrap_180_cd(euler_roll_angle_cd + 18000);
+    if (!_angle_boost_enabled) {
+        _angle_boost = 0;
+        return throttle_in;
     }
-    AC_AttitudeControl::input_euler_angle_roll_pitch_euler_rate_yaw(euler_roll_angle_cd, euler_pitch_angle_cd, euler_yaw_rate_cds);
+    // inverted_factor is 1 for tilt angles below 60 degrees
+    // inverted_factor changes from 1 to -1 for tilt angles between 60 and 120 degrees
+
+    float cos_tilt = _ahrs.cos_pitch() * _ahrs.cos_roll();
+    float inverted_factor = constrain_float(2.0f * cos_tilt, -1.0f, 1.0f);
+    float cos_tilt_target = fabsf(cosf(_thrust_angle_rad));
+    float boost_factor = 1.0f / constrain_float(cos_tilt_target, 0.1f, 1.0f);
+
+    // angle boost and inverted factor applied about the zero thrust collective
+    const float coll_mid = ((AP_MotorsHeli&)_motors).get_coll_mid();
+    float throttle_out = ((throttle_in - coll_mid)  * inverted_factor * boost_factor) + coll_mid;
+    _angle_boost = constrain_float(throttle_out - throttle_in, -1.0f, 1.0f);
+    return throttle_out;
 }
 
-// Command an euler roll, pitch and yaw angle with angular velocity feedforward and smoothing
-void AC_AttitudeControl_Heli::input_euler_angle_roll_pitch_yaw(float euler_roll_angle_cd, float euler_pitch_angle_cd, float euler_yaw_angle_cd, bool slew_yaw)
+// get_roll_trim - angle in centi-degrees to be added to roll angle for learn hover collective. Used by helicopter to counter tail rotor thrust in hover
+float AC_AttitudeControl_Heli::get_roll_trim_cd()
+{
+    // hover roll trim is given the opposite sign in inverted flight since the tail rotor thrust is pointed in the opposite direction. 
+    float inverted_factor = constrain_float(2.0f * _ahrs.cos_roll(), -1.0f, 1.0f);
+    return constrain_float(_hover_roll_trim_scalar * _hover_roll_trim_cd * inverted_factor, -1000.0f,1000.0f);
+}
+
+// Sets desired roll and pitch angles (in radians) and yaw rate (in radians/s).
+// Used when roll/pitch stabilization is needed with manual or autonomous yaw rate control.
+// Applies acceleration-limited input shaping for smooth transitions and computes body-frame angular velocity targets.
+void AC_AttitudeControl_Heli::input_euler_angle_roll_pitch_euler_rate_yaw_rad(float euler_roll_angle_rad, float euler_pitch_angle_rad, float euler_yaw_rate_rads)
 {
     if (_inverted_flight) {
-        euler_roll_angle_cd = wrap_180_cd(euler_roll_angle_cd + 18000);
+        euler_roll_angle_rad = wrap_PI(euler_roll_angle_rad + M_PI);
     }
-    AC_AttitudeControl::input_euler_angle_roll_pitch_yaw(euler_roll_angle_cd, euler_pitch_angle_cd, euler_yaw_angle_cd, slew_yaw);
+    AC_AttitudeControl::input_euler_angle_roll_pitch_euler_rate_yaw_rad(euler_roll_angle_rad, euler_pitch_angle_rad, euler_yaw_rate_rads);
+}
+
+// Sets desired roll, pitch, and yaw angles (in radians).
+// Used to follow an absolute attitude setpoint. Input shaping and yaw slew limits are applied.
+// Outputs are passed to the rate controller via shaped angular velocity targets.
+void AC_AttitudeControl_Heli::input_euler_angle_roll_pitch_yaw_rad(float euler_roll_angle_rad, float euler_pitch_angle_rad, float euler_yaw_angle_rad, bool slew_yaw)
+{
+    if (_inverted_flight) {
+        euler_roll_angle_rad = wrap_PI(euler_roll_angle_rad + M_PI);
+    }
+    AC_AttitudeControl::input_euler_angle_roll_pitch_yaw_rad(euler_roll_angle_rad, euler_pitch_angle_rad, euler_yaw_angle_rad, slew_yaw);
+}
+
+void AC_AttitudeControl_Heli::set_notch_sample_rate(float sample_rate)
+{
+#if AP_FILTER_ENABLED
+    _pid_rate_roll.set_notch_sample_rate(sample_rate);
+    _pid_rate_pitch.set_notch_sample_rate(sample_rate);
+    _pid_rate_yaw.set_notch_sample_rate(sample_rate);
+#endif
+}
+
+// Sets desired thrust vector and heading rate (in radians/s).
+// Used for tilt-based navigation with independent yaw control.
+// The thrust vector defines the desired orientation (e.g., pointing direction for vertical thrust),
+// while the heading rate adjusts yaw. The input is shaped by acceleration and slew limits.
+void AC_AttitudeControl_Heli::input_thrust_vector_rate_heading_rads(const Vector3f& thrust_vector, float heading_rate_rads, bool slew_yaw)
+{
+
+    if (!_inverted_flight) {
+        AC_AttitudeControl::input_thrust_vector_rate_heading_rads(thrust_vector, heading_rate_rads, slew_yaw);
+        return;
+    }
+    // convert thrust vector to a roll and pitch angles
+    // this negates the advantage of using thrust vector control, but works just fine
+    Vector3f angle_target = attitude_from_thrust_vector(thrust_vector, _ahrs.yaw).to_vector312();
+
+    angle_target.x = wrap_PI(angle_target.x + M_PI);
+    AC_AttitudeControl::input_euler_angle_roll_pitch_euler_rate_yaw_rad(angle_target.x, angle_target.y, heading_rate_rads);
+}
+
+
+// Sets desired thrust vector and heading (in radians) with heading rate (in radians/s).
+// Used for advanced attitude control where thrust direction is separated from yaw orientation.
+// Heading slew is constrained based on configured limits.
+void AC_AttitudeControl_Heli::input_thrust_vector_heading_rad(const Vector3f& thrust_vector, float heading_angle_rad, float heading_rate_rads)
+{
+    if (!_inverted_flight) {
+        AC_AttitudeControl::input_thrust_vector_heading_rad(thrust_vector, heading_angle_rad, heading_rate_rads);
+        return;
+    }
+    // convert thrust vector to a roll and pitch angles
+    // this negates the advantage of using thrust vector control, but works just fine
+    Vector3f angle_target = attitude_from_thrust_vector(thrust_vector, _ahrs.yaw).to_vector312();
+
+    angle_target.x = wrap_PI(angle_target.x + M_PI);
+    AC_AttitudeControl::input_euler_angle_roll_pitch_yaw_rad(angle_target.x, angle_target.y, heading_angle_rad, true);
 }

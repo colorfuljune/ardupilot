@@ -18,8 +18,10 @@
 
 #include "AP_Baro_DPS280.h"
 
-#include <utility>
+#if AP_BARO_DPS280_ENABLED
+
 #include <stdio.h>
+#include <AP_Math/definitions.h>
 
 extern const AP_HAL::HAL &hal;
 
@@ -40,20 +42,26 @@ extern const AP_HAL::HAL &hal;
 
 #define TEMPERATURE_LIMIT_C 120
 
-AP_Baro_DPS280::AP_Baro_DPS280(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::Device> _dev)
+AP_Baro_DPS280::AP_Baro_DPS280(AP_Baro &baro, AP_HAL::Device &_dev)
     : AP_Baro_Backend(baro)
-    , dev(std::move(_dev))
+    , dev(&_dev)
 {
 }
 
 AP_Baro_Backend *AP_Baro_DPS280::probe(AP_Baro &baro,
-                                       AP_HAL::OwnPtr<AP_HAL::Device> _dev)
+                                       AP_HAL::Device &_dev)
 {
-    if (!_dev) {
+    AP_Baro_DPS280 *sensor = NEW_NOTHROW AP_Baro_DPS280(baro, _dev);
+    if (!sensor || !sensor->init()) {
+        delete sensor;
         return nullptr;
     }
+    return sensor;
+}
 
-    AP_Baro_DPS280 *sensor = new AP_Baro_DPS280(baro, std::move(_dev));
+AP_Baro_Backend *AP_Baro_DPS310::probe(AP_Baro &baro, AP_HAL::Device &_dev)
+{
+    auto *sensor = NEW_NOTHROW AP_Baro_DPS310(baro, _dev);
     if (!sensor || !sensor->init()) {
         delete sensor;
         return nullptr;
@@ -129,6 +137,20 @@ void AP_Baro_DPS280::set_config_registers(void)
     dev->write_register(DPS280_REG_MCONF, 0x07); // continuous temp and pressure.
 }
 
+void AP_Baro_DPS310::set_config_registers(void)
+{
+        AP_Baro_DPS280::set_config_registers();
+
+        // work around broken temperature handling on some sensors
+        // using undocumented register writes
+        // see https://github.com/infineon/DPS310-Pressure-Sensor/blob/dps310/src/DpsClass.cpp#L442
+        dev->write_register(0x0E, 0xA5);
+        dev->write_register(0x0F, 0x96);
+        dev->write_register(0x62, 0x02);
+        dev->write_register(0x0E, 0x00);
+        dev->write_register(0x0F, 0x00);
+}
+
 bool AP_Baro_DPS280::init()
 {
     if (!dev) {
@@ -143,11 +165,15 @@ bool AP_Baro_DPS280::init()
 
     dev->set_speed(AP_HAL::Device::SPEED_HIGH);
 
+    // the DPS310 can get into a state on boot where the whoami is not
+    // read correctly at startup. Toggling the CS line gets its out of
+    // this state
+    dev->set_chip_select(true);
+    dev->set_chip_select(false);
+
     uint8_t whoami=0;
     if (!dev->read_registers(DPS280_REG_PID, &whoami, 1) ||
         whoami != DPS280_WHOAMI) {
-        // not a DPS280
-        printf("DPS280 whoami=0x%x\n", whoami);
         dev->get_semaphore()->give();
         return false;
     }
@@ -163,7 +189,7 @@ bool AP_Baro_DPS280::init()
 
     instance = _frontend.register_sensor();
 
-    dev->set_device_type(DEVTYPE_BARO_DPS280);
+    dev->set_device_type(device_type());
     set_bus_id(instance, dev->get_bus_id());
     
     dev->get_semaphore()->give();
@@ -215,7 +241,7 @@ void AP_Baro_DPS280::check_health(void)
     }
 }
 
-//  acumulate a new sensor reading
+//  accumulate a new sensor reading
 void AP_Baro_DPS280::timer(void)
 {
     uint8_t buf[6];
@@ -280,3 +306,5 @@ void AP_Baro_DPS280::update(void)
     temperature_sum = 0;
     count=0;
 }
+
+#endif  // AP_BARO_DPS280_ENABLED

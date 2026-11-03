@@ -14,13 +14,16 @@
  */
 #pragma once
 
+#include "AP_Radio_config.h"
+
+#if AP_RADIO_ENABLED
+
 /*
  * base class for direct attached radios
  */
 
-#include <AP_HAL/AP_HAL.h>
 #include <AP_Param/AP_Param.h>
-#include <GCS_MAVLink/GCS.h>
+#include <GCS_MAVLink/GCS_MAVLink.h>
 
 class AP_Radio_backend;
 
@@ -113,10 +116,10 @@ private:
     AP_Int8 protocol;
     AP_Int8 debug_level;
     AP_Int8 disable_crc;
-    AP_Int8 rssi_chan;
-    AP_Int8 pps_chan;
-    AP_Int8 tx_rssi_chan;
-    AP_Int8 tx_pps_chan;
+    AP_UInt8 rssi_chan;
+    AP_UInt8 pps_chan;
+    AP_UInt8 tx_rssi_chan;
+    AP_UInt8 tx_pps_chan;
     AP_Int8 telem_enable;
     AP_Int8 transmit_power;
     AP_Int8 tx_max_power;
@@ -129,3 +132,5 @@ private:
 
     static AP_Radio *_singleton;
 };
+
+#endif  // AP_RADIO_ENABLED

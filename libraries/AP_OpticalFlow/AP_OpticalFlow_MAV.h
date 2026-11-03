@@ -1,6 +1,10 @@
 #pragma once
 
-#include "OpticalFlow.h"
+#include "AP_OpticalFlow_config.h"
+
+#if AP_OPTICALFLOW_MAV_ENABLED
+
+#include "AP_OpticalFlow_Backend.h"
 #include <AP_HAL/utility/OwnPtr.h>
 
 class AP_OpticalFlow_MAV : public OpticalFlow_backend
@@ -19,16 +23,19 @@ public:
     void handle_msg(const mavlink_message_t &msg) override;
 
     // detect if the sensor is available
-    static AP_OpticalFlow_MAV *detect(OpticalFlow &_frontend);
+    static AP_OpticalFlow_MAV *detect(AP_OpticalFlow &_frontend);
 
 private:
 
     uint64_t prev_frame_us;             // system time of last message when update was last called
     uint64_t latest_frame_us;           // system time of most recent messages processed
-    Vector2l flow_sum;                  // sum of sensor's flow_x and flow_y values since last call to update
+    Vector2f flow_sum;                  // sum of sensor's flow_x and flow_y values since last call to update
+    bool flow_sum_is_rads;              // true if flow_sum holds values in rad/s, if false flow_sum holds dpi
     uint16_t quality_sum;               // sum of sensor's quality values since last call to update
     uint16_t count;                     // number of sensor readings since last call to update
     uint8_t sensor_id;                  // sensor_id received in latest mavlink message
     Vector2f gyro_sum;                  // sum of gyro sensor values since last frame from flow sensor
     uint16_t gyro_sum_count;            // number of gyro sensor values in sum
 };
+
+#endif  // AP_OPTICALFLOW_MAV_ENABLED

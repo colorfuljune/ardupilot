@@ -10,7 +10,7 @@
 #include "lprefix.h"
 
 
-#include <setjmp.h>
+#include <AP_HAL/ap_setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -71,9 +71,9 @@
 #else							/* }{ */
 
 /* ISO C handling with long jumps */
-#define LUAI_THROW(L,c)		longjmp((c)->b, 1)
-#define LUAI_TRY(L,c,a)		if (setjmp((c)->b) == 0) { a }
-#define luai_jmpbuf		jmp_buf
+#define LUAI_THROW(L,c)		ap_longjmp((c)->b, 1)
+#define LUAI_TRY(L,c,a)		if (ap_setjmp((c)->b) == 0) { a }
+#define luai_jmpbuf		ap_jmp_buf
 
 #endif							/* } */
 
@@ -128,7 +128,7 @@ l_noret luaD_throw (lua_State *L, int errcode) {
         lua_unlock(L);
         g->panic(L);  /* call panic function (last chance to jump out) */
       }
-      abort();
+      lua_abort();
     }
   }
 }
@@ -768,11 +768,15 @@ static void f_parser (lua_State *L, void *ud) {
   LClosure *cl;
   struct SParser *p = cast(struct SParser *, ud);
   int c = zgetc(p->z);  /* read first character */
+#if LUA_SUPPORT_LOAD_BINARY
+  // support loading pre-compiled luac
   if (c == LUA_SIGNATURE[0]) {
     checkmode(L, p->mode, "binary");
     cl = luaU_undump(L, p->z, p->name);
   }
-  else {
+  else
+#endif
+  {
     checkmode(L, p->mode, "text");
     cl = luaY_parser(L, p->z, &p->buff, &p->dyd, p->name, c);
   }

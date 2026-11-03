@@ -1,13 +1,14 @@
 #pragma once
 
+#include "AP_Compass_config.h"
+
+#if COMPASS_CAL_ENABLED
+
 #include <AP_Math/AP_Math.h>
 
 #define COMPASS_CAL_NUM_SPHERE_PARAMS       4
 #define COMPASS_CAL_NUM_ELLIPSOID_PARAMS    9
 #define COMPASS_CAL_NUM_SAMPLES             300     // number of samples required before fitting begins
-
-#define COMPASS_MIN_SCALE_FACTOR 0.85
-#define COMPASS_MAX_SCALE_FACTOR 1.4
 
 class CompassCalibrator {
 public:
@@ -21,19 +22,20 @@ public:
     void new_sample(const Vector3f& sample);
 
     // set compass's initial orientation and whether it should be automatically fixed (if required)
-    void set_orientation(enum Rotation orientation, bool is_external, bool fix_orientation);
+    void set_orientation(enum Rotation orientation, bool is_external, bool fix_orientation, bool always_45_deg);
 
     // running is true if actively calculating offsets, diagonals or offdiagonals
     bool running();
 
-    // failed is true if either of the failure states are hit
+    // failed is true if any terminal failure state is hit
     bool failed();
 
 
     // update the state machine and calculate offsets, diagonals and offdiagonals
     void update();
 
-    // compass calibration states
+    // compass calibration states - these correspond to the mavlink
+    // MAG_CAL_STATUS enumeration
     enum class Status {
         NOT_STARTED = 0,
         WAITING_TO_START = 1,
@@ -41,8 +43,11 @@ public:
         RUNNING_STEP_TWO = 3,
         SUCCESS = 4,
         FAILED = 5,
-        BAD_ORIENTATION = 6,
-        BAD_RADIUS = 7,
+        FAILED_ORIENTATION = 6,
+        FAILED_RADIUS = 7,
+        FAILED_OFFSETS = 8,
+        FAILED_DIAG_SCALING = 9,
+        FAILED_RESIDUALS_HIGH = 10,
     };
 
     // get completion mask for mavlink reporting (a bitmask of faces/directions for which we have compass samples)
@@ -67,6 +72,7 @@ public:
         Rotation original_orientation;
         Rotation orientation;
         float scale_factor;
+        bool check_orientation;
     } cal_report;
 
     // Structure setup to set calibration run settings
@@ -83,6 +89,7 @@ public:
         float delay_start_sec;
         uint32_t start_time_ms;
         uint8_t compass_idx;
+        bool always_45_deg;
     } cal_settings;
 
     // Get calibration result
@@ -90,6 +97,14 @@ public:
     
     // Get current Calibration state
     const State get_state();
+
+protected:
+    // convert index to rotation, this allows to skip some rotations
+    // protected so CompassCalibrator_index_test can see it
+    Rotation auto_rotation_index(uint8_t n) const;
+
+    // return true if this is a right angle rotation
+    bool right_angle_rotation(Rotation r) const;
 
 private:
 
@@ -114,7 +129,7 @@ private:
     // compact class for approximate attitude, to save memory
     class AttitudeSample {
     public:
-        Matrix3f get_rotmat();
+        Matrix3f get_rotmat() const;
         void set_from_ahrs();
     private:
         int8_t roll;
@@ -144,8 +159,8 @@ private:
     bool accept_sample(const Vector3f &sample, uint16_t skip_index = UINT16_MAX);
     bool accept_sample(const CompassSample &sample, uint16_t skip_index = UINT16_MAX);
 
-    // returns true if fit is acceptable
-    bool fit_acceptable();
+    // returns specific failure Status if fit is unacceptable, SUCCESS if acceptable
+    Status fit_acceptable_status() const;
 
     // clear sample buffer and reset offsets and scaling to their defaults
     void reset_state();
@@ -230,11 +245,14 @@ private:
     bool _is_external;                      // true if compass is external (provided by caller)
     bool _check_orientation;                // true if orientation should be automatically checked
     bool _fix_orientation;                  // true if orientation should be fixed if necessary
+    bool _always_45_deg;                    // true if orientation should consider 45deg with equal tolerance
     float _orientation_confidence;          // measure of confidence in automatic orientation detection
     CompassSample _last_sample;
 
     Status _requested_status;
     bool   _status_set_requested;
+    bool   _retry_pending;
+    uint32_t _retry_hold_start_ms;      // millis() when the FAILED_* status was published (retry hold timer)
 
     bool _new_sample;
 
@@ -244,3 +262,5 @@ private:
     // Semaphore for intermediate structure for point sample collection
     HAL_Semaphore sample_sem;
 };
+
+#endif  // COMPASS_CAL_ENABLED

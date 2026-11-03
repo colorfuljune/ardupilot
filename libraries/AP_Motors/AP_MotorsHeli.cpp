@@ -17,6 +17,8 @@
 #include <AP_HAL/AP_HAL.h>
 #include "AP_MotorsHeli.h"
 #include <GCS_MAVLink/GCS.h>
+#include <AP_Logger/AP_Logger.h>
+#include <AC_Autorotation/RSC_Autorotation.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -44,19 +46,12 @@ const AP_Param::GroupInfo AP_MotorsHeli::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("COL_MAX", 4, AP_MotorsHeli, _collective_max, AP_MOTORS_HELI_COLLECTIVE_MAX),
 
-    // @Param: COL_MID
-    // @DisplayName: Zero-Thrust Collective Pitch 
-    // @Description: Swash servo position in PWM microseconds corresponding to zero collective pitch (or zero lift for Asymmetrical blades)
-    // @Range: 1000 2000
-    // @Units: PWM
-    // @Increment: 1
-    // @User: Standard
-    AP_GROUPINFO("COL_MID", 5, AP_MotorsHeli, _collective_mid, AP_MOTORS_HELI_COLLECTIVE_MID),
+    // index 5 was COL_MID. Do not use this index in the future.
 
     // @Param: SV_MAN
     // @DisplayName: Manual Servo Mode
-    // @Description: Manual servo override for swash set-up. Do not set this manually!
-    // @Values: 0:Disabled,1:Passthrough,2:Max collective,3:Mid collective,4:Min collective
+    // @Description: Manual servo override for swash set-up. Must be 0 (Disabled) for flight!
+    // @Values: 0:Disabled,1:Passthrough,2:Max collective,3:Zero thrust collective,4:Min collective
     // @User: Standard
     AP_GROUPINFO("SV_MAN",  6, AP_MotorsHeli, _servo_mode, SERVO_CONTROL_MODE_AUTOMATED),
 
@@ -96,6 +91,77 @@ const AP_Param::GroupInfo AP_MotorsHeli::var_info[] = {
     // @Path: AP_MotorsHeli_RSC.cpp
     AP_SUBGROUPINFO(_main_rotor, "RSC_", 25, AP_MotorsHeli, AP_MotorsHeli_RSC),
 
+    // @Param: COL_HOVER
+    // @DisplayName: Collective Hover Value
+    // @Description: Collective needed to hover expressed as a number from 0 to 1 where 0 is H_COL_MIN and 1 is H_COL_MAX
+    // @Range: 0.3 0.8
+    // @User: Advanced
+    AP_GROUPINFO("COL_HOVER", 26, AP_MotorsHeli, _collective_hover, AP_MOTORS_HELI_COLLECTIVE_HOVER_DEFAULT),
+
+    // @Param: HOVER_LEARN
+    // @DisplayName: Hover Value Learning
+    // @Description: Enable/Disable automatic learning of hover collective
+    // @Values: 0:Disabled, 1:Learn, 2:Learn and Save
+    // @User: Advanced
+    AP_GROUPINFO("HOVER_LEARN", 27, AP_MotorsHeli, _collective_hover_learn, HOVER_LEARN_AND_SAVE),
+
+    // @Param: OPTIONS
+    // @DisplayName: Heli_Options
+    // @Description: Bitmask of heli options.  Bit 0 changes how the pitch, roll, and yaw axis integrator term is managed for low speed and takeoff/landing. In AC 4.0 and earlier, scheme uses a leaky integrator for ground speeds less than 5 m/s and won't let the steady state integrator build above ILMI. The integrator is allowed to build to the ILMI value when it is landed.  The other integrator management scheme bases integrator limiting on takeoff and landing.  Whenever the aircraft is landed the integrator is set to zero.  When the aicraft is airborne, the integrator is only limited by IMAX. 
+    // @Bitmask: 0:Use Leaky I
+    // @User: Standard
+    AP_GROUPINFO("OPTIONS", 28, AP_MotorsHeli, _heli_options, (uint8_t)HeliOption::USE_LEAKY_I),
+
+    // @Param: COL_ANG_MIN
+    // @DisplayName: Collective Blade Pitch Angle Minimum
+    // @Description: Minimum collective blade pitch angle in deg that corresponds to the PWM set for minimum collective pitch (H_COL_MIN).
+    // @Range: -20 0
+    // @Units: deg
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("COL_ANG_MIN", 29, AP_MotorsHeli, _collective_min_deg, AP_MOTORS_HELI_COLLECTIVE_MIN_DEG),
+
+    // @Param: COL_ANG_MAX
+    // @DisplayName: Collective Blade Pitch Angle Maximum
+    // @Description: Maximum collective blade pitch angle in deg that corresponds to the PWM set for maximum collective pitch (H_COL_MAX).
+    // @Range: 5 20
+    // @Units: deg
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("COL_ANG_MAX", 30, AP_MotorsHeli, _collective_max_deg, AP_MOTORS_HELI_COLLECTIVE_MAX_DEG),
+
+    // @Param: COL_ZERO_THRST
+    // @DisplayName: Collective Blade Pitch at Zero Thrust
+    // @Description: Collective blade pitch angle at zero thrust in degrees. For symetric airfoil blades this value is zero deg. For chambered airfoil blades this value is typically negative.
+    // @Range: -5 0
+    // @Units: deg
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("COL_ZERO_THRST", 31, AP_MotorsHeli, _collective_zero_thrust_deg, 0.0f),
+
+    // @Param: COL_LAND_MIN
+    // @DisplayName: Collective Blade Pitch Minimum when Landed
+    // @Description: Minimum collective blade pitch angle when landed in degrees for non-manual collective modes (i.e. modes that use altitude hold).
+    // @Range: -5 0
+    // @Units: deg
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("COL_LAND_MIN", 32, AP_MotorsHeli, _collective_land_min_deg, AP_MOTORS_HELI_COLLECTIVE_LAND_MIN),
+
+    // @Group: RSC_AROT_
+    // @Path: ../AC_Autorotation/RSC_Autorotation.cpp
+    AP_SUBGROUPINFO(_main_rotor.autorotation, "RSC_AROT_", 33, AP_MotorsHeli, RSC_Autorotation),
+
+#if HAL_LOGGING_ENABLED
+    // @Param: CYC_ANG_MAX
+    // @DisplayName: Cyclic Blade Pitch Angle Maximum
+    // @Description: Maximum cyclic blade pitch angle in deg that corresponds to the setting for maximum cyclic pitch (H_CYC_MAX). Used for logging only. Zero disables swashplate logging.
+    // @Range: 5 20
+    // @Units: deg
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("CYC_ANG_MAX", 34, AP_MotorsHeli, _cyclic_max_deg, 0.0f),
+#endif
     AP_GROUPEND
 };
 
@@ -117,32 +183,27 @@ void AP_MotorsHeli::init(motor_frame_class frame_class, motor_frame_type frame_t
     _servo_test_cycle_counter = _servo_test;
 
     // ensure inputs are not passed through to servos on start-up
-    _servo_mode = SERVO_CONTROL_MODE_AUTOMATED;
+    _servo_mode.set(SERVO_CONTROL_MODE_AUTOMATED);
 
     // initialise radio passthrough for collective to middle
     _throttle_radio_passthrough = 0.5f;
 
     // initialise Servo/PWM ranges and endpoints
-    if (!init_outputs()) {
-        // don't set initialised_ok
-        return;
-    }
+    init_outputs();
 
     // calculate all scalars
     calculate_scalars();
 
-    // record successful initialisation if what we setup was the desired frame_class
-    _flags.initialised_ok = (frame_class == MOTOR_FRAME_HELI);
-
     // set flag to true so targets are initialized once aircraft is armed for first time
     _heliflags.init_targets_on_arming = true;
 
+    _mav_type = MAV_TYPE_HELICOPTER;
 }
 
-// set frame class (i.e. quad, hexa, heli) and type (i.e. x, plus)
-void AP_MotorsHeli::set_frame_class_and_type(motor_frame_class frame_class, motor_frame_type frame_type)
+// calculate_scalars - recalculates various scalers used.
+void AP_MotorsHeli::calculate_armed_scalars()
 {
-    _flags.initialised_ok = (frame_class == MOTOR_FRAME_HELI);
+    _main_rotor.configure_armed();
 }
 
 // output_min - sets servos to neutral point with motors stopped
@@ -150,13 +211,16 @@ void AP_MotorsHeli::output_min()
 {
     // move swash to mid
     move_actuators(0.0f,0.0f,0.5f,0.0f);
+    
+    // _spool_state is enforced to SHUT_DOWN when _spool_desired is SHUT_DOWN.
+    set_desired_spool_state(DesiredSpoolState::SHUT_DOWN);
+    _spool_state = update_spool_state(_spool_desired);
+    update_motor_control(_spool_desired);
 
-    update_motor_control(ROTOR_CONTROL_STOP);
+    output_to_motors();
 
     // override limits flags
-    limit.roll = true;
-    limit.pitch = true;
-    limit.yaw = true;
+    limit.set_rpy(true);
     limit.throttle_lower = true;
     limit.throttle_upper = false;
 }
@@ -170,20 +234,22 @@ void AP_MotorsHeli::output()
     // run spool logic
     output_logic();
 
-    if (_flags.armed) {
+    if (armed()) {
         // block servo_test from happening at disarm
         _servo_test_cycle_counter = 0;
-        
-        calculate_armed_scalars();
-        if (!_flags.interlock) {
-            output_armed_zero_throttle();
-        } else {
-            output_armed_stabilizing();
-        }
+        output_armed_stabilizing();
     } else {
         output_disarmed();
     }
-    
+
+    // helicopters always run stabilizing flight controls
+    move_actuators(_roll_in, _pitch_in, get_throttle(), _yaw_in);
+
+    // motor control must be updated after move_actuators because DDFP Tail Rotor output is based on move actuators()
+    update_motor_control(_spool_desired);
+
+    update_turbine_start();
+
     output_to_motors();
 
 };
@@ -191,23 +257,12 @@ void AP_MotorsHeli::output()
 // sends commands to the motors
 void AP_MotorsHeli::output_armed_stabilizing()
 {
+    calculate_armed_scalars();
+
     // if manual override active after arming, deactivate it and reinitialize servos
     if (_servo_mode != SERVO_CONTROL_MODE_AUTOMATED) {
         reset_flight_controls();
     }
-
-    move_actuators(_roll_in, _pitch_in, get_throttle(), _yaw_in);
-}
-
-// output_armed_zero_throttle - sends commands to the motors
-void AP_MotorsHeli::output_armed_zero_throttle()
-{
-    // if manual override active after arming, deactivate it and reinitialize servos
-    if (_servo_mode != SERVO_CONTROL_MODE_AUTOMATED) {
-        reset_flight_controls();
-    }
-
-    move_actuators(_roll_in, _pitch_in, get_throttle(), _yaw_in);
 }
 
 // output_disarmed - sends commands to the motors
@@ -234,7 +289,7 @@ void AP_MotorsHeli::output_disarmed()
                 // fixate mid collective
                 _roll_in = 0.0f;
                 _pitch_in = 0.0f;
-                _throttle_filter.reset(_collective_mid_pct);
+                _throttle_filter.reset(_collective_zero_thrust_pct);
                 _yaw_in = 0.0f;
                 break;
             case SERVO_CONTROL_MODE_MANUAL_MAX:
@@ -276,78 +331,105 @@ void AP_MotorsHeli::output_disarmed()
 
     // continuously recalculate scalars to allow setup
     calculate_scalars();
+}
 
-    // helicopters always run stabilizing flight controls
-    move_actuators(_roll_in, _pitch_in, get_throttle(), _yaw_in);
+// set_desired_spool_state - set desired spool state with safety constraints
+void AP_MotorsHeli::set_desired_spool_state(DesiredSpoolState desired)
+{
+    // Safety constraint: disarmed vehicles must be shut down
+    if (!armed()) {
+        _spool_desired = DesiredSpoolState::SHUT_DOWN;
+        return;
+    }
+
+    // Safety constraint: without interlock, limit to GROUND_IDLE
+    // (allows swash movement for autorotation, but rotor cannot spin up)
+    if (!get_interlock()) {
+        switch (desired) {
+            case DesiredSpoolState::SHUT_DOWN:
+                _spool_desired = DesiredSpoolState::SHUT_DOWN;
+                break;
+            case DesiredSpoolState::GROUND_IDLE:
+            case DesiredSpoolState::THROTTLE_UNLIMITED:
+                _spool_desired = DesiredSpoolState::GROUND_IDLE;
+                break;
+        }
+        return;
+    }
+
+    // No safety constraints active - accept requested state
+    _spool_desired = desired;
 }
 
 // run spool logic
 void AP_MotorsHeli::output_logic()
 {
     // force desired and current spool mode if disarmed and armed with interlock enabled
-    if (_flags.armed) {
-        if (!_flags.interlock) {
+    if (armed()) {
+        if (!get_interlock()) {
             _spool_desired = DesiredSpoolState::GROUND_IDLE;
         } else {
             _heliflags.init_targets_on_arming = false;
         }
     } else {
         _heliflags.init_targets_on_arming = true;
-        _spool_desired = DesiredSpoolState::SHUT_DOWN;
-        _spool_state = SpoolState::SHUT_DOWN;
+        _spool_desired = DesiredSpoolState::SHUT_DOWN; // RSC will enforce _spool_state to SHUT_DOWN when spool_desired is SHUT_DOWN
     }
+
+    // send desired spool state update to Heli RSC and update outputs
+    // the Heli RSC will return the current spool state which is used to update _spool_state variable
+    // _spool_state is enforced to SHUT_DOWN when _spool_desired is SHUT_DOWN.
+    _spool_state = update_spool_state(_spool_desired);
+
+    // Always reset the collective limit flags, they get set in move_actuators() if collective reaches a limit
+    limit.set_throttle(false);
 
     switch (_spool_state) {
         case SpoolState::SHUT_DOWN:
             // Motors should be stationary.
             // Servos set to their trim values or in a test condition.
 
-            // make sure the motors are spooling in the correct direction
-            if (_spool_desired != DesiredSpoolState::SHUT_DOWN) {
-                _spool_state = SpoolState::GROUND_IDLE;
-                break;
+            // set limits flags
+            if (!using_leaky_integrator()) {
+                limit.set_rpy(true);
+            } else {
+                limit.set_rpy(false);
             }
-
             break;
 
         case SpoolState::GROUND_IDLE: {
             // Motors should be stationary or at ground idle.
-            // Servos should be moving to correct the current attitude.
-            if (_spool_desired == DesiredSpoolState::SHUT_DOWN){
-                _spool_state = SpoolState::SHUT_DOWN;
-            } else if(_spool_desired == DesiredSpoolState::THROTTLE_UNLIMITED) {
-                _spool_state = SpoolState::SPOOLING_UP;
-            } else {    // _spool_desired == GROUND_IDLE
-
+            // set limits flags
+            if (_heliflags.land_complete && !using_leaky_integrator()) {
+                limit.set_rpy(true);
+            } else {
+                limit.set_rpy(false);
             }
-
             break;
         }
         case SpoolState::SPOOLING_UP:
             // Maximum throttle should move from minimum to maximum.
             // Servos should exhibit normal flight behavior.
 
-            // make sure the motors are spooling in the correct direction
-            if (_spool_desired != DesiredSpoolState::THROTTLE_UNLIMITED ){
-                _spool_state = SpoolState::SPOOLING_DOWN;
-                break;
+            // set limits flags
+            if (_heliflags.land_complete && !using_leaky_integrator()) {
+                limit.set_rpy(true);
+            } else {
+                limit.set_rpy(false);
             }
 
-            if (_heliflags.rotor_runup_complete){
-                _spool_state = SpoolState::THROTTLE_UNLIMITED;
-            }
             break;
 
         case SpoolState::THROTTLE_UNLIMITED:
             // Throttle should exhibit normal flight behavior.
             // Servos should exhibit normal flight behavior.
 
-            // make sure the motors are spooling in the correct direction
-            if (_spool_desired != DesiredSpoolState::THROTTLE_UNLIMITED) {
-                _spool_state = SpoolState::SPOOLING_DOWN;
-                break;
+            // set limits flags
+            if (_heliflags.land_complete && !using_leaky_integrator()) {
+                limit.set_rpy(true);
+            } else {
+                limit.set_rpy(false);
             }
-
 
             break;
 
@@ -355,79 +437,21 @@ void AP_MotorsHeli::output_logic()
             // Maximum throttle should move from maximum to minimum.
             // Servos should exhibit normal flight behavior.
 
-            // make sure the motors are spooling in the correct direction
-            if (_spool_desired == DesiredSpoolState::THROTTLE_UNLIMITED) {
-                _spool_state = SpoolState::SPOOLING_UP;
-                break;
-            }
-            if (!rotor_speed_above_critical()){
-                _spool_state = SpoolState::GROUND_IDLE;
+            // set limits flags
+            if (_heliflags.land_complete && !using_leaky_integrator()) {
+                limit.set_rpy(true);
+            } else {
+                limit.set_rpy(false);
             }
             break;
     }
-}
 
-// parameter_check - check if helicopter specific parameters are sensible
-bool AP_MotorsHeli::parameter_check(bool display_msg) const
-{
-    // returns false if RSC Mode is not set to a valid control mode
-    if (_main_rotor._rsc_mode.get() <= (int8_t)ROTOR_CONTROL_MODE_DISABLED || _main_rotor._rsc_mode.get() > (int8_t)ROTOR_CONTROL_MODE_CLOSED_LOOP_POWER_OUTPUT) {
-        if (display_msg) {
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "PreArm: H_RSC_MODE invalid");
-        }
-        return false;
-    }
-
-    // returns false if rsc_setpoint is out of range
-    if ( _main_rotor._rsc_setpoint.get() > 100 || _main_rotor._rsc_setpoint.get() < 10){
-        if (display_msg) {
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "PreArm: H_RSC_SETPOINT out of range");
-        }
-        return false;
-    }
-
-    // returns false if idle output is out of range
-    if ( _main_rotor._idle_output.get() > 100 || _main_rotor._idle_output.get() < 0){
-        if (display_msg) {
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "PreArm: H_RSC_IDLE out of range");
-        }
-        return false;
-    }
-
-    // returns false if _rsc_critical is not between 0 and 100
-    if (_main_rotor._critical_speed.get() > 100 || _main_rotor._critical_speed.get() < 0) {
-        if (display_msg) {
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "PreArm: H_RSC_CRITICAL out of range");
-        }
-        return false;
-    }
-
-    // returns false if RSC Runup Time is less than Ramp time as this could cause undesired behaviour of rotor speed estimate
-    if (_main_rotor._runup_time.get() <= _main_rotor._ramp_time.get()){
-        if (display_msg) {
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "PreArm: H_RUNUP_TIME too small");
-        }
-        return false;
-    }
-
-    // all other cases parameters are OK
-    return true;
-}
-
-// reset_swash_servo
-void AP_MotorsHeli::reset_swash_servo(SRV_Channel::Aux_servo_function_t function)
-{
-    // outputs are defined on a -500 to 500 range for swash servos
-    SRV_Channels::set_range(function, 1000);
-
-    // swash servos always use full endpoints as restricting them would lead to scaling errors
-    SRV_Channels::set_output_min_max(function, 1000, 2000);
 }
 
 // update the throttle input filter
 void AP_MotorsHeli::update_throttle_filter()
 {
-    _throttle_filter.apply(_throttle_in, 1.0f/_loop_rate);
+    _throttle_filter.apply(_throttle_in,  _dt_s);
 
     // constrain filtered throttle
     if (_throttle_filter.get() < 0.0f) {
@@ -441,19 +465,176 @@ void AP_MotorsHeli::update_throttle_filter()
 // reset_flight_controls - resets all controls and scalars to flight status
 void AP_MotorsHeli::reset_flight_controls()
 {
-    _servo_mode = SERVO_CONTROL_MODE_AUTOMATED;
+    _servo_mode.set(SERVO_CONTROL_MODE_AUTOMATED);
     init_outputs();
     calculate_scalars();
 }
 
-// convert input in -1 to +1 range to pwm output for swashplate servo.
-// The value 0 corresponds to the trim value of the servo. Swashplate
-// servo travel range is fixed to 1000 pwm and therefore the input is
-// multiplied by 500 to get PWM output.
-void AP_MotorsHeli::rc_write_swash(uint8_t chan, float swash_in)
+// update the collective input filter.  should be called at 100hz
+void AP_MotorsHeli::update_throttle_hover(float dt)
 {
-    uint16_t pwm = (uint16_t)(1500 + 500 * swash_in);
-    SRV_Channel::Aux_servo_function_t function = SRV_Channels::get_motor_function(chan);
-    SRV_Channels::set_output_pwm_trimmed(function, pwm);
+    if (_collective_hover_learn != HOVER_LEARN_DISABLED) {
+
+        // Don't let _collective_hover go below H_COLL_ZERO_THRST
+        float curr_collective = get_throttle();
+        if (curr_collective < _collective_zero_thrust_pct) {
+            curr_collective = _collective_zero_thrust_pct;
+        }
+
+        // we have chosen to constrain the hover collective to be within the range reachable by the third order expo polynomial.
+        _collective_hover.set(constrain_float(_collective_hover + (dt / (dt + AP_MOTORS_HELI_COLLECTIVE_HOVER_TC)) * (curr_collective - _collective_hover), AP_MOTORS_HELI_COLLECTIVE_HOVER_MIN, AP_MOTORS_HELI_COLLECTIVE_HOVER_MAX));
+    }
 }
 
+// save parameters as part of disarming
+void AP_MotorsHeli::save_params_on_disarm()
+{
+    // save hover throttle
+    if (_collective_hover_learn == HOVER_LEARN_AND_SAVE) {
+        _collective_hover.save();
+    }
+}
+
+// updates the takeoff collective flag
+void AP_MotorsHeli::update_takeoff_collective_flag(float coll_out)
+{
+    if (coll_out > _collective_zero_thrust_pct + 0.5f * (_collective_hover - _collective_zero_thrust_pct)) {
+        _heliflags.takeoff_collective = true;
+    } else {
+        _heliflags.takeoff_collective = false;
+    }
+}
+
+// Determines if _heli_options bit is set
+bool AP_MotorsHeli::heli_option(HeliOption opt) const
+{
+    return (_heli_options & (uint8_t)opt);
+}
+
+// updates the turbine start flag
+void AP_MotorsHeli::update_turbine_start()
+{
+    if (_heliflags.start_engine) {
+        _main_rotor.set_turbine_start(true);
+    } else {
+        _main_rotor.set_turbine_start(false);
+    }
+}
+
+// Run arming checks
+bool AP_MotorsHeli::arming_checks(size_t buflen, char *buffer) const
+{
+    // run base class checks
+    if (!AP_Motors::arming_checks(buflen, buffer)) {
+        return false;
+    }
+
+    if (_heliflags.servo_test_running) {
+        hal.util->snprintf(buffer, buflen, "Servo Test is still running");
+        return false;
+    }
+
+    // returns false if RSC Mode is not set to a valid control mode
+    if (_main_rotor._rsc_mode.get() <= (int8_t)ROTOR_CONTROL_MODE_DISABLED || _main_rotor._rsc_mode.get() > (int8_t)ROTOR_CONTROL_MODE_AUTOTHROTTLE) {
+        hal.util->snprintf(buffer, buflen, "H_RSC_MODE invalid");
+        return false;
+    }
+
+    // returns false if rsc_setpoint is out of range
+    if ( _main_rotor._rsc_setpoint.get() > 100 || _main_rotor._rsc_setpoint.get() < 10){
+        hal.util->snprintf(buffer, buflen, "H_RSC_SETPOINT out of range");
+        return false;
+    }
+
+    // returns false if idle output is out of range
+    if ( _main_rotor._idle_output.get() > 100 || _main_rotor._idle_output.get() < 0){
+        hal.util->snprintf(buffer, buflen, "H_RSC_IDLE out of range");
+        return false;
+    }
+
+    // returns false if _rsc_critical is not between 0 and 100
+    if (_main_rotor._critical_speed.get() > 100 || _main_rotor._critical_speed.get() < 0) {
+        hal.util->snprintf(buffer, buflen, "H_RSC_CRITICAL out of range");
+        return false;
+    }
+
+    // returns false if RSC Runup Time is less than Ramp time as this could cause undesired behaviour of rotor speed estimate
+    if (_main_rotor._runup_time.get() <= _main_rotor._ramp_time.get()){
+        hal.util->snprintf(buffer, buflen, "H_RUNUP_TIME too small");
+        return false;
+    }
+
+    // returns false if _collective_min_deg is not default value which indicates users set parameter
+    if (is_equal((float)_collective_min_deg, (float)AP_MOTORS_HELI_COLLECTIVE_MIN_DEG)) {
+        hal.util->snprintf(buffer, buflen, "Set H_COL_ANG_MIN to measured min blade pitch in deg");
+        return false;
+    }
+
+    // returns false if _collective_max_deg is not default value which indicates users set parameter
+    if (is_equal((float)_collective_max_deg, (float)AP_MOTORS_HELI_COLLECTIVE_MAX_DEG)) {
+        hal.util->snprintf(buffer, buflen, "Set H_COL_ANG_MAX to measured max blade pitch in deg");
+        return false;
+    }
+
+    if (!_main_rotor.autorotation.arming_checks(buflen, buffer)) {
+        return false;
+    }
+
+    return true;
+}
+
+// Tell user motor test is disabled on heli
+bool AP_MotorsHeli::motor_test_checks(size_t buflen, char *buffer) const
+{
+    hal.util->snprintf(buffer, buflen, "Disabled on heli");
+    return false;
+}
+
+// get_motor_mask - returns a bitmask of which outputs are being used for motors or servos (1 means being used)
+//  this can be used to ensure other pwm outputs (i.e. for servos) do not conflict
+uint32_t AP_MotorsHeli::get_motor_mask()
+{
+    return _main_rotor.get_output_mask();
+}
+
+// set_desired_rotor_speed
+void AP_MotorsHeli::set_desired_rotor_speed(float desired_rotor_speed)
+{
+    _main_rotor.set_passthru_desired_rotor_speed(desired_rotor_speed);
+}
+
+// Update _heliflags.rotor_runup_complete value writing log event on state change
+void AP_MotorsHeli::set_rotor_runup_complete(bool new_value)
+{
+#if HAL_LOGGING_ENABLED
+    if (!_heliflags.rotor_runup_complete && new_value) {
+        LOGGER_WRITE_EVENT(LogEvent::ROTOR_RUNUP_COMPLETE);
+    } else if (_heliflags.rotor_runup_complete && !new_value && !_main_rotor.in_autorotation()) {
+        LOGGER_WRITE_EVENT(LogEvent::ROTOR_SPEED_BELOW_CRITICAL);
+    }
+#endif
+    _heliflags.rotor_runup_complete = new_value;
+}
+
+// Helper function for param conversions to be done in motors class
+void AP_MotorsHeli::heli_motors_param_conversions(void)
+{
+    // PARAMETER_CONVERSION - Added: Sep-2024
+    // move autorotation related parameters within the RSC into their own class
+    const AP_Param::ConversionInfo rsc_arot_conversion_info[] = {
+        { 90, 108096, AP_PARAM_INT8,  "H_RSC_AROT_ENBL" },
+        { 90, 104000, AP_PARAM_INT8,  "H_RSC_AROT_RAMP" },
+        { 90, 112192, AP_PARAM_INT16,  "H_RSC_AROT_IDLE" },
+    };
+    uint8_t table_size = ARRAY_SIZE(rsc_arot_conversion_info);
+    for (uint8_t i=0; i<table_size; i++) {
+        AP_Param::convert_old_parameter(&rsc_arot_conversion_info[i], 1.0);
+    }
+}
+
+// function to calculate and set the normalised collective position given a desired blade pitch angle (deg)
+void AP_MotorsHeli::set_coll_from_ang(float col_ang_deg)
+{
+    const float col_norm = (col_ang_deg - _collective_min_deg.get()) / MAX((_collective_max_deg.get() - _collective_min_deg.get()), 1.0);
+    set_throttle(constrain_float(col_norm, 0.0, 1.0));
+}

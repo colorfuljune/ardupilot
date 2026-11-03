@@ -12,6 +12,10 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include "AP_Notify_config.h"
+
+#if AP_NOTIFY_EXTERNALLED_ENABLED
+
 #include "ExternalLED.h"
 
 #include "AP_Notify.h"
@@ -106,12 +110,12 @@ void ExternalLED::update(void)
 
     // GPS led control
     switch (AP_Notify::flags.gps_status) {
-        case 0:
+        case AP_GPS_FixType::NO_GPS:
             // no GPS attached
             gps_led(false);
             break;
-        case 1:
-        case 2:
+        case AP_GPS_FixType::NONE:
+        case AP_GPS_FixType::FIX_2D:
             // GPS attached but no lock, blink at 4Hz
             switch(_counter2) {                             // Pattern: 3(off), 2(on), 3(off), 2(on), repeat
                 case 0:
@@ -130,7 +134,7 @@ void ExternalLED::update(void)
                     break;
             }
             break;
-        case 3:
+        default:
             // solid blue on gps lock
             gps_led(true);
             break;
@@ -242,3 +246,5 @@ void ExternalLED::motor_led2(bool on_off)
 bool ExternalLED::init(void) {return true;}
 void ExternalLED::update(void) {return;}
 #endif
+
+#endif  // AP_NOTIFY_EXTERNALLED_ENABLED

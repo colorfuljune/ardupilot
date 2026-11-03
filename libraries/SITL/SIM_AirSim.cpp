@@ -16,6 +16,10 @@
 	Simulator Connector for AirSim
 */
 
+#include "SIM_config.h"
+
+#if AP_SIM_AIRSIM_ENABLED
+
 #include "SIM_AirSim.h"
 
 #include <stdio.h>
@@ -53,12 +57,14 @@ AirSim::AirSim(const char *frame_str) :
 */
 void AirSim::set_interface_ports(const char* address, const int port_in, const int port_out)
 {
-	if (!sock.bind("0.0.0.0", port_in)) {
+    static const char *port_in_addr = "0.0.0.0";
+
+    if (!sock.bind(port_in_addr, port_in)) {
 		printf("Unable to bind Airsim sensor_in socket at port %u - Error: %s\n",
 				 port_in, strerror(errno));
 		return;
 	}
-	printf("Bind SITL sensor input at %s:%u\n", "127.0.0.1", port_in);
+	printf("Bind SITL sensor input at %s:%u\n", port_in_addr, port_in);
 	sock.set_blocking(false);
 	sock.reuseaddress();
 
@@ -160,7 +166,7 @@ bool AirSim::parse_sensors(const char *json)
                 break;
 
             case DATA_FLOAT:
-                *((float *)key.ptr) = atof(p);
+                *((float *)key.ptr) = strtof(p, nullptr);
                 break;
 
             case DATA_DOUBLE:
@@ -240,7 +246,7 @@ bool AirSim::parse_sensors(const char *json)
                         v->data = d;
                         v->length = n+1;
                     }
-                    v->data[n] = atof(p);
+                    v->data[n] = strtof(p, nullptr);
                     n++;
                     p = strchr(p,',');
                     if (!p) {
@@ -303,11 +309,14 @@ void AirSim::recv_fdm(const sitl_input& input)
     gyro = state.imu.angular_velocity;
     velocity_ef = state.velocity.world_linear_velocity;
 
-    location.lat = state.gps.lat * 1.0e7;
-    location.lng = state.gps.lon * 1.0e7;
-    location.alt = state.gps.alt * 100.0f;
+    location = {
+        int32_t(state.gps.lat * 1.0e7),
+        int32_t(state.gps.lon * 1.0e7),
+        int32_t(state.gps.alt * 100.0f),
+        Location::AltFrame::ABSOLUTE
+    };
 
-    position = home.get_distance_NED(location);
+    position = origin.get_distance_NED_double(location);
 
     dcm.from_euler(state.pose.roll, state.pose.pitch, state.pose.yaw);
 
@@ -332,10 +341,13 @@ void AirSim::recv_fdm(const sitl_input& input)
     }
 
     // Update Rangefinder data, max sensors limit as defined
-    uint8_t rng_sensor_count = MIN(state.rng.rng_distances.length, RANGEFINDER_MAX_INSTANCES);
+    uint8_t rng_sensor_count = MIN(state.rng.rng_distances.length, ARRAY_SIZE(rangefinder_m));
     for (uint8_t i=0; i<rng_sensor_count; i++) {
         rangefinder_m[i] = state.rng.rng_distances.data[i];
     }
+
+    // AirSim does not provide battery information, so use the standard battery model.
+    update_battery();
 
 #if 0
 // @LoggerMessage: ASM1
@@ -348,7 +360,7 @@ void AirSim::recv_fdm(const sitl_input& input)
 // @Field: GX: Simulated gyroscope, X-axis
 // @Field: GY: Simulated gyroscope, Y-axis
 // @Field: GZ: Simulated gyroscope, Z-axis
-    AP::logger().Write("ASM1", "TimeUS,TUS,R,P,Y,GX,GY,GZ",
+    AP::logger().WriteStreaming("ASM1", "TimeUS,TUS,R,P,Y,GX,GY,GZ",
                        "QQffffff",
                        AP_HAL::micros64(),
                        state.timestamp,
@@ -375,7 +387,7 @@ void AirSim::recv_fdm(const sitl_input& input)
 // @Field: PZ: simulation's position, Z-axis
 // @Field: Alt: simulation's gps altitude
 // @Field: SD: simulation's earth-frame speed-down
-    AP::logger().Write("ASM2", "TimeUS,AX,AY,AZ,VX,VY,VZ,PX,PY,PZ,Alt,SD",
+    AP::logger().WriteStreaming("ASM2", "TimeUS,AX,AY,AZ,VX,VY,VZ,PX,PY,PZ,Alt,SD",
                        "Qfffffffffff",
                        AP_HAL::micros64(),
                        accel_body.x,
@@ -423,3 +435,5 @@ void AirSim::report_FPS(void)
         last_frame_count = state.timestamp;
     }
 }
+
+#endif  // AP_SIM_AIRSIM_ENABLED

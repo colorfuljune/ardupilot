@@ -1,18 +1,25 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # encoding: utf-8
+# flake8: noqa
 
-from __future__ import print_function
-
+import optparse
 import os.path
 import os
 import sys
 import subprocess
+import json
+import fnmatch
 sys.path.insert(0, 'Tools/ardupilotwaf/')
+sys.path.insert(0, 'Tools/scripts/')
 
 import ardupilotwaf
 import boards
+import shutil
+import build_options
+import glob
 
 from waflib import Build, ConfigSet, Configure, Context, Utils
+from waflib.Configure import conf
 
 # TODO: implement a command 'waf help' that shows the basic tasks a
 # developer might want to do: e.g. how to configure a board, compile a
@@ -33,13 +40,43 @@ Build.BuildContext.execute = ardupilotwaf.ap_autoconfigure(Build.BuildContext.ex
 Configure.ConfigurationContext.post_recurse = ardupilotwaf.ap_configure_post_recurse()
 
 
+# Get the GitHub Actions summary file path
+is_ci = os.getenv('CI')
+
+
 def _set_build_context_variant(board):
     for c in Context.classes:
         if not issubclass(c, Build.BuildContext):
             continue
         c.variant = board
 
+# Remove all submodules and then sync
+@conf
+def submodule_force_clean(ctx):
+    whitelist = {
+                            'COLCON_IGNORE',
+                            'esp_idf',
+                          }
+
+    # Get all items in the modules folder
+    module_list = os.scandir('modules')
+
+    # Delete all directories except those in the whitelist
+    for module in module_list:
+        if (module.is_dir()) and (module.name not in whitelist):
+            shutil.rmtree(module)
+
+    submodulesync(ctx)
+
+# run Tools/gittools/submodule-sync.sh to sync submodules
+@conf
+def submodulesync(ctx):
+    subprocess.call(['Tools/gittools/submodule-sync.sh'])
+
 def init(ctx):
+    # Generate Task List, so that VS Code extension can keep track
+    # of changes to possible build targets
+    generate_tasklist(ctx, False)
     env = ConfigSet.ConfigSet()
     try:
         p = os.path.join(Context.out_dir, Build.CACHE_DIR, Build.CACHE_SUFFIX)
@@ -56,6 +93,54 @@ def init(ctx):
 
     # define the variant build commands according to the board
     _set_build_context_variant(board)
+
+def add_build_options(g):
+    '''add any option in Tools/scripts/build_options.py'''
+    for opt in build_options.BUILD_OPTIONS:
+        enable_option = "--" + opt.config_option()
+        disable_option = enable_option.replace("--enable", "--disable")
+        enable_description = opt.description
+        if not enable_description.lower().startswith("enable"):
+            enable_description = "Enable " + enable_description
+        disable_description = "Disable " + enable_description[len("Enable "):]
+        g.add_option(enable_option,
+                     action='store_true',
+                     default=False,
+                     help=enable_description)
+        g.add_option(disable_option,
+                     action='store_true',
+                     default=False,
+                     help=disable_description)
+
+        # also add entirely-lower-case equivalents with underscores
+        # replaced with dashes, unless the option is already defined
+        # explicitly: the parser resolves conflicts by replacing the
+        # existing option, which would hide its help text:
+        lower_enable_option = enable_option.lower().replace("_", "-")
+        if lower_enable_option != enable_option and not g.has_option(lower_enable_option):
+            g.add_option(lower_enable_option,
+                         action='store_true',
+                         default=False,
+                         help=optparse.SUPPRESS_HELP)
+        lower_disable_option = disable_option.lower().replace("_", "-")
+        if lower_disable_option != disable_option and not g.has_option(lower_disable_option):
+            g.add_option(lower_disable_option,
+                         action='store_true',
+                         default=False,
+                         help=optparse.SUPPRESS_HELP)
+
+def add_script_options(g):
+    '''add any drivers or applets from libraries/AP_Scripting'''
+    driver_list = glob.glob(os.path.join(Context.run_dir, "libraries/AP_Scripting/drivers/*.lua"))
+    applet_list = glob.glob(os.path.join(Context.run_dir, "libraries/AP_Scripting/applets/*.lua"))
+    for d in driver_list + applet_list:
+        bname = os.path.basename(d)
+        embed_name = bname[:-4]
+        embed_option = "--embed-%s" % embed_name
+        g.add_option(embed_option,
+                     action='store_true',
+                     default=False,
+                     help="Embed %s in ROMFS" % bname)
 
 def options(opt):
     opt.load('compiler_cxx compiler_c waf_unit_test python')
@@ -76,31 +161,76 @@ def options(opt):
         default=False,
         help='Configure as debug variant.')
 
-    g.add_option('--Werror',
+    g.add_option('--debug-symbols', '-g',
         action='store_true',
         default=False,
+        help='Add debug symbolds to build.')
+
+    g.add_option('--vs-launch',
+        action='store_true',
+        default=False,
+        help='Generate wscript environment variable to .vscode/setting.json for Visual Studio Code')
+    
+    g.add_option('--disable-watchdog',
+        action='store_true',
+        default=False,
+        help='Build with watchdog disabled.')
+
+    g.add_option('--coverage',
+                 action='store_true',
+                 default=False,
+                 help='Configure coverage flags.')
+
+    g.add_option('--Werror',
+        action='store_true',
+        default=None,
         help='build with -Werror.')
+
+    g.add_option('--disable-Werror',
+        action='store_true',
+        default=None,
+        help='Disable -Werror.')
     
     g.add_option('--toolchain',
         action='store',
         default=None,
         help='Override default toolchain used for the board. Use "native" for using the host toolchain.')
 
-    g.add_option('--disable-gccdeps',
-        action='store_true',
-        default=False,
-        help='Disable the use of GCC dependencies output method and use waf default method.')
-
     g.add_option('--enable-asserts',
         action='store_true',
         default=False,
         help='enable OS level asserts.')
+
+    g.add_option('--save-temps',
+        action='store_true',
+        default=False,
+        help='save compiler temporary files.')
+    
+    g.add_option('--enable-malloc-guard',
+        action='store_true',
+        default=False,
+        help='enable malloc guard regions.')
+
+    g.add_option('--enable-stats',
+        action='store_true',
+        default=False,
+        help='enable OS level thread statistics.')
 
     g.add_option('--bootloader',
         action='store_true',
         default=False,
         help='Configure for building a bootloader.')
 
+    g.add_option('--signed-fw',
+        action='store_true',
+        default=False,
+        help='Configure for signed firmware support.')
+
+    g.add_option('--private-key',
+                 action='store',
+                 default=None,
+            help='path to private key for signing firmware.')
+    
     g.add_option('--no-autoconfig',
         dest='autoconfig',
         action='store_false',
@@ -135,9 +265,51 @@ submodules at specific revisions.
                  default=False,
                  help="Disable onboard scripting engine")
 
+    g.add_option('--enable-scripting', action='store_true',
+                 default=False,
+                 help="Enable onboard scripting engine")
+
+    g.add_option('--no-gcs', action='store_true',
+                 default=False,
+                 help="Disable GCS code")
+    
     g.add_option('--scripting-checks', action='store_true',
                  default=True,
                  help="Enable runtime scripting sanity checks")
+
+    g.add_option('--enable-onvif', action='store_true',
+                 default=False,
+                 help="Enables and sets up ONVIF camera control")
+
+    g.add_option('--scripting-docs', action='store_true',
+                 default=False,
+                 help="enable generation of scripting documentation")
+
+    g.add_option('--enable-opendroneid', action='store_true',
+                 default=False,
+                 help="Enables OpenDroneID")
+
+    g.add_option('--enable-check-firmware', action='store_true',
+                 default=False,
+                 help="Enables firmware ID checking on boot")
+
+    g.add_option('--enable-gps-logging', action='store_true',
+                 default=False,
+                 help="Enables GPS logging")
+
+    g.add_option('--disable-networking', action='store_true',
+                 help="Disable the networking API code")
+
+    g.add_option('--enable-networking-tests', action='store_true',
+                 help="Enable the networking test code. Automatically enables networking.")
+    
+    g.add_option('--enable-dronecan-tests', action='store_true',
+                 default=False,
+                 help="Enables DroneCAN tests in sitl")
+
+    g.add_option('--sitl-littlefs', action='store_true',
+                 default=False,
+                 help="Enable littlefs for filesystem access on SITL (under construction)")
 
     g = opt.ap_groups['linux']
 
@@ -184,6 +356,10 @@ configuration in order to save typing.
                  default=False,
                  help="Enable SFML graphics library")
 
+    g.add_option('--enable-sfml-joystick', action='store_true',
+                 default=False,
+                 help="Enable SFML joystick input library")
+
     g.add_option('--enable-sfml-audio', action='store_true',
                  default=False,
                  help="Enable SFML audio library")
@@ -204,6 +380,10 @@ configuration in order to save typing.
                  default=False,
                  help="Enable SITL RGBLed")
 
+    g.add_option('--force-32bit', action='store_true',
+                 default=False,
+                 help="Force 32bit build")
+
     g.add_option('--build-dates', action='store_true',
                  default=False,
                  help="Include build date in binaries.  Appears in AUTOPILOT_VERSION.os_sw_version")
@@ -211,23 +391,68 @@ configuration in order to save typing.
     g.add_option('--sitl-flash-storage',
         action='store_true',
         default=False,
-        help='Configure for building SITL with flash storage emulation.')
+        help='Use flash storage emulation.')
 
-    g.add_option('--disable-ekf2',
+    g.add_option('--ekf-double',
         action='store_true',
         default=False,
-        help='Configure without EKF2.')
+        help='Configure EKF as double precision.')
 
-    g.add_option('--disable-ekf3',
+    g.add_option('--ekf-single',
         action='store_true',
         default=False,
-        help='Configure without EKF3.')
+        help='Configure EKF as single precision.')
     
     g.add_option('--static',
         action='store_true',
         default=False,
         help='Force a static build')
 
+    g.add_option('--postype-single',
+        action='store_true',
+        default=False,
+        help='force single precision postype_t')
+
+    g.add_option('--consistent-builds',
+        action='store_true',
+        default=False,
+        help='force consistent build outputs for things like __LINE__ and build hashes')
+
+    g.add_option('--extra-hwdef',
+	    action='store',
+	    default=None,
+	    help='Extra hwdef.dat file for custom build.')
+
+    g.add_option('--assert-cc-version',
+                 default=None,
+                 help='fail configure if not using the specified gcc version')
+
+    g.add_option('--num-aux-imus',
+                 type='int',
+                 default=0,
+                 help='number of auxiliary IMUs')
+
+    g.add_option('--board-start-time',
+                 type='int',
+                 default=0,
+                 help='zero time on boot in microseconds')
+
+    g.add_option('--enable-iomcu-profiled-support',
+                    action='store_true',
+                    default=False,
+                    help='enable iomcu profiled support')
+
+    g.add_option('--enable-new-checking',
+        action='store_true',
+        default=False,
+        help='enables checking of new to ensure NEW_NOTHROW is used')
+
+    # support enabling any option in build_options.py
+    add_build_options(g)
+
+    # support embedding lua drivers and applets
+    add_script_options(g)
+    
 def _collect_autoconfig_files(cfg):
     for m in sys.modules.values():
         paths = []
@@ -247,6 +472,8 @@ def _collect_autoconfig_files(cfg):
                 cfg.files.append(p)
 
 def configure(cfg):
+    if is_ci:
+        print(f"::group::Waf Configure")
 	# we need to enable debug mode when building for gconv, and force it to sitl
     if cfg.options.board is None:
         cfg.options.board = 'sitl'
@@ -260,15 +487,36 @@ def configure(cfg):
         
     cfg.env.BOARD = cfg.options.board
     cfg.env.DEBUG = cfg.options.debug
+    cfg.env.DEBUG_SYMBOLS = cfg.options.debug_symbols
+    cfg.env.COVERAGE = cfg.options.coverage
     cfg.env.AUTOCONFIG = cfg.options.autoconfig
 
     _set_build_context_variant(cfg.env.BOARD)
     cfg.setenv(cfg.env.BOARD)
 
+    if cfg.options.signed_fw:
+        cfg.env.AP_SIGNED_FIRMWARE = True
+        cfg.options.enable_check_firmware = True
+
     cfg.env.BOARD = cfg.options.board
     cfg.env.DEBUG = cfg.options.debug
+    cfg.env.VS_LAUNCH = cfg.options.vs_launch
+    cfg.env.DEBUG_SYMBOLS = cfg.options.debug_symbols
+    cfg.env.COVERAGE = cfg.options.coverage
+    cfg.env.FORCE32BIT = cfg.options.force_32bit
     cfg.env.ENABLE_ASSERTS = cfg.options.enable_asserts
     cfg.env.BOOTLOADER = cfg.options.bootloader
+    cfg.env.ENABLE_MALLOC_GUARD = cfg.options.enable_malloc_guard
+    cfg.env.ENABLE_STATS = cfg.options.enable_stats
+    cfg.env.SAVE_TEMPS = cfg.options.save_temps
+    cfg.env.CONSISTENT_BUILDS = cfg.options.consistent_builds
+
+    extra_hwdef = cfg.options.extra_hwdef
+    if extra_hwdef is not None and not os.path.exists(extra_hwdef):
+        raise FileNotFoundError(f"extra-hwdef file NOT found: '{cfg.options.extra_hwdef}'")
+    cfg.env.HWDEF_EXTRA = cfg.options.extra_hwdef
+    if cfg.env.HWDEF_EXTRA:
+        cfg.env.HWDEF_EXTRA = os.path.abspath(cfg.env.HWDEF_EXTRA)
 
     cfg.env.OPTIONS = cfg.options.__dict__
 
@@ -281,15 +529,29 @@ def configure(cfg):
         cfg.msg('Using static linking', 'yes', color='YELLOW')
         cfg.env.STATIC_LINKING = True
 
+    if cfg.options.num_aux_imus > 0:
+        cfg.define('INS_AUX_INSTANCES', cfg.options.num_aux_imus)
+
+    if cfg.options.board_start_time != 0:
+        cfg.define('AP_BOARD_START_TIME', cfg.options.board_start_time)
+        # also in env for hrt.c
+        cfg.env.AP_BOARD_START_TIME = cfg.options.board_start_time
+
+    # default Python of the oldest Standard Support Debian + Ubuntu LTS.
+    # Debian releases: https://www.debian.org/releases
+    # Ubuntu releases: https://releases.ubuntu.com
+    # also update `MIN_VER` in `./waf` and `target-version` in `pyproject.toml`
+    cfg.load('python')
+    cfg.check_python_version(minver=(3, 9, 0))
+
     cfg.load('ap_library')
 
     cfg.msg('Setting board to', cfg.options.board)
     cfg.get_board().configure(cfg)
 
-    cfg.load('clang_compilation_database')
     cfg.load('waf_unit_test')
     cfg.load('mavgen')
-    cfg.load('uavcangen')
+    cfg.load('dronecangen')
 
     cfg.env.SUBMODULE_UPDATE = cfg.options.submodule_update
 
@@ -306,6 +568,16 @@ def configure(cfg):
     if cfg.options.enable_benchmarks:
         cfg.load('gbenchmark')
     cfg.load('gtest')
+
+    if cfg.env.BOARD == "sitl":
+        cfg.start_msg('Littlefs')
+
+        if cfg.options.sitl_littlefs:
+            cfg.end_msg('enabled')
+        else:
+            cfg.end_msg('disabled', color='YELLOW')
+
+    cfg.load('littlefs')
     cfg.load('static_linking')
     cfg.load('build_summary')
 
@@ -324,14 +596,53 @@ def configure(cfg):
     cfg.start_msg('Scripting')
     if cfg.options.disable_scripting:
         cfg.end_msg('disabled', color='YELLOW')
-    else:
+    elif cfg.options.enable_scripting:
         cfg.end_msg('enabled')
-        cfg.recurse('libraries/AP_Scripting')
+    else:
+        cfg.end_msg('maybe')
+    cfg.recurse('libraries/AP_Scripting')
 
     cfg.recurse('libraries/AP_GPS')
+    cfg.recurse('libraries/AP_HAL_SITL')
+    cfg.recurse('libraries/SITL')
+
+    cfg.recurse('libraries/AP_Networking')
+    cfg.recurse('libraries/AP_DDS')
 
     cfg.start_msg('Scripting runtime checks')
     if cfg.options.scripting_checks:
+        cfg.end_msg('enabled')
+    else:
+        cfg.end_msg('disabled', color='YELLOW')
+
+    cfg.start_msg('Debug build')
+    if cfg.env.DEBUG:
+        cfg.end_msg('enabled')
+    else:
+        cfg.end_msg('disabled', color='YELLOW')
+
+    if cfg.env.DEBUG:
+        cfg.start_msg('VS Code launch')
+        if cfg.env.VS_LAUNCH:
+            cfg.end_msg('enabled')
+        else:
+            cfg.end_msg('disabled', color='YELLOW')
+
+    cfg.get_board().configure_coverage(cfg)
+    cfg.start_msg('Coverage build')
+    if cfg.env.COVERAGE:
+        cfg.end_msg('enabled')
+    else:
+        cfg.end_msg('disabled', color='YELLOW')
+
+    cfg.start_msg('Consistent build')
+    if cfg.env.CONSISTENT_BUILDS:
+        cfg.end_msg('enabled')
+    else:
+        cfg.end_msg('disabled', color='YELLOW')
+
+    cfg.start_msg('Force 32-bit build')
+    if cfg.env.FORCE32BIT:
         cfg.end_msg('enabled')
     else:
         cfg.end_msg('disabled', color='YELLOW')
@@ -353,21 +664,27 @@ def configure(cfg):
     else:
         cfg.env.ENABLE_HEADER_CHECKS = False
 
-    # TODO: Investigate if code could be changed to not depend on the
-    # source absolute path.
-    cfg.env.prepend_value('DEFINES', [
-        'SKETCHBOOK="' + cfg.srcnode.abspath() + '"',
-    ])
-
     # Always use system extensions
     cfg.define('_GNU_SOURCE', 1)
 
-    cfg.write_config_header(os.path.join(cfg.variant, 'ap_config.h'))
+    if cfg.options.Werror:
+        # print(cfg.options.Werror)
+        if cfg.options.disable_Werror:
+            cfg.options.Werror = False
+
+    cfg.write_config_header(os.path.join(cfg.variant, 'ap_config.h'), guard='_AP_CONFIG_H_')
 
     # add in generated flags
     cfg.env.CXXFLAGS += ['-include', 'ap_config.h']
 
     _collect_autoconfig_files(cfg)
+    if is_ci:
+        print("::endgroup::")
+
+    if cfg.env.DEBUG and cfg.env.VS_LAUNCH:
+        import vscode_helper
+        vscode_helper.init_launch_json_if_not_exist(cfg)
+        vscode_helper.update_openocd_cfg(cfg)
 
 def collect_dirs_to_recurse(bld, globs, **kw):
     dirs = []
@@ -384,6 +701,58 @@ def collect_dirs_to_recurse(bld, globs, **kw):
 
 def list_boards(ctx):
     print(*boards.get_boards_names())
+
+
+class ScriptingDocsCtx(Build.BuildContext):
+    '''generate scripting docs'''
+    cmd = 'scripting_docs'
+    fun = 'scripting_docs'
+
+
+def scripting_docs(bld):
+    '''Generate Lua scripting docs by reusing the AP_Scripting build() tasks'''
+    bld.add_group('dynamic_sources')
+    bld.options.scripting_docs = True
+    bld.options.enable_scripting = True
+    bld.recurse('libraries/AP_Scripting', name='build')
+
+def list_ap_periph_boards(ctx):
+    print(*boards.get_ap_periph_boards())
+
+@conf
+def ap_periph_boards(ctx):
+    return boards.get_ap_periph_boards()
+
+vehicles = ['antennatracker', 'blimp', 'copter', 'heli', 'plane', 'rover', 'sub']
+
+def generate_tasklist(ctx, do_print=True):
+    boardlist = boards.get_boards_names()
+    ap_periph_targets = boards.get_ap_periph_boards()
+    tasks = []
+    with open(os.path.join(Context.top_dir, "tasklist.json"), "w") as tlist:
+        for board in boardlist:
+            task = {}
+            task['configure'] = board
+            if board in ap_periph_targets:
+                if 'sitl' not in board:
+                    # we only support AP_Periph and bootloader builds
+                    task['targets'] = ['AP_Periph', 'bootloader']
+                else:
+                    task['targets'] = ['AP_Periph']
+            elif 'iofirmware' in board:
+                task['targets'] = ['iofirmware', 'bootloader']
+            else:
+                if boards.is_board_based(board, boards.SITLBoard):
+                    task['targets'] = vehicles + ['replay']
+                elif boards.is_board_based(board, boards.LinuxBoard):
+                    task['targets'] = vehicles
+                else:
+                    task['targets'] = vehicles + ['bootloader']
+                    task['buildOptions'] = '--upload'
+            tasks.append(task)
+        tlist.write(json.dumps(tasks))
+        if do_print:
+            print(json.dumps(tasks))
 
 def board(ctx):
     env = ConfigSet.ConfigSet()
@@ -410,7 +779,7 @@ def _build_dynamic_sources(bld):
     if not bld.env.BOOTLOADER:
         bld(
             features='mavgen',
-            source='modules/mavlink/message_definitions/v1.0/ardupilotmega.xml',
+            source='modules/mavlink/message_definitions/v1.0/all.xml',
             output_dir='libraries/GCS_MAVLink/include/mavlink/v2.0/',
             name='mavlink',
             # this below is not ideal, mavgen tool should set this, but that's not
@@ -421,16 +790,31 @@ def _build_dynamic_sources(bld):
             ],
             )
 
-    if bld.get_board().with_can or bld.env.HAL_NUM_CAN_IFACES:
+    if (bld.get_board().with_can or bld.env.HAL_NUM_CAN_IFACES) and not bld.env.AP_PERIPH:
         bld(
-            features='uavcangen',
-            source=bld.srcnode.ant_glob('modules/uavcan/dsdl/* libraries/AP_UAVCAN/dsdl/*', dir=True, src=False),
-            output_dir='modules/uavcan/libuavcan/include/dsdlc_generated',
-            name='uavcan',
+            features='dronecangen',
+            source=bld.srcnode.ant_glob('modules/DroneCAN/DSDL/[a-z]* libraries/AP_DroneCAN/dsdl/[a-z]*', dir=True, src=False),
+            output_dir='modules/DroneCAN/libcanard/dsdlc_generated/',
+            name='dronecan',
             export_includes=[
-                bld.bldnode.make_node('modules/uavcan/libuavcan/include/dsdlc_generated').abspath(),
+                bld.bldnode.make_node('modules/DroneCAN/libcanard/dsdlc_generated/include').abspath(),
+                bld.srcnode.find_dir('modules/DroneCAN/libcanard/').abspath(),
+                bld.srcnode.find_dir('libraries/AP_DroneCAN/canard/').abspath(),
+                ]
+            )
+    elif bld.env.AP_PERIPH:
+        bld(
+            features='dronecangen',
+            source=bld.srcnode.ant_glob('modules/DroneCAN/DSDL/* libraries/AP_DroneCAN/dsdl/*', dir=True, src=False),
+            output_dir='modules/DroneCAN/libcanard/dsdlc_generated/',
+            name='dronecan',
+            export_includes=[
+                bld.bldnode.make_node('modules/DroneCAN/libcanard/dsdlc_generated/include').abspath(),
+                bld.srcnode.find_dir('modules/DroneCAN/libcanard/').abspath(),
             ]
         )
+
+    bld.recurse("libraries/AP_DDS")
 
     def write_version_header(tsk):
         bld = tsk.generator.bld
@@ -448,6 +832,17 @@ def _build_dynamic_sources(bld):
     ])
 
 def _build_common_taskgens(bld):
+    # Compile the DroneCAN/libcanard generated sources once into a shared
+    # objects target that every stlib links via 'use' (see ap_stlib)
+    if (bld.get_board().with_can or bld.env.HAL_NUM_CAN_IFACES) and not bld.env.AP_PERIPH:
+        bld.objects(
+            name='dronecan_libs',
+            source=[],
+            features=['c', 'ap_dynamic_source'],
+            dynamic_source='modules/DroneCAN/libcanard/dsdlc_generated/src/**.c',
+            use=['dronecan', 'mavlink'],
+        )
+
     # NOTE: Static library with vehicle set to UNKNOWN, shared by all
     # the tools and examples. This is the first step until the
     # dependency on the vehicles is reduced. Later we may consider
@@ -480,7 +875,6 @@ def _build_recursion(bld):
     common_dirs_excl = [
         'modules',
         'libraries/AP_HAL_*',
-        'libraries/SITL',
     ]
 
     hal_dirs_patterns = [
@@ -504,6 +898,9 @@ def _build_recursion(bld):
             dirs_to_recurse.append('Tools/AP_Periph')
 
     dirs_to_recurse.append('libraries/AP_Scripting')
+
+    if bld.env.ENABLE_ONVIF:
+        dirs_to_recurse.append('libraries/AP_ONVIF')
 
     for p in hal_dirs_patterns:
         dirs_to_recurse += collect_dirs_to_recurse(
@@ -530,11 +927,15 @@ def _build_post_funs(bld):
 
 def _load_pre_build(bld):
     '''allow for a pre_build() function in build modules'''
+    if bld.cmd == 'clean':
+        return
     brd = bld.get_board()
     if getattr(brd, 'pre_build', None):
         brd.pre_build(bld)    
 
 def build(bld):
+    if is_ci:
+        print(f"::group::Waf Build")
     config_hash = Utils.h_file(bld.bldnode.make_node('ap_config.h').abspath())
     bld.env.CCDEPS = config_hash
     bld.env.CXXDEPS = config_hash
@@ -551,7 +952,11 @@ def build(bld):
     _load_pre_build(bld)
 
     if bld.get_board().with_can:
-        bld.env.AP_LIBRARIES_OBJECTS_KW['use'] += ['uavcan']
+        bld.env.AP_LIBRARIES_OBJECTS_KW['use'] += ['dronecan']
+
+    if bld.get_board().with_littlefs:
+        bld.env.AP_LIBRARIES_OBJECTS_KW['use'] += ['littlefs']
+        bld.littlefs()
 
     _build_cmd_tweaks(bld)
 
@@ -570,6 +975,15 @@ def build(bld):
     _build_recursion(bld)
 
     _build_post_funs(bld)
+    if is_ci:
+        def print_ci_endgroup(bld):
+            print(f"::endgroup::")
+        bld.add_post_fun(print_ci_endgroup)
+
+
+    if bld.env.DEBUG and bld.env.VS_LAUNCH:
+        import vscode_helper
+        vscode_helper.update_settings(bld)
 
 ardupilotwaf.build_command('check',
     program_group_list='all',
@@ -580,13 +994,18 @@ ardupilotwaf.build_command('check-all',
     doc='shortcut for `waf check --alltests`',
 )
 
-for name in ('antennatracker', 'copter', 'heli', 'plane', 'rover', 'sub', 'bootloader','iofirmware','AP_Periph'):
+for name in (vehicles + ['bootloader','iofirmware','AP_Periph','replay']):
     ardupilotwaf.build_command(name,
         program_group_list=name,
         doc='builds %s programs' % name,
     )
 
-for program_group in ('all', 'bin', 'tools', 'examples', 'tests', 'benchmarks'):
+ardupilotwaf.build_command('renode-physics',
+    targets='tool/renode-physics',
+    doc='builds the Renode physics sidecar (needs --board sitl)',
+)
+
+for program_group in ('all', 'bin', 'tool', 'examples', 'tests', 'benchmarks'):
     ardupilotwaf.build_command(program_group,
         program_group_list=program_group,
         doc='builds all programs of %s group' % program_group,

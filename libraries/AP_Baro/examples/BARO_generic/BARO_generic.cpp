@@ -17,20 +17,46 @@
   generic Baro driver test
  */
 
+#include <AP_Airspeed/AP_Airspeed.h>
 #include <AP_Baro/AP_Baro.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include <AP_HAL/AP_HAL.h>
 #include <GCS_MAVLink/GCS_Dummy.h>
-
+#include <AP_ExternalAHRS/AP_ExternalAHRS.h>
+#include <AP_Logger/AP_Logger.h>
+#include <AP_AHRS/AP_AHRS.h>
 
 const AP_HAL::HAL &hal = AP_HAL::get_HAL();
 
 // create barometer object
 static AP_Baro barometer;
 
+// creating other objects
+#if HAL_LOGGING_ENABLED
+static AP_Logger logger;
+AP_UInt32 logger_bitmask;
+static const struct LogStructure log_structure[] = {
+    LOG_COMMON_STRUCTURES
+};
+#endif  // HAL_LOGGING_ENABLED
+
+static AP_AHRS ahrs;
+
+#if AP_AIRSPEED_ENABLED
+static AP_Airspeed airspeed;
+#endif  // AP_AIRSPEED_ENABLED
+
+#if AP_EXTERNAL_AHRS_ENABLED
+ static AP_ExternalAHRS eAHRS;
+#endif // AP_EXTERNAL_AHRS_ENABLED
+
 static uint32_t timer;
-static uint8_t counter;
 static AP_BoardConfig board_config;
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#include <SITL/SITL.h>
+SITL::SIM sitl;
+#endif
 
 void setup();
 void loop();
@@ -41,6 +67,12 @@ void setup()
     hal.console->printf("Barometer library test\n");
 
     board_config.init();
+#if AP_SIM_ENABLED
+    sitl.init();
+#endif  // AP_SIM_ENABLED
+#if HAL_LOGGING_ENABLED
+    logger.init(logger_bitmask, log_structure, ARRAY_SIZE(log_structure));
+#endif  // HAL_LOGGING_ENABLED
 
     hal.scheduler->delay(1000);
 
@@ -60,14 +92,9 @@ void loop()
         return;
     }
 
-    // run accumulate() at 50Hz and update() at 10Hz
-    if ((AP_HAL::micros() - timer) > 20 * 1000UL) {
+    // run update() at 10Hz
+    if ((AP_HAL::micros() - timer) > 100 * 1000UL) {
         timer = AP_HAL::micros();
-        barometer.accumulate();
-        if (counter++ < 5) {
-            return;
-        }
-        counter = 0;
         barometer.update();
 
         //calculate time taken for barometer readings to update
@@ -95,9 +122,6 @@ void loop()
     }
 }
 
-const struct AP_Param::GroupInfo        GCS_MAVLINK_Parameters::var_info[] = {
-    AP_GROUPEND
-};
 GCS_Dummy _gcs;
 
 

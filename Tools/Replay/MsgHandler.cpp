@@ -1,31 +1,4 @@
 #include "MsgHandler.h"
-#include <AP_AHRS/AP_AHRS.h>
-
-void fatal(const char *msg) {
-    ::printf("%s",msg);
-    ::printf("\n");
-    exit(1);
-}
-
-char *xstrdup(const char *string)
-{
-    char *ret = strdup(string);
-    if (ret == NULL) {
-        perror("strdup");
-        fatal("strdup failed");
-    }
-    return ret;
-}
-
-char *xcalloc(uint8_t count, uint32_t len)
-{
-    char *ret = (char*)calloc(count, len);
-    if (ret == nullptr) {
-        perror("calloc");
-        fatal("calloc failed");
-    }
-    return ret;
-}
 
 void MsgHandler::add_field_type(char type, size_t size)
 {
@@ -36,7 +9,7 @@ uint8_t MsgHandler::size_for_type(char type)
 {
     uint8_t ret = size_for_type_table[(uint8_t)(type > 'A' ? (type-'A') : (type-'a'))];
     if (ret == 0) {
-        ::fprintf(stderr, "Unknown type (%c)\n", type);
+        ::printf("Unknown type (%c)\n", type);
         abort();
     }
     return ret;
@@ -72,7 +45,7 @@ struct MsgHandler::format_field_info *MsgHandler::find_field_info(const char *la
             return &field_info[i];
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 MsgHandler::MsgHandler(const struct log_Format &_f) : next_field(0), f(_f)
@@ -84,16 +57,16 @@ MsgHandler::MsgHandler(const struct log_Format &_f) : next_field(0), f(_f)
 void MsgHandler::add_field(const char *_label, uint8_t _type, uint8_t _offset,
                           uint8_t _length)
 {
-    field_info[next_field].label = xstrdup(_label);
+    field_info[next_field].label = strdup(_label);
     field_info[next_field].type = _type;
     field_info[next_field].offset = _offset;
     field_info[next_field].length = _length;
     next_field++;
 }
 
-char *get_string_field(char *field, uint8_t fieldlen)
+static char *get_string_field(char *field, uint8_t fieldlen)
 {
-    char *ret = xcalloc(1, fieldlen+1);
+    char *ret = (char *)malloc(fieldlen+1);
     memcpy(ret, field, fieldlen);
     return ret;
 }
@@ -110,7 +83,6 @@ void MsgHandler::parse_format_fields()
 
     while ((next_label = strtok(arg, ",")) != NULL) {
         if (label_offset > strlen(format)) {
-            free(labels);
             printf("too few field times for labels %s (format=%s) (labels=%s)\n",
                    f.name, format, labels);
             exit(1);
@@ -135,7 +107,7 @@ void MsgHandler::parse_format_fields()
 bool MsgHandler::field_value(uint8_t *msg, const char *label, char *ret, uint8_t retlen)
 {
     struct format_field_info *info = find_field_info(label);
-    if (info == NULL) {
+    if (info == nullptr) {
       ::printf("No info for (%s)\n",label);
       exit(1);
     }
@@ -156,8 +128,7 @@ bool MsgHandler::field_value(uint8_t *msg, const char *label, char *ret, uint8_t
 bool MsgHandler::field_value(uint8_t *msg, const char *label, Vector3f &ret)
 {
     const char *axes = "XYZ";
-    uint8_t i;
-    for(i=0; i<next_field; i++) {
+    for(uint8_t i=0; i<next_field; i++) {
 	if (!strncmp(field_info[i].label, label, strlen(label)) &&
 	    strlen(field_info[i].label) == strlen(label)+1) {
 	    for (uint8_t j=0; j<3; j++) {
@@ -171,7 +142,7 @@ bool MsgHandler::field_value(uint8_t *msg, const char *label, Vector3f &ret)
             }
         }
         if (i == next_field) {
-            return 0; // not found
+            return false; // not found
         }
     }
 
@@ -179,7 +150,7 @@ bool MsgHandler::field_value(uint8_t *msg, const char *label, Vector3f &ret)
 }
 
 
-void MsgHandler::string_for_labels(char *buffer, uint bufferlen)
+void MsgHandler::string_for_labels(char *buffer, uint32_t bufferlen)
 {
     memset(buffer, '\0', bufferlen);
     bufferlen--;
@@ -203,15 +174,6 @@ void MsgHandler::string_for_labels(char *buffer, uint bufferlen)
 
             memcpy(pos, field_info[k].label, label_length);
             pos += label_length;
-        }
-    }
-}
-
-MsgHandler::~MsgHandler()
-{
-    for (uint8_t k=0; k<LOGREADER_MAX_FIELDS; k++) {
-        if (field_info[k].label != NULL) {
-            free(field_info[k].label);
         }
     }
 }
@@ -267,7 +229,7 @@ void MsgHandler::field_not_found(uint8_t *msg, const char *label)
 {
     char all_labels[256];
     uint8_t type = msg[2];
-    string_for_labels(all_labels, 256);
+    string_for_labels(all_labels, ARRAY_SIZE(all_labels));
     ::printf("Field (%s) not found for id=%d; options are (%s)\n",
              label, type, all_labels);
     abort();

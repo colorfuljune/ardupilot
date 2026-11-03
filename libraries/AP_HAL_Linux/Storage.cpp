@@ -9,7 +9,6 @@
 #include <unistd.h>
 
 #include <AP_HAL/AP_HAL.h>
-#include <AP_Vehicle/AP_Vehicle_Type.h>
 
 using namespace Linux;
 
@@ -20,7 +19,7 @@ using namespace Linux;
 
 // name the storage file after the sketch so you can use the same board
 // card for ArduCopter and ArduPlane
-#define STORAGE_FILE SKETCHNAME ".stg"
+#define STORAGE_FILE AP_BUILD_TARGET_NAME ".stg"
 
 extern const AP_HAL::HAL& hal;
 
@@ -102,10 +101,7 @@ int Storage::_storage_create(const char *dpath)
         return -1;
     }
 
-    unlinkat(dfd, dpath, 0);
     int fd = openat(dfd, STORAGE_FILE, O_RDWR|O_CREAT|O_CLOEXEC, 0666);
-
-    close(dfd);
 
     if (fd == -1) {
         fprintf(stderr, "Failed to create storage file %s/%s\n", dpath,
@@ -117,6 +113,7 @@ int Storage::_storage_create(const char *dpath)
     if (ftruncate(fd, sizeof(_buffer)) == -1) {
         fprintf(stderr, "Failed to set file size to %u kB (%m)\n",
                 unsigned(sizeof(_buffer) / 1024));
+        close(fd);
         goto fail;
     }
 
@@ -135,6 +132,7 @@ fail:
 
 void Storage::init()
 {
+    WITH_SEMAPHORE(_sem);
     const char *dpath;
 
     if (_initialised) {
@@ -148,26 +146,16 @@ void Storage::init()
         dpath = HAL_BOARD_STORAGE_DIRECTORY;
     }
 
-    int fd = open(dpath, O_RDWR|O_CLOEXEC);
+    int fd = _storage_create(dpath);
     if (fd == -1) {
-        fd = _storage_create(dpath);
-        if (fd == -1) {
-            AP_HAL::panic("Cannot create storage %s (%m)", dpath);
-        }
+        AP_HAL::panic("Cannot create storage %s (%m)", dpath);
     }
 
     ssize_t ret = read(fd, _buffer, sizeof(_buffer));
 
     if (ret != sizeof(_buffer)) {
         close(fd);
-        _storage_create(dpath);
-        fd = open(dpath, O_RDONLY|O_CLOEXEC);
-        if (fd == -1) {
-            AP_HAL::panic("Failed to open %s (%m)", dpath);
-        }
-        if (read(fd, _buffer, sizeof(_buffer)) != sizeof(_buffer)) {
-            AP_HAL::panic("Failed to read %s (%m)", dpath);
-        }
+        AP_HAL::panic("Failed to read %s (%m)", dpath);
     }
 
     _fd = fd;
@@ -175,11 +163,7 @@ void Storage::init()
 }
 
 /*
-  mark some lines as dirty. Note that there is no attempt to avoid
-  the race condition between this code and the _timer_tick() code
-  below, which both update _dirty_mask. If we lose the race then the
-  result is that a line is written more than once, but it won't result
-  in a line not being written.
+  Mark lines dirty while holding _sem, together with the buffer update.
  */
 void Storage::_mark_dirty(uint16_t loc, uint16_t length)
 {
@@ -196,6 +180,7 @@ void Storage::_mark_dirty(uint16_t loc, uint16_t length)
 
 void Storage::read_block(void *dst, uint16_t loc, size_t n)
 {
+    WITH_SEMAPHORE(_sem);
     if (loc >= sizeof(_buffer)-(n-1)) {
         return;
     }
@@ -205,6 +190,7 @@ void Storage::read_block(void *dst, uint16_t loc, size_t n)
 
 void Storage::write_block(uint16_t loc, const void *src, size_t n)
 {
+    WITH_SEMAPHORE(_sem);
     if (loc >= sizeof(_buffer)-(n-1)) {
         return;
     }
@@ -217,52 +203,70 @@ void Storage::write_block(uint16_t loc, const void *src, size_t n)
 
 void Storage::_timer_tick(void)
 {
-    if (!_initialised || _dirty_mask == 0 || _fd == -1) {
-        return;
-    }
-
-    // write out the first dirty set of lines. We don't write more
-    // than one to keep the latency of this call to a minimum
+    // Serialize flushes without blocking buffer access during disk IO.
+    WITH_SEMAPHORE(_timer_sem);
+    uint8_t snapshot[LINUX_STORAGE_MAX_WRITE];
     uint8_t i, n;
-    for (i=0; i<LINUX_STORAGE_NUM_LINES; i++) {
-        if (_dirty_mask & (1<<i)) {
-            break;
+    uint32_t write_mask;
+    {
+        WITH_SEMAPHORE(_sem);
+        if (!_initialised || _dirty_mask == 0 || _fd == -1) {
+            return;
         }
-    }
-    if (i == LINUX_STORAGE_NUM_LINES) {
-        // this shouldn't be possible
-        return;
-    }
-    uint32_t write_mask = (1U<<i);
-    // see how many lines to write
-    for (n=1; (i+n) < LINUX_STORAGE_NUM_LINES &&
-             n < (LINUX_STORAGE_MAX_WRITE>>LINUX_STORAGE_LINE_SHIFT); n++) {
-        if (!(_dirty_mask & (1<<(n+i)))) {
-            break;
-        }
-        // mark that line clean
-        write_mask |= (1<<(n+i));
-    }
 
-    /*
-      write the lines. This also updates _dirty_mask. Note that
-      because this is a SCHED_FIFO thread it will not be preempted
-      by the main task except during blocking calls. This means we
-      don't need a semaphore around the _dirty_mask updates.
-     */
-    if (lseek(_fd, i<<LINUX_STORAGE_LINE_SHIFT, SEEK_SET) == (i<<LINUX_STORAGE_LINE_SHIFT)) {
-        _dirty_mask &= ~write_mask;
-        if (write(_fd, &_buffer[i<<LINUX_STORAGE_LINE_SHIFT], n<<LINUX_STORAGE_LINE_SHIFT) != n<<LINUX_STORAGE_LINE_SHIFT) {
-            // write error - likely EINTR
-            _dirty_mask |= write_mask;
-            close(_fd);
-            _fd = -1;
-        }
-        if (_dirty_mask == 0) {
-            if (fsync(_fd) != 0) {
-                close(_fd);
-                _fd = -1;
+        // Snapshot the first contiguous set of dirty lines.
+        for (i=0; i<LINUX_STORAGE_NUM_LINES; i++) {
+            if (_dirty_mask & (1U<<i)) {
+                break;
             }
         }
+        if (i == LINUX_STORAGE_NUM_LINES) {
+            return;
+        }
+        write_mask = (1U<<i);
+        for (n=1; (i+n) < LINUX_STORAGE_NUM_LINES &&
+                 n < (LINUX_STORAGE_MAX_WRITE>>LINUX_STORAGE_LINE_SHIFT); n++) {
+            if (!(_dirty_mask & (1U<<(n+i)))) {
+                break;
+            }
+            write_mask |= (1U<<(n+i));
+        }
+        memcpy(snapshot, &_buffer[i<<LINUX_STORAGE_LINE_SHIFT], n<<LINUX_STORAGE_LINE_SHIFT);
+        // Any write after this point must queue the line again, even while
+        // the snapshot is still being written to disk.
+        _dirty_mask &= ~write_mask;
     }
+
+    if (pwrite(_fd, snapshot, n<<LINUX_STORAGE_LINE_SHIFT, i<<LINUX_STORAGE_LINE_SHIFT) != n<<LINUX_STORAGE_LINE_SHIFT) {
+        close(_fd);
+        WITH_SEMAPHORE(_sem);
+        _dirty_mask |= write_mask;
+        _fd = -1;
+        return;
+    }
+    bool clean;
+    {
+        WITH_SEMAPHORE(_sem);
+        clean = (_dirty_mask == 0);
+    }
+    if (clean && fsync(_fd) != 0) {
+        close(_fd);
+        WITH_SEMAPHORE(_sem);
+        _fd = -1;
+    }
+}
+
+/*
+  get storage size and ptr
+ */
+bool Storage::get_storage_ptr(void *&ptr, size_t &size)
+{
+    WITH_SEMAPHORE(_sem);
+    if (!_initialised) {
+        return false;
+    }
+    // The caller receives a live buffer, not a snapshot protected by _sem.
+    ptr = _buffer;
+    size = sizeof(_buffer);
+    return true;
 }

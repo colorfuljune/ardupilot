@@ -1,17 +1,29 @@
+#include "Storage.h"
+
+#include <AP_Vehicle/AP_Vehicle_Type.h>
 #include <AP_HAL/AP_HAL.h>
+#include "AP_HAL_SITL.h"
 
 #include <assert.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include "Storage.h"
-
 #include <stdio.h>
+
+#ifndef HAL_STORAGE_FILE
+#if APM_BUILD_TYPE(APM_BUILD_Replay)
+#define HAL_STORAGE_FILE "eeprom-replay.bin"
+#elif APM_BUILD_TYPE(APM_BUILD_AP_Periph)
+#define HAL_STORAGE_FILE "eeprom-periph.bin"
+#else
+#define HAL_STORAGE_FILE "eeprom.bin"
+#endif
+#endif
 
 using namespace HALSITL;
 
-extern const AP_HAL::HAL& hal;
+extern HAL_SITL& hal;
 
 /*
   emulate flash sector sizes
@@ -36,60 +48,81 @@ extern const AP_HAL::HAL& hal;
 
 void Storage::_storage_open(void)
 {
-    if (_initialised) {
+    if (_initialisedType != StorageBackend::None) {
+        // don't reinit
         return;
     }
 
-#if STORAGE_USE_POSIX
-    // if we have failed filesystem init don't try again
-    if (log_fd == -1) {
-        return;
-    }
-#endif
-        
     _dirty_mask.clearall();
 
-#if STORAGE_USE_FLASH
-    // load from storage backend
-    _flash_load();
-#elif STORAGE_USE_POSIX
-    log_fd = open(HAL_STORAGE_FILE, O_RDWR|O_CREAT, 0644);
-    if (log_fd == -1) {
-        hal.console->printf("open failed of " HAL_STORAGE_FILE "\n");
-        return;
-    }
+#define HAL_RAMTRON_ALLOW_FALLBACK 0
 
-    fcntl(log_fd, F_SETFD, FD_CLOEXEC);
+#if STORAGE_USE_FRAM
+    if (hal.get_storage_fram_enabled()) {
+        if (fram.init() && fram.read(0, _buffer, HAL_STORAGE_SIZE)) {
+//        _save_backup();  // FIXME
+            _initialisedType = StorageBackend::FRAM;
+            return;
+        }
 
-    int ret = read(log_fd, _buffer, HAL_STORAGE_SIZE);
-    if (ret < 0) {
-        hal.console->printf("read failed for " HAL_STORAGE_FILE "\n");
-        close(log_fd);
-        log_fd = -1;
-        return;
+#if !HAL_RAMTRON_ALLOW_FALLBACK
+        AP_HAL::panic("Unable to init RAMTRON storage");
+#endif
     }
-    // pre-fill to full size
-    if (lseek(log_fd, ret, SEEK_SET) != ret ||
-        write(log_fd, &_buffer[ret], HAL_STORAGE_SIZE-ret) != HAL_STORAGE_SIZE-ret) {
-        hal.console->printf("setup failed for " HAL_STORAGE_FILE "\n");
-        close(log_fd);
-        log_fd = -1;
-        return;        
-    }
-    using_filesystem = true;
-#else
-#error "No storage system enabled"
 #endif
 
-    _initialised = true;
+#if STORAGE_USE_FLASH
+    if (hal.get_storage_flash_enabled()) {
+        // load from storage backend
+        _flash_load();
+        _initialisedType = StorageBackend::Flash;
+        return;
+    }
+#endif // STORAGE_USE_FLASH
+
+#if STORAGE_USE_POSIX
+    if (hal.get_storage_posix_enabled()) {
+        // if we have failed filesystem init don't try again (this is
+        // initialised to zero in the constructor)
+        if (log_fd == -1) {
+            return;
+        }
+
+        log_fd = open(HAL_STORAGE_FILE, O_RDWR|O_CREAT, 0644);
+        if (log_fd == -1) {
+            hal.console->printf("open failed of " HAL_STORAGE_FILE "\n");
+            return;
+        }
+
+        fcntl(log_fd, F_SETFD, FD_CLOEXEC);
+
+        int ret = read(log_fd, _buffer, HAL_STORAGE_SIZE);
+        if (ret < 0) {
+            hal.console->printf("read failed for " HAL_STORAGE_FILE "\n");
+            close(log_fd);
+            log_fd = -1;
+            return;
+        }
+        // pre-fill to full size
+        if (lseek(log_fd, ret, SEEK_SET) != ret ||
+            write(log_fd, &_buffer[ret], HAL_STORAGE_SIZE-ret) != HAL_STORAGE_SIZE-ret) {
+            hal.console->printf("setup failed for " HAL_STORAGE_FILE "\n");
+            close(log_fd);
+            log_fd = -1;
+            return;
+        }
+        _initialisedType = StorageBackend::SDCard;  // AKA POSIX
+        return;
+    }
+#endif
+
+//    ::printf("No storage backend enabled");
 }
 
 /*
-  mark some lines as dirty. Note that there is no attempt to avoid
-  the race condition between this code and the _timer_tick() code
-  below, which both update _dirty_mask. If we lose the race then the
-  result is that a line is written more than once, but it won't result
-  in a line not being written.
+  Mark lines dirty while holding _sem. The buffer update and dirty-bit
+  changes must be serialized with flushing so a concurrent write cannot
+  be lost when _timer_tick() takes a snapshot and clears its dirty bit.
 */
 void Storage::_mark_dirty(uint16_t loc, uint16_t length)
 {
@@ -106,6 +139,7 @@ void Storage::_mark_dirty(uint16_t loc, uint16_t length)
 
 void Storage::read_block(void *dst, uint16_t loc, size_t n)
 {
+    WITH_SEMAPHORE(_sem);
     if (loc >= sizeof(_buffer)-(n-1)) {
         return;
     }
@@ -115,6 +149,7 @@ void Storage::read_block(void *dst, uint16_t loc, size_t n)
 
 void Storage::write_block(uint16_t loc, const void *src, size_t n)
 {
+    WITH_SEMAPHORE(_sem);
     if (loc >= sizeof(_buffer)-(n-1)) {
         return;
     }
@@ -127,76 +162,83 @@ void Storage::write_block(uint16_t loc, const void *src, size_t n)
 
 void Storage::_timer_tick(void)
 {
-    if (!_initialised) {
-        return;
-    }
-    if (_dirty_mask.empty()) {
-        _last_empty_ms = AP_HAL::millis();
-        return;
-    }
-
-    // write out the first dirty line. We don't write more
-    // than one to keep the latency of this call to a minimum
+    // Serialize flushes without blocking buffer access during backend IO.
+    WITH_SEMAPHORE(_timer_sem);
+    uint8_t snapshot[STORAGE_LINE_SIZE];
     uint16_t i;
-    for (i=0; i<STORAGE_NUM_LINES; i++) {
-        if (_dirty_mask.get(i)) {
-            break;
+    StorageBackend backend;
+    {
+        WITH_SEMAPHORE(_sem);
+        backend = _initialisedType;
+        if (backend == StorageBackend::None) {
+            return;
         }
-    }
-    if (i == STORAGE_NUM_LINES) {
-        // this shouldn't be possible
-        return;
+        if (_dirty_mask.empty()) {
+            _last_empty_ms = AP_HAL::millis();
+            return;
+        }
+
+        // Write out one dirty line per tick.
+        for (i=0; i<STORAGE_NUM_LINES; i++) {
+            if (_dirty_mask.get(i)) {
+                break;
+            }
+        }
+        if (i == STORAGE_NUM_LINES) {
+            return;
+        }
+
+        memcpy(snapshot, &_buffer[STORAGE_LINE_SIZE*i], sizeof(snapshot));
+#if STORAGE_USE_FLASH
+        if (backend == StorageBackend::Flash) {
+            // Compaction and error recovery may write the whole storage image.
+            memcpy(_flash_buffer, _buffer, sizeof(_buffer));
+        }
+#endif
+        // A concurrent write must queue the line again, even while IO is pending.
+        _dirty_mask.clear(i);
     }
 
+    bool written = false;
+    switch (backend) {
+#if STORAGE_USE_FRAM
+    case StorageBackend::FRAM:
+        written = fram.write(STORAGE_LINE_SIZE*i, snapshot, sizeof(snapshot));
+        break;
+#endif
 #if STORAGE_USE_POSIX
-    if (using_filesystem && log_fd != -1) {
-        const off_t offset = STORAGE_LINE_SIZE*i;
-        if (lseek(log_fd, offset, SEEK_SET) != offset) {
-            return;
-        }
-        if (write(log_fd, &_buffer[offset], STORAGE_LINE_SIZE) != STORAGE_LINE_SIZE) {
-            return;
-        }
-        _dirty_mask.clear(i);
-        return;
-    } 
+    case StorageBackend::SDCard:
+        written = log_fd != -1 &&
+            pwrite(log_fd, snapshot, sizeof(snapshot), STORAGE_LINE_SIZE*i) == sizeof(snapshot);
+        break;
 #endif
-    
 #if STORAGE_USE_FLASH
-    // save to storage backend
-    _flash_write(i);
+    case StorageBackend::Flash:
+        written = _flash.write(STORAGE_LINE_SIZE*i, STORAGE_LINE_SIZE);
+        break;
 #endif
+    default:
+        break;
+    }
+    if (!written) {
+        WITH_SEMAPHORE(_sem);
+        _dirty_mask.set(i);
+    }
 }
+
+#if STORAGE_USE_FLASH
 
 /*
   load all data from flash
  */
 void Storage::_flash_load(void)
 {
-#if STORAGE_USE_FLASH
     if (!_flash.init()) {
         AP_HAL::panic("unable to init flash storage");
     }
-#else
-    AP_HAL::panic("unable to init storage");
-#endif
+    memcpy(_buffer, _flash_buffer, sizeof(_buffer));
 }
 
-/*
-  write one storage line. This also updates _dirty_mask. 
-*/
-void Storage::_flash_write(uint16_t line)
-{
-#if STORAGE_USE_FLASH
-    if (_flash.write(line*STORAGE_LINE_SIZE, STORAGE_LINE_SIZE)) {
-        // mark the line clean
-        _dirty_mask.clear(line);
-    }
-#endif
-}
-
-
-#if STORAGE_USE_FLASH
 /*
   emulate writing to flash
  */
@@ -221,7 +263,9 @@ static void sitl_flash_open(void)
             }
             uint8_t fill[HAL_FLASH_SECTOR_SIZE*2];
             memset(fill, 0xff, sizeof(fill));
-            pwrite(flash_fd, fill, sizeof(fill), 0);
+            if (pwrite(flash_fd, fill, sizeof(fill), 0) != (ssize_t)sizeof(fill)) {
+                AP_HAL::panic("Failed to fill flash.dat");
+            }
         }
     }
 }
@@ -230,12 +274,12 @@ static bool sitl_flash_write(uint32_t addr, const uint8_t *data, uint32_t length
 {
     sitl_flash_open();
     uint8_t old[length];
-    if (pread(flash_fd, old, length, addr) != length) {
+    if (pread(flash_fd, old, length, addr) != (ssize_t)length) {
         AP_HAL::panic("Failed to read flash.dat at %u len=%u", unsigned(addr), unsigned(length));
     }
 #if defined(HAL_FLASH_MIN_WRITE_SIZE) && HAL_FLASH_MIN_WRITE_SIZE == 32
     if ((length % HAL_FLASH_MIN_WRITE_SIZE) != 0 || (addr % HAL_FLASH_MIN_WRITE_SIZE) != 0) {
-        AP_HAL::panic("Attempt to write flash at %u length %u\n", addr, length);
+        AP_HAL::panic("Attempt to write flash at %u length %u", addr, length);
     }
     // emulate H7 requirement that writes be to untouched bytes
     for (uint32_t i=0; i<length; i+= 32) {
@@ -244,7 +288,7 @@ static bool sitl_flash_write(uint32_t addr, const uint8_t *data, uint32_t length
         }
         for (uint32_t j=0; j<32; j++) {
             if (old[i+j] != 0xFF) {
-                AP_HAL::panic("Attempt to write modified flash at %u length %u\n", addr+i+j, length);
+                AP_HAL::panic("Attempt to write modified flash at %u length %u", addr+i+j, length);
             }
         }
     }
@@ -255,22 +299,22 @@ static bool sitl_flash_write(uint32_t addr, const uint8_t *data, uint32_t length
 #if HAL_FLASH_ALLOW_UPDATE
         // emulating flash that allows setting any bit from 1 to 0
         if (data[i] & ~old[i]) {
-            AP_HAL::panic("Attempt to set flash byte 0x%02x from 0x%02x at %u\n", data[i], old[i], addr+i);
+            AP_HAL::panic("Attempt to set flash byte 0x%02x from 0x%02x at %u", data[i], old[i], addr+i);
         }
 #else
         // emulating flash that only allows update if whole byte is 0xFF
         if (data[i] != old[i] && old[i] != 0xFF) {
-            AP_HAL::panic("Attempt to set flash byte 0x%02x from 0x%02x at %u\n", data[i], old[i], addr+i);
+            AP_HAL::panic("Attempt to set flash byte 0x%02x from 0x%02x at %u", data[i], old[i], addr+i);
         }
 #endif
     }
-    return pwrite(flash_fd, data, length, addr) == length;
+    return pwrite(flash_fd, data, length, addr) == (ssize_t)length;
 }
 
 static bool sitl_flash_read(uint32_t addr, uint8_t *data, uint32_t length)
 {
     sitl_flash_open();
-    return pread(flash_fd, data, length, addr) == length;
+    return pread(flash_fd, data, length, addr) == (ssize_t)length;
 }
 
 static bool sitl_flash_erasepage(uint32_t page)
@@ -329,6 +373,7 @@ bool Storage::_flash_erase_ok(void)
     // only allow erase while disarmed
     return !hal.util->get_soft_armed();
 }
+
 #endif // STORAGE_USE_FLASH
 
 /*
@@ -337,7 +382,24 @@ bool Storage::_flash_erase_ok(void)
  */
 bool Storage::healthy(void)
 {
-    return _initialised && AP_HAL::millis() - _last_empty_ms < 2000;
+    WITH_SEMAPHORE(_sem);
+    if (_initialisedType == StorageBackend::None) {
+        return false;
+    }
+    return AP_HAL::millis() - _last_empty_ms < 2000;
 }
 
-
+/*
+  get storage size and ptr
+ */
+bool Storage::get_storage_ptr(void *&ptr, size_t &size)
+{
+    WITH_SEMAPHORE(_sem);
+    if (_initialisedType==StorageBackend::None) {
+        return false;
+    }
+    // The caller receives a live buffer, not a snapshot protected by _sem.
+    ptr = _buffer;
+    size = sizeof(_buffer);
+    return true;
+}

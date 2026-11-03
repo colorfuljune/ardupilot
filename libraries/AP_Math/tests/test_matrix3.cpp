@@ -17,6 +17,8 @@
 
 #include "math_test.h"
 
+const AP_HAL::HAL& hal = AP_HAL::get_HAL();
+
 // given we are in the Math library, you're epected to know what
 // you're doing when directly comparing floats:
 #pragma GCC diagnostic push
@@ -108,6 +110,28 @@ INSTANTIATE_TEST_CASE_P(InvertibleMatrices,
 INSTANTIATE_TEST_CASE_P(NonInvertibleMatrices,
                         Matrix3fTest,
                         ::testing::ValuesIn(non_invertible));
+
+TEST(Matrix3Test, ToEuler312OutOfRange)
+{
+    // to_euler312() reaches asin with c.y alone, so put that out of
+    // range directly.  The result is not a plausible rotation matrix -
+    // the row is no longer unit length - but c.y is what decides the
+    // behaviour under test: asinf() would answer NaN and raise
+    // FE_INVALID, which SITL traps.
+    Matrix3f m;
+    m.identity();
+    m.c.y = -1.00000012f;   // the value seen from SIM_Gimbal in a SITL run
+    const Vector3f e = m.to_euler312();
+    EXPECT_FALSE(isnan(e.x));
+    EXPECT_FLOAT_EQ(-M_PI_2, e.x);
+
+    m.c.y = 1.00000012f;
+    EXPECT_FLOAT_EQ(M_PI_2, m.to_euler312().x);
+
+    // and the ordinary case still answers the ordinary way
+    m.c.y = 0.5f;
+    EXPECT_FLOAT_EQ(asinf(0.5f), m.to_euler312().x);
+}
 
 AP_GTEST_MAIN()
 

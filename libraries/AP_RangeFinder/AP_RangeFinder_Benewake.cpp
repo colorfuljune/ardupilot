@@ -15,6 +15,8 @@
 
 #include "AP_RangeFinder_Benewake.h"
 
+#if AP_RANGEFINDER_BENEWAKE_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include <AP_HAL/utility/sparse-endian.h>
 
@@ -25,28 +27,43 @@ extern const AP_HAL::HAL& hal;
 #define BENEWAKE_FRAME_HEADER 0x59
 #define BENEWAKE_FRAME_LENGTH 9
 #define BENEWAKE_DIST_MAX_CM 32768
-#define BENEWAKE_OUT_OF_RANGE_ADD_CM 100
+#define BENEWAKE_OUT_OF_RANGE_ADD 1.00  // metres
 
 // format of serial packets received from benewake lidar
+// Model       | Byte 0-1  | Byte 2 | Byte 3 | Byte 4     | Byte 5     | Byte 6     | Byte 7         | Byte 8
+// ------------+-----------+--------+--------+------------+------------+------------+----------------+---------
+// TFmini      | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | dist mode* | reserved       | Checksum
+// TF02        | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | SIG*       | Exposure Time* | Checksum
+// TF-Nova     | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | Temp       | Confidence*    | Checksum
+// ------------+-----------+--------+--------+------------+------------+------------+----------------+---------
+// TFmini-S    | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | Temp_L     | Temp_H         | Checksum
+// TFmini-plus | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | Temp_L     | Temp_H         | Checksum
+// TF02-Pro    | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | Temp_L     | Temp_H         | Checksum
+// TFS20-L     | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | Temp_L     | Temp_H         | Checksum
+// TF-Luna     | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | Temp_L     | Temp_H         | Checksum
+// TF03        | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | reserved   | reserved       | Checksum
+// TF350       | 0x59 0x59 | Dist_L | Dist_H | Strength_L | Strength_H | reserved   | reserved       | Checksum
 //
-// Data Bit             Definition      Description
-// ------------------------------------------------
-// byte 0               Frame header    0x59
-// byte 1               Frame header    0x59
-// byte 2               DIST_L          Distance (in cm) low 8 bits
-// byte 3               DIST_H          Distance (in cm) high 8 bits
-// byte 4               STRENGTH_L      Strength low 8 bits
-// bute 4 (TF03)        (Reserved)
-// byte 5               STRENGTH_H      Strength high 8 bits
-// bute 5 (TF03)        (Reserved)
-// byte 6 (TF02)        SIG             Reliability in 8 levels, 7 & 8 means reliable
-// byte 6 (TFmini)      Distance Mode   0x02 for short distance (mm), 0x07 for long distance (cm)
-// byte 6 (TF03)        (Reserved)
-// byte 7 (TF02 only)   TIME            Exposure time in two levels 0x03 and 0x06
-// byte 8               Checksum        Checksum byte, sum of bytes 0 to bytes 7
+// Notes:
+// TFmini (discontinued) : Byte 6 : Distance mode is 0x02 for short distance (mm), 0x07 for long distance (cm)
+// TF02 (discontinued) : Byte 6 : SIG byte is reliability in 8 levels, 7 & 8 means reliable
+// TF02 (discontinued) : Byte 7 : Exposure Time in two levels 0x03 and 0x06
+// TF-Nova : Byte 7 : Confidence from 0 ~ 100 (100 being highest confidence)
+//
+// Strength values per model:
+// TFmini: No documentation
+// TF02: 0 ~ 3000, reliable if value >=20 and <= 2000
+// TF-Nova: No documentation
+// TFmini-S: 0 ~ 65535. reliable if value >=100 and <65535, 65535 (-1) means signal strength saturation (bad)
+// TFmini-plus: 0 ~ 65535. reliable if value >=100 and <65535, 65535 (-1) means signal strength saturation (bad)
+// TF02-Pro: 0 ~ 65535, no documentation
+// TFS20-L: 0 ~ 65535, no documentation
+// TF-Luna: 0 ~ 65535. reliable if value >=100 and <65535, 65535 (-1) means signal strength saturation (bad)
+// TF03: 0 ~ 3500, reliable if >=40 ~ 1200.  if high reflectivity object will be 1500
+// TF350: 0 ~ 3500, reliable if >=40 ~ 1200.  if high reflectivity object will be 1500
 
-// distance returned in reading_cm, signal_ok is set to true if sensor reports a strong signal
-bool AP_RangeFinder_Benewake::get_reading(uint16_t &reading_cm)
+// distance returned in reading_m, signal_ok is set to true if sensor reports a strong signal
+bool AP_RangeFinder_Benewake::get_reading(float &reading_m)
 {
     if (uart == nullptr) {
         return false;
@@ -57,13 +74,11 @@ bool AP_RangeFinder_Benewake::get_reading(uint16_t &reading_cm)
     uint16_t count_out_of_range = 0;
 
     // read any available lines from the lidar
-    int16_t nbytes = uart->available();
-    while (nbytes-- > 0) {
-        int16_t r = uart->read();
-        if (r < 0) {
-            continue;
+    for (auto j=0; j<8192; j++) {
+        uint8_t c;
+        if (!uart->read(c)) {
+            break;
         }
-        uint8_t c = (uint8_t)r;
         // if buffer is empty and this byte is 0x59, add to buffer
         if (linebuf_len == 0) {
             if (c == BENEWAKE_FRAME_HEADER) {
@@ -91,11 +106,15 @@ bool AP_RangeFinder_Benewake::get_reading(uint16_t &reading_cm)
                 if (checksum == linebuf[BENEWAKE_FRAME_LENGTH-1]) {
                     // calculate distance
                     uint16_t dist = ((uint16_t)linebuf[3] << 8) | linebuf[2];
-                    if (dist >= BENEWAKE_DIST_MAX_CM) {
-                        // this reading is out of range
+                    if (dist >= BENEWAKE_DIST_MAX_CM || dist == uint16_t(model_dist_max_cm())) {
+                        // this reading is out of range. Note that we
+                        // consider getting exactly the model dist max
+                        // is out of range. This fixes an issue with
+                        // the TF03 which can give exactly 18000 cm
+                        // when out of range
                         count_out_of_range++;
                     } else if (!has_signal_byte()) {
-                        // no signal byte from TFmini so add distance to sum
+                        // no signal byte so can immediately add distance to sum
                         sum_cm += dist;
                         count++;
                     } else {
@@ -118,17 +137,19 @@ bool AP_RangeFinder_Benewake::get_reading(uint16_t &reading_cm)
 
     if (count > 0) {
         // return average distance of readings
-        reading_cm = sum_cm / count;
+        reading_m = (sum_cm * 0.01f) / count;
         return true;
     }
 
     if (count_out_of_range > 0) {
         // if only out of range readings return larger of
         // driver defined maximum range for the model and user defined max range + 1m
-        reading_cm = MAX(model_dist_max_cm(), max_distance_cm() + BENEWAKE_OUT_OF_RANGE_ADD_CM);
+        reading_m = MAX(model_dist_max_cm() * 0.01, max_distance() + BENEWAKE_OUT_OF_RANGE_ADD);
         return true;
     }
 
     // no readings so return false
     return false;
 }
+
+#endif  // AP_RANGEFINDER_BENEWAKE_ENABLED

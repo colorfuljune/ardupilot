@@ -21,6 +21,7 @@
 #include "SIM_Aircraft.h"
 #include "SIM_Motor.h"
 #include "SIM_Frame.h"
+#include <AP_InternalError/AP_InternalError.h>
 
 namespace SITL {
 
@@ -51,7 +52,7 @@ public:
 
     /* static object creator */
     static Aircraft *create(const char *frame_str) {
-        return new Submarine(frame_str);
+        return NEW_NOTHROW Submarine(frame_str);
     }
 
 
@@ -67,12 +68,12 @@ protected:
         float thruster_mount_radius = 0.25; // distance in meters from thrusters to center of mass. Used to calculate torque.
         float equivalent_sphere_radius = 0.2;
         // volume = 4.pi.r³/3
-        float volume = 4 * M_PI * pow(equivalent_sphere_radius, 3) / 3;
+        float volume = 4 * M_PI * powf(equivalent_sphere_radius, 3) / 3;
         float density = 500;
         float mass = volume * density; // 16.75 kg
         // Moment of Inertia (I)(kg.m²) approximated with a sphere with a 25 cm radius (r) and same density as water
         // I = 2.m.r²/5
-        float moment_of_inertia =  2 * (mass * pow(equivalent_sphere_radius, 2) / 5);
+        float moment_of_inertia =  2 * (mass * powf(equivalent_sphere_radius, 2) / 5);
 
         // Frame drag coefficient
         const Vector3f linear_drag_coefficient = Vector3f(1.4, 1.8, 2.0);
@@ -83,24 +84,34 @@ protected:
         // $ V = 4 * pi * r^3 / 3 $
         // $ r ^2 = (V * 3 / 4) ^ (2/3) $
         // A = area (m^3), r = sphere radius (m)
-        float equivalent_sphere_area = M_PI_4 * pow(volume * 3.0f / 4.0f, 2.0f / 3.0f);
+        float equivalent_sphere_area = M_PI_4 * powf(volume * 3.0f / 4.0f, 2.0f / 3.0f);
 
     } frame_property;
 
     bool on_ground() const override;
 
+    float rangefinder_beam_width() const override { return 10; }
+
+    float perpendicular_distance_to_rangefinder_surface() const override;
+
     // calculate sea floor depth based for terrain follow
-    float calculate_sea_floor_depth(const Vector3f &/*position*/);
+    float calculate_sea_floor_depth(const Vector3d &/*position*/) const;
     // calculate rotational and linear accelerations
     void calculate_forces(const struct sitl_input &input, Vector3f &rot_accel, Vector3f &body_accel);
     // calculate buoyancy
     float calculate_buoyancy_acceleration();
     // calculate drag from velocity and drag coefficient
-    void calculate_drag_force(const Vector3f &velocity, const Vector3f &drag_coefficient, Vector3f &force);
+    void calculate_drag_force(const Vector3f &velocity, const Vector3f &drag_coefficient, Vector3f &force) const;
     // calculate torque water resistance
-    void calculate_angular_drag_torque(const Vector3f &angular_velocity, const Vector3f &drag_coefficient, Vector3f &torque);
+    void calculate_angular_drag_torque(const Vector3f &angular_velocity, const Vector3f &drag_coefficient, Vector3f &torque) const;
     // calculate torque induced by buoyancy foams
     void calculate_buoyancy_torque(Vector3f &torque);
+    // compute and set battery usage
+    void update_battery(const struct sitl_input &input) override;
+    // Sub needs the sitl_input, should never use the parent's input-free version.
+    // (Using it would be using the wrong battery model, but it would silently work.)
+    void update_battery() override { INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control); };
+    bool battery_is_empty() { return battery_voltage < 0.5f; };
 
     Frame *frame;
     Thruster* thrusters;

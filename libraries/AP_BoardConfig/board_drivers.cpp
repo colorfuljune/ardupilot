@@ -13,10 +13,15 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 /*
- *   AP_BoardConfig - px4 driver loading and setup
+ *   AP_BoardConfig - driver loading and setup
  */
 
+
 #include <AP_HAL/AP_HAL.h>
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS
+#include <hal.h>
+#include <AP_HAL_ChibiOS/hwdef/common/stm32_util.h>
+#endif
 #include "AP_BoardConfig.h"
 #include <GCS_MAVLink/GCS.h>
 #include <AP_Math/crc.h>
@@ -29,10 +34,9 @@ extern const AP_HAL::HAL& hal;
  */
 void AP_BoardConfig::board_init_safety()
 {
-#if HAL_HAVE_SAFETY_SWITCH
     bool force_safety_off = (state.safety_enable.get() == 0);
     if (!force_safety_off && hal.util->was_watchdog_safety_off()) {
-        gcs().send_text(MAV_SEVERITY_INFO, "Forcing safety off for watchdog\n");
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Forcing safety off for watchdog");
         force_safety_off = true;
     }
     if (force_safety_off) {
@@ -43,7 +47,24 @@ void AP_BoardConfig::board_init_safety()
             hal.scheduler->delay(20);
         }
     }
+}
+
+/*
+  init debug pins. We set debug pins as input if BRD_OPTIONS bit for debug enable is not set
+  this prevents possible ESD issues on the debug pins
+ */
+void AP_BoardConfig::board_init_debug()
+{
+#if !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_DEBUG_BUILD)
+    if ((_options & BOARD_OPTION_DEBUG_ENABLE) == 0) {
+#ifdef HAL_GPIO_PIN_JTCK_SWCLK
+        stm32_set_line_mode(HAL_GPIO_PIN_JTCK_SWCLK, PAL_MODE_INPUT);
 #endif
+#ifdef HAL_GPIO_PIN_JTMS_SWDIO
+        stm32_set_line_mode(HAL_GPIO_PIN_JTMS_SWDIO, PAL_MODE_INPUT);
+#endif
+    }
+#endif // HAL_BUILD_AP_PERIPH && HAL_DEBUG_BUILD
 }
 
 
@@ -51,44 +72,15 @@ void AP_BoardConfig::board_init_safety()
 
 AP_BoardConfig::px4_board_type AP_BoardConfig::px4_configured_board;
 
-#if defined(CONFIG_ARCH_BOARD_PX4FMU_V4)
-extern "C" {
-    int fmu_main(int, char **);
-};
-#endif
-
 void AP_BoardConfig::board_setup_drivers(void)
 {
-#if defined(CONFIG_ARCH_BOARD_PX4FMU_V4)
-    /*
-      this works around an issue with some FMUv4 hardware (eg. copies
-      of the Pixracer) which have incorrect components leading to
-      sensor brownout on boot
-     */
-    if (px4_start_driver(fmu_main, "fmu", "sensor_reset 20")) {
-        printf("FMUv4 sensor reset complete\n");
-    }
-#endif
-
     if (state.board_type == PX4_BOARD_OLDDRIVERS) {
         printf("Old drivers no longer supported\n");
-        state.board_type = PX4_BOARD_AUTO;
+        state.board_type.set(PX4_BOARD_AUTO);
     }
 
     // run board auto-detection
     board_autodetect();
-
-#if HAL_HAVE_IMU_HEATER
-    if (state.board_type == PX4_BOARD_PH2SLIM ||
-        state.board_type == PX4_BOARD_PIXHAWK2) {
-        heater.imu_target_temperature.set_default(45);
-        if (heater.imu_target_temperature.get() < 0) {
-            // don't allow a value of -1 on the cube, or it could cook
-            // the IMU
-            heater.imu_target_temperature.set(45);
-        }
-    }
-#endif
 
     px4_configured_board = (enum px4_board_type)state.board_type.get();
 
@@ -96,27 +88,16 @@ void AP_BoardConfig::board_setup_drivers(void)
     case PX4_BOARD_PX4V1:
     case PX4_BOARD_PIXHAWK:
     case PX4_BOARD_PIXHAWK2:
-    case PX4_BOARD_FMUV5:
-    case PX4_BOARD_FMUV6:
-    case PX4_BOARD_SP01:
-    case PX4_BOARD_PIXRACER:
     case PX4_BOARD_PHMINI:
     case PX4_BOARD_AUAV21:
     case PX4_BOARD_PH2SLIM:
-    case VRX_BOARD_BRAIN51:
-    case VRX_BOARD_BRAIN52:
-    case VRX_BOARD_BRAIN52E:
-    case VRX_BOARD_UBRAIN51:
-    case VRX_BOARD_UBRAIN52:
-    case VRX_BOARD_CORE10:
-    case VRX_BOARD_BRAIN54:
-    case PX4_BOARD_AEROFC:
-    case PX4_BOARD_PIXHAWK_PRO:
-    case PX4_BOARD_PCNC1:
-    case PX4_BOARD_MINDPXV2:
+    case FMUV6_BOARD_HOLYBRO_6X:
+    case FMUV6_BOARD_HOLYBRO_6X_REV6:
+    case FMUV6_BOARD_HOLYBRO_6X_REV8:
+    case FMUV6_BOARD_CUAV_6X:
         break;
     default:
-        config_error("Unknown board type");
+        config_error("Unknown board type %u", px4_configured_board);
         break;
     }
 }
@@ -136,16 +117,47 @@ bool AP_BoardConfig::spi_check_register(const char *devname, uint8_t regnum, uin
         return false;
     }
     dev->set_read_flag(read_flag);
-    dev->get_semaphore()->take_blocking();
+    WITH_SEMAPHORE(dev->get_semaphore());
+    dev->set_speed(AP_HAL::Device::SPEED_LOW);
     uint8_t v;
     if (!dev->read_registers(regnum, &v, 1)) {
 #if SPI_PROBE_DEBUG
         hal.console->printf("%s: reg %02x read fail\n", devname, (unsigned)regnum);
 #endif
-        dev->get_semaphore()->give();
         return false;
     }
-    dev->get_semaphore()->give();
+#if SPI_PROBE_DEBUG
+    hal.console->printf("%s: reg %02x expected:%02x got:%02x\n", devname, (unsigned)regnum, (unsigned)value, (unsigned)v);
+#endif
+    return v == value;
+}
+
+
+#define INV2REG_BANK_SEL 0x7F
+/*
+  check a SPI device for a register value
+ */
+bool AP_BoardConfig::spi_check_register_inv2(const char *devname, uint8_t regnum, uint8_t value, uint8_t read_flag)
+{
+    auto dev = hal.spi->get_device(devname);
+    if (!dev) {
+#if SPI_PROBE_DEBUG
+        hal.console->printf("%s: no device\n", devname);
+#endif
+        return false;
+    }
+    dev->set_read_flag(read_flag);
+    WITH_SEMAPHORE(dev->get_semaphore());
+    dev->set_speed(AP_HAL::Device::SPEED_LOW);
+    uint8_t v;
+    // select bank 0 for who am i
+    dev->write_register(INV2REG_BANK_SEL, 0, false);
+    if (!dev->read_registers(regnum, &v, 1)) {
+#if SPI_PROBE_DEBUG
+        hal.console->printf("%s: reg %02x read fail\n", devname, (unsigned)regnum);
+#endif
+        return false;
+    }
 #if SPI_PROBE_DEBUG
     hal.console->printf("%s: reg %02x expected:%02x got:%02x\n", devname, (unsigned)regnum, (unsigned)value, (unsigned)v);
 #endif
@@ -167,7 +179,7 @@ bool AP_BoardConfig::check_ms5611(const char* devname) {
     if (!dev_sem) {
         return false;
     }
-    dev_sem->take_blocking();
+    WITH_SEMAPHORE(dev_sem);
 
     static const uint8_t CMD_MS56XX_RESET = 0x1E;
     static const uint8_t CMD_MS56XX_PROM = 0xA0;
@@ -181,7 +193,6 @@ bool AP_BoardConfig::check_ms5611(const char* devname) {
         const uint8_t reg = CMD_MS56XX_PROM + (i << 1);
         uint8_t val[2];
         if (!dev->transfer(&reg, 1, val, sizeof(val))) {
-            dev_sem->give();
 #if SPI_PROBE_DEBUG
             hal.console->printf("%s: transfer fail\n", devname);
 #endif
@@ -193,7 +204,6 @@ bool AP_BoardConfig::check_ms5611(const char* devname) {
             all_zero = false;
         }
     }
-    dev_sem->give();
 
     uint16_t crc_read = prom[7]&0xf;
     prom[7] &= 0xff00;
@@ -224,8 +234,21 @@ bool AP_BoardConfig::check_ms5611(const char* devname) {
 #define LSM_WHOAMI_L3GD20 0xd4
 
 #define INV2REG_WHOAMI 0x00
+
 #define INV2_WHOAMI_ICM20948 0xEA
 #define INV2_WHOAMI_ICM20649 0xE1
+
+#define INV3REG_WHOAMI        0x75
+#define INV3REG_456_WHOAMI    0x72
+
+#define INV3_WHOAMI_ICM42688  0x47
+#define INV3_WHOAMI_ICM42670  0x67
+#define INV3_WHOAMI_ICM45686  0xE9
+#define INV3_WHOAMI_IIM42652  0x6f
+
+#define LSM6REG_WHOAMI              0x0F
+#define LSM6_WHOAMI_LSM6DSV         0x70  // shared by LSM6DSV16X and LSM6DSV32X
+#define LSM6_WHOAMI_LSM6DSK320X     0x75
 
 /*
   validation of the board type
@@ -237,7 +260,7 @@ void AP_BoardConfig::validate_board_type(void)
        cook the IMUs if the user uses an old paramater file. We
        override the board type for that specific case
      */
-#if defined(CONFIG_ARCH_BOARD_PX4FMU_V2) || defined(HAL_CHIBIOS_ARCH_FMUV3)
+#if defined(HAL_CHIBIOS_ARCH_FMUV3)
     if (state.board_type == PX4_BOARD_PIXHAWK &&
         (spi_check_register("mpu6000_ext", MPUREG_WHOAMI, MPU_WHOAMI_MPU60X0) ||
          spi_check_register("mpu9250_ext", MPUREG_WHOAMI, MPU_WHOAMI_MPU9250) ||
@@ -245,21 +268,17 @@ void AP_BoardConfig::validate_board_type(void)
          spi_check_register("icm20608_ext", MPUREG_WHOAMI, MPU_WHOAMI_ICM20602) ||
          spi_check_register("icm20602_ext", MPUREG_WHOAMI, MPU_WHOAMI_ICM20602)) &&
         (spi_check_register("lsm9ds0_ext_am", LSMREG_WHOAMI, LSM_WHOAMI_LSM303D) ||
-         spi_check_register("icm20948_ext", INV2REG_WHOAMI, INV2_WHOAMI_ICM20948))) {
+         spi_check_register_inv2("icm20948_ext", INV2REG_WHOAMI, INV2_WHOAMI_ICM20948))) {
         // Pixhawk2 has LSM303D and MPUxxxx on external bus. If we
         // detect those, then force PIXHAWK2, even if the user has
         // configured for PIXHAWK1
-#if !defined(CONFIG_ARCH_BOARD_PX4FMU_V3) && !defined(HAL_CHIBIOS_ARCH_FMUV3)
+#if !defined(HAL_CHIBIOS_ARCH_FMUV3)
         // force user to load the right firmware
         config_error("Pixhawk2 requires FMUv3 firmware");        
 #endif
         state.board_type.set(PX4_BOARD_PIXHAWK2);
-        hal.console->printf("Forced PIXHAWK2\n");
+        DEV_PRINTF("Forced PIXHAWK2\n");
     }
-#endif
-
-#if defined(CONFIG_ARCH_BOARD_PX4FMU_V4PRO)
-	// Nothing to do for the moment
 #endif
 }
 
@@ -269,12 +288,14 @@ void AP_BoardConfig::validate_board_type(void)
 void AP_BoardConfig::board_autodetect(void)
 {
 #if defined(HAL_VALIDATE_BOARD)
-    const char* errored_check = HAL_VALIDATE_BOARD;
-    if (errored_check == nullptr) {
-        return;
-    } else {
-        config_error("Board Validation %s Failed", errored_check);
-        return;
+    if((_options & SKIP_BOARD_VALIDATION) == 0) {
+        const char* errored_check = HAL_VALIDATE_BOARD;
+        if (errored_check == nullptr) {
+            return;
+        } else {
+            config_error("Board Validation %s Failed", errored_check);
+            return;
+        }
     }
 #endif
 
@@ -284,12 +305,7 @@ void AP_BoardConfig::board_autodetect(void)
         return;
     }
 
-#if defined(CONFIG_ARCH_BOARD_PX4FMU_V1)
-    // only one choice
-    state.board_type.set(PX4_BOARD_PX4V1);
-    hal.console->printf("Detected PX4v1\n");
-
-#elif defined(CONFIG_ARCH_BOARD_PX4FMU_V2) || defined(HAL_CHIBIOS_ARCH_FMUV3)
+#if defined(HAL_CHIBIOS_ARCH_FMUV3)
     if ((spi_check_register("mpu6000_ext", MPUREG_WHOAMI, MPU_WHOAMI_MPU60X0) ||
          spi_check_register("mpu6000_ext", MPUREG_WHOAMI, MPU_WHOAMI_MPU60X0) ||
          spi_check_register("mpu9250_ext", MPUREG_WHOAMI, MPU_WHOAMI_MPU60X0) ||
@@ -298,16 +314,16 @@ void AP_BoardConfig::board_autodetect(void)
          spi_check_register("icm20608_ext", MPUREG_WHOAMI, MPU_WHOAMI_ICM20602) ||
          spi_check_register("icm20602_ext", MPUREG_WHOAMI, MPU_WHOAMI_ICM20602)) &&
         (spi_check_register("lsm9ds0_ext_am", LSMREG_WHOAMI, LSM_WHOAMI_LSM303D) ||
-         spi_check_register("icm20948_ext", INV2REG_WHOAMI, INV2_WHOAMI_ICM20948))) {
+         spi_check_register_inv2("icm20948_ext", INV2REG_WHOAMI, INV2_WHOAMI_ICM20948))) {
         // Pixhawk2 has LSM303D and MPUxxxx on external bus
         state.board_type.set(PX4_BOARD_PIXHAWK2);
-        hal.console->printf("Detected PIXHAWK2\n");
+        DEV_PRINTF("Detected PIXHAWK2\n");
     } else if ((spi_check_register("icm20608-am", MPUREG_WHOAMI, MPU_WHOAMI_ICM20608) ||
                 spi_check_register("icm20608-am", MPUREG_WHOAMI, MPU_WHOAMI_ICM20602)) &&
                spi_check_register("mpu9250", MPUREG_WHOAMI, MPU_WHOAMI_MPU9250)) {
         // PHMINI has an ICM20608 and MPU9250 on sensor bus
         state.board_type.set(PX4_BOARD_PHMINI);
-        hal.console->printf("Detected PixhawkMini\n");
+        DEV_PRINTF("Detected PixhawkMini\n");
     } else if (spi_check_register("lsm9ds0_am", LSMREG_WHOAMI, LSM_WHOAMI_LSM303D) &&
                (spi_check_register("mpu6000", MPUREG_WHOAMI, MPU_WHOAMI_MPU60X0) ||
                 spi_check_register("icm20608", MPUREG_WHOAMI, MPU_WHOAMI_ICM20608) ||
@@ -316,52 +332,12 @@ void AP_BoardConfig::board_autodetect(void)
 
         // classic or upgraded Pixhawk1
         state.board_type.set(PX4_BOARD_PIXHAWK);
-        hal.console->printf("Detected Pixhawk\n");
+        DEV_PRINTF("Detected Pixhawk\n");
     } else {
         config_error("Unable to detect board type");
     }
-#elif defined(CONFIG_ARCH_BOARD_PX4FMU_V4) || defined(HAL_CHIBIOS_ARCH_FMUV4)
-    // only one choice
-    state.board_type.set_and_notify(PX4_BOARD_PIXRACER);
-    hal.console->printf("Detected Pixracer\n");
-#elif defined(HAL_CHIBIOS_ARCH_MINDPXV2)
-    // only one choice
-    state.board_type.set_and_notify(PX4_BOARD_MINDPXV2);
-    hal.console->printf("Detected MindPX-V2\n");
-#elif defined(CONFIG_ARCH_BOARD_PX4FMU_V4PRO) || defined(HAL_CHIBIOS_ARCH_FMUV4PRO)
-    // only one choice
-    state.board_type.set_and_notify(PX4_BOARD_PIXHAWK_PRO);
-    hal.console->printf("Detected Pixhawk Pro\n");	
-#elif defined(CONFIG_ARCH_BOARD_AEROFC_V1)
-    state.board_type.set_and_notify(PX4_BOARD_AEROFC);
-    hal.console->printf("Detected Aero FC\n");
-#elif defined(HAL_CHIBIOS_ARCH_FMUV5)
-    state.board_type.set_and_notify(PX4_BOARD_FMUV5);
-    hal.console->printf("Detected FMUv5\n");
 #elif defined(HAL_CHIBIOS_ARCH_FMUV6)
-    state.board_type.set_and_notify(PX4_BOARD_FMUV5);
-    hal.console->printf("Detected FMUv6\n");
-#elif defined(CONFIG_ARCH_BOARD_VRBRAIN_V51) || defined(HAL_CHIBIOS_ARCH_BRAINV51)
-    state.board_type.set_and_notify(VRX_BOARD_BRAIN51);
-    hal.console->printf("Detected VR Brain 5.1\n");
-#elif defined(CONFIG_ARCH_BOARD_VRBRAIN_V52) || defined(HAL_CHIBIOS_ARCH_BRAINV52)
-    state.board_type.set_and_notify(VRX_BOARD_BRAIN52);
-    hal.console->printf("Detected VR Brain 5.2\n");
-#elif defined(CONFIG_ARCH_BOARD_VRBRAIN_V52E)
-    state.board_type.set_and_notify(VRX_BOARD_BRAIN52E);
-    hal.console->printf("Detected VR Brain 5.2E\n");
-#elif defined(CONFIG_ARCH_BOARD_VRUBRAIN_V51) || defined(HAL_CHIBIOS_ARCH_UBRAINV51)
-    state.board_type.set_and_notify(VRX_BOARD_UBRAIN51);
-    hal.console->printf("Detected VR Micro Brain 5.1\n");
-#elif defined(CONFIG_ARCH_BOARD_VRUBRAIN_V52)
-    state.board_type.set_and_notify(VRX_BOARD_UBRAIN52);
-    hal.console->printf("Detected VR Micro Brain 5.2\n");
-#elif defined(CONFIG_ARCH_BOARD_VRCORE_V10) || defined(HAL_CHIBIOS_ARCH_COREV10)
-    state.board_type.set_and_notify(VRX_BOARD_CORE10);
-    hal.console->printf("Detected VR Core 1.0\n");
-#elif defined(CONFIG_ARCH_BOARD_VRBRAIN_V54) || defined(HAL_CHIBIOS_ARCH_BRAINV54)
-    state.board_type.set_and_notify(VRX_BOARD_BRAIN54);
-    hal.console->printf("Detected VR Brain 5.4\n");
+    detect_fmuv6_variant();
 #endif
 
 }
@@ -374,10 +350,46 @@ void AP_BoardConfig::board_autodetect(void)
 void AP_BoardConfig::board_setup_uart()
 {
 #if AP_FEATURE_RTSCTS
-    hal.uartC->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser1_rtscts.get());
-    if (hal.uartD != nullptr) {
-        hal.uartD->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser2_rtscts.get());
+#ifdef HAL_HAVE_RTSCTS_SERIAL1
+    if (hal.serial(1) != nullptr) {
+        hal.serial(1)->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser_rtscts[1].get());
     }
+#endif
+#ifdef HAL_HAVE_RTSCTS_SERIAL2
+    if (hal.serial(2) != nullptr) {
+        hal.serial(2)->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser_rtscts[2].get());
+    }
+#endif
+#ifdef HAL_HAVE_RTSCTS_SERIAL3
+    if (hal.serial(3) != nullptr) {
+        hal.serial(3)->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser_rtscts[3].get());
+    }
+#endif
+#ifdef HAL_HAVE_RTSCTS_SERIAL4
+    if (hal.serial(4) != nullptr) {
+        hal.serial(4)->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser_rtscts[4].get());
+    }
+#endif
+#ifdef HAL_HAVE_RTSCTS_SERIAL5
+    if (hal.serial(5) != nullptr) {
+        hal.serial(5)->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser_rtscts[5].get());
+    }
+#endif
+#ifdef HAL_HAVE_RTSCTS_SERIAL6
+    if (hal.serial(6) != nullptr) {
+        hal.serial(6)->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser_rtscts[6].get());
+    }
+#endif
+#ifdef HAL_HAVE_RTSCTS_SERIAL7
+    if (hal.serial(7) != nullptr) {
+        hal.serial(7)->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser_rtscts[7].get());
+    }
+#endif
+#ifdef HAL_HAVE_RTSCTS_SERIAL8
+    if (hal.serial(8) != nullptr) {
+        hal.serial(8)->set_flow_control((AP_HAL::UARTDriver::flow_control)state.ser_rtscts[8].get());
+    }
+#endif
 #endif
 }
 
@@ -440,3 +452,60 @@ void AP_BoardConfig::board_setup()
 #endif
 }
 
+
+#ifdef HAL_CHIBIOS_ARCH_FMUV6
+
+#define BMI088REG_CHIPID 0x00
+#define CHIPID_BMI088_G 0x0F
+
+bool AP_BoardConfig::probe_lsm6dsv_family(const char *devname)
+{
+    static const uint8_t lsm6dsv_whoami[] {
+        LSM6_WHOAMI_LSM6DSV,
+        LSM6_WHOAMI_LSM6DSK320X,
+    };
+
+    for (uint8_t i = 0; i < ARRAY_SIZE(lsm6dsv_whoami); i++) {
+        if (spi_check_register(devname, LSM6REG_WHOAMI, lsm6dsv_whoami[i])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool AP_BoardConfig::probe_compatible_imu_slot(const char *icm_devname, const char *lsm6_devname)
+{
+    return spi_check_register(icm_devname, INV3REG_456_WHOAMI, INV3_WHOAMI_ICM45686) ||
+           probe_lsm6dsv_family(lsm6_devname);
+}
+
+/*
+  detect which FMUV6 variant we are running on
+ */
+void AP_BoardConfig::detect_fmuv6_variant()
+{
+    if (((spi_check_register_inv2("icm20649", INV2REG_WHOAMI, INV2_WHOAMI_ICM20649) ||
+          spi_check_register("bmi088_g", BMI088REG_CHIPID, CHIPID_BMI088_G)) && // alternative config
+         spi_check_register("icm42688", INV3REG_WHOAMI, INV3_WHOAMI_ICM42688) &&
+         spi_check_register("icm42670", INV3REG_WHOAMI, INV3_WHOAMI_ICM42670))) {
+        state.board_type.set_and_notify(FMUV6_BOARD_HOLYBRO_6X);
+        DEV_PRINTF("Detected Holybro 6X\n");
+    } else if ((spi_check_register_inv2("icm20649_2", INV2REG_WHOAMI, INV2_WHOAMI_ICM20649) &&
+                spi_check_register("icm42688", INV3REG_WHOAMI, INV3_WHOAMI_ICM42688) &&
+                spi_check_register("bmi088_g", BMI088REG_CHIPID, CHIPID_BMI088_G))) {
+        state.board_type.set_and_notify(FMUV6_BOARD_CUAV_6X);
+        DEV_PRINTF("Detected CUAV 6X\n");
+        AP_Param::load_defaults_file("@ROMFS/param/CUAV_V6X_defaults.parm", false);
+    } else if (probe_compatible_imu_slot("icm45686-1", "lsm6dsv-1") &&
+               probe_compatible_imu_slot("icm45686-2", "lsm6dsv-2") &&
+               probe_compatible_imu_slot("icm45686-3", "lsm6dsv-3")) {
+        state.board_type.set_and_notify(FMUV6_BOARD_HOLYBRO_6X_REV8);
+        DEV_PRINTF("Detected Holybro 6X_Rev8\n");
+    } else if (spi_check_register("iim42652", INV3REG_WHOAMI, INV3_WHOAMI_IIM42652) &&
+               spi_check_register("icm45686", INV3REG_456_WHOAMI, INV3_WHOAMI_ICM45686)) {
+        state.board_type.set_and_notify(FMUV6_BOARD_HOLYBRO_6X_REV6);
+        DEV_PRINTF("Detected Holybro 6X_Rev6\n");
+    }
+}
+#endif

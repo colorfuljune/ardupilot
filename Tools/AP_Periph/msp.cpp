@@ -3,15 +3,18 @@
   Thanks to input from Konstantin Sharlaimov
  */
 
+#include <AP_HAL/AP_HAL_Boards.h>
 #include "AP_Periph.h"
 
-#ifdef HAL_PERIPH_ENABLE_MSP
+#if AP_PERIPH_MSP_ENABLED
 
 void AP_Periph_FW::msp_init(AP_HAL::UARTDriver *_uart)
 {
-    msp.port.uart = _uart;
-    msp.port.msp_version = MSP::MSP_V2_NATIVE;
-    _uart->begin(115200, 512, 512);
+    if (_uart) {
+        msp.port.uart = _uart;
+        msp.port.msp_version = MSP::MSP_V2_NATIVE;
+        _uart->begin(115200, 512, 512);
+    }
 }
 
 
@@ -39,19 +42,25 @@ void AP_Periph_FW::send_msp_packet(uint16_t cmd, void *p, uint16_t size)
  */
 void AP_Periph_FW::msp_sensor_update(void)
 {
-#ifdef HAL_PERIPH_ENABLE_GPS
+    if (msp.port.uart == nullptr) {
+        return;
+    }
+#if AP_PERIPH_GPS_ENABLED
     send_msp_GPS();
 #endif
-#ifdef HAL_PERIPH_ENABLE_BARO
+#if AP_PERIPH_BARO_ENABLED
     send_msp_baro();
 #endif
-#ifdef HAL_PERIPH_ENABLE_MAG
+#if AP_PERIPH_MAG_ENABLED
     send_msp_compass();
+#endif
+#if AP_PERIPH_AIRSPEED_ENABLED
+    send_msp_airspeed();
 #endif
 }
 
 
-#ifdef HAL_PERIPH_ENABLE_GPS
+#if AP_PERIPH_GPS_ENABLED
 /*
   send MSP GPS packet
  */
@@ -93,14 +102,16 @@ void AP_Periph_FW::send_msp_GPS(void)
     p.ned_vel_down = vel.z*100;
     p.ground_course = wrap_360_cd(gps.ground_course(0)*100);
     float yaw_deg=0, acc;
-    if (gps.gps_yaw_deg(0, yaw_deg, acc)) {
+    uint32_t time_ms;
+    if (gps.gps_yaw_deg(0, yaw_deg, acc, time_ms)) {
         p.true_yaw = wrap_360_cd(yaw_deg*100);
     } else {
         p.true_yaw = 65535; // unknown
     }
     uint64_t tepoch_us = gps.time_epoch_usec(0);
     time_t utc_sec = tepoch_us / (1000U * 1000U);
-    struct tm* tm = gmtime(&utc_sec);
+    struct tm tvd {};
+    struct tm* tm = gmtime_r(&utc_sec, &tvd);
 
     p.year = tm->tm_year+1900;
     p.month = tm->tm_mon;
@@ -111,10 +122,10 @@ void AP_Periph_FW::send_msp_GPS(void)
 
     send_msp_packet(MSP2_SENSOR_GPS, &p, sizeof(p));
 }
-#endif // HAL_PERIPH_ENABLE_GPS
+#endif // AP_PERIPH_GPS_ENABLED
 
 
-#ifdef HAL_PERIPH_ENABLE_BARO
+#if AP_PERIPH_BARO_ENABLED
 /*
   send MSP baro packet
  */
@@ -125,8 +136,12 @@ void AP_Periph_FW::send_msp_baro(void)
     if (msp.last_baro_ms == baro.get_last_update(0)) {
         return;
     }
+    if (!baro.healthy()) {
+        // don't send any data
+        return;
+    }
     msp.last_baro_ms = baro.get_last_update(0);
-
+    
     p.instance = 0;
     p.time_ms = msp.last_baro_ms;
     p.pressure_pa = baro.get_pressure();
@@ -134,9 +149,9 @@ void AP_Periph_FW::send_msp_baro(void)
 
     send_msp_packet(MSP2_SENSOR_BAROMETER, &p, sizeof(p));
 }
-#endif // HAL_PERIPH_ENABLE_BARO
+#endif // AP_PERIPH_BARO_ENABLED
 
-#ifdef HAL_PERIPH_ENABLE_MAG
+#if AP_PERIPH_MAG_ENABLED
 /*
   send MSP compass packet
  */
@@ -145,6 +160,9 @@ void AP_Periph_FW::send_msp_compass(void)
     MSP::msp_compass_data_message_t p;
 
     if (msp.last_mag_ms == compass.last_update_ms(0)) {
+        return;
+    }
+    if (!compass.healthy()) {
         return;
     }
     msp.last_mag_ms = compass.last_update_ms(0);
@@ -158,6 +176,40 @@ void AP_Periph_FW::send_msp_compass(void)
 
     send_msp_packet(MSP2_SENSOR_COMPASS, &p, sizeof(p));
 }
-#endif // HAL_PERIPH_ENABLE_MAG
+#endif // AP_PERIPH_MAG_ENABLED
 
-#endif // HAL_PERIPH_ENABLE_MSP
+#if AP_PERIPH_AIRSPEED_ENABLED
+/*
+  send MSP airspeed packet
+ */
+void AP_Periph_FW::send_msp_airspeed(void)
+{
+    MSP::msp_airspeed_data_message_t p;
+
+    const uint32_t last_update_ms = airspeed.last_update_ms();
+    if (msp.last_airspeed_ms == last_update_ms) {
+        return;
+    }
+    if (!airspeed.healthy()) {
+        // we don't report at all for an unhealthy sensor. This maps
+        // to unhealthy in the flight controller driver
+        return;
+    }
+    msp.last_airspeed_ms = last_update_ms;
+
+    p.instance = 0;
+    p.time_ms = msp.last_airspeed_ms;
+    p.pressure = airspeed.get_corrected_pressure();
+    float temp;
+    if (!airspeed.get_temperature(temp)) {
+        p.temp = INT16_MIN; //invalid temperature
+    } else {
+        p.temp = temp * 100;
+    }
+
+    send_msp_packet(MSP2_SENSOR_AIRSPEED, &p, sizeof(p));
+}
+#endif // AP_PERIPH_AIRSPEED_ENABLED
+
+
+#endif // AP_PERIPH_MSP_ENABLED

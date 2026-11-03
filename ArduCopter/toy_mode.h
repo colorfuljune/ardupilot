@@ -1,5 +1,9 @@
 #pragma once
 
+#include <stdint.h>
+#include <AP_Param/AP_Param.h>
+#include "mode.h"
+
 /*
   class to support "toy" mode for simplified user interaction for
   large volume consumer vehicles
@@ -109,7 +113,7 @@ private:
     AP_Int8 primary_mode[2];
     AP_Int8 actions[9];
     AP_Int8 trim_auto;
-    AP_Int16 flags;
+    AP_UInt16 flags;
 
     struct {
         uint32_t start_ms;

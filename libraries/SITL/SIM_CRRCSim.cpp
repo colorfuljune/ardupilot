@@ -16,6 +16,10 @@
   simulator connector for ardupilot version of CRRCSim
 */
 
+#include "SIM_config.h"
+
+#if AP_SIM_CRRCSIM_ENABLED
+
 #include "SIM_CRRCSim.h"
 
 #include <stdio.h>
@@ -119,12 +123,9 @@ void CRRCSim::recv_fdm(const struct sitl_input &input)
     gyro = Vector3f(pkt.rollRate, pkt.pitchRate, pkt.yawRate);
     velocity_ef = Vector3f(pkt.speedN, pkt.speedE, pkt.speedD);
 
-    Location loc1, loc2;
-    loc2.lat = pkt.latitude * 1.0e7;
-    loc2.lng = pkt.longitude * 1.0e7;
-    const Vector2f posdelta = loc1.get_distance_NE(loc2);
-    position.x = posdelta.x;
-    position.y = posdelta.y;
+    origin.lat = pkt.latitude * 1.0e7;
+    origin.lng = pkt.longitude * 1.0e7;
+    position.xy().zero();
     position.z = -pkt.altitude;
 
     airspeed = pkt.airspeed;
@@ -149,6 +150,7 @@ void CRRCSim::update(const struct sitl_input &input)
 {
     send_servos(input);
     recv_fdm(input);
+    update_battery();
     update_position();
     time_advance();
 
@@ -157,3 +159,5 @@ void CRRCSim::update(const struct sitl_input &input)
 }
 
 } // namespace SITL
+
+#endif  // AP_SIM_CRRCSIM_ENABLED

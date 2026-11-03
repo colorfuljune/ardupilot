@@ -1,6 +1,7 @@
-#!/usr/bin/env python
 # encoding: utf-8
 # (c) Siddharth Bharat Purohit, 3DRobotics Inc.
+
+# flake8: noqa
 
 """
 The **mavgen.py** program is a code generator which creates mavlink header files.
@@ -8,7 +9,7 @@ The **mavgen.py** program is a code generator which creates mavlink header files
 
 from waflib import Logs, Task, Utils, Node
 from waflib.TaskGen import feature, before_method, extension
-import os, sys
+import sys
 import os.path
 from xml.etree import ElementTree as et
 
@@ -45,7 +46,7 @@ class mavgen(Task.Task):
                     node.parent.path_from(entry_point.parent),
                     path
                 )
-                if not path in names:
+                if path not in names:
                     names.append(path)
 
         return nodes, names
@@ -77,7 +78,17 @@ def process_mavgen(self):
     if not hasattr(self, 'output_dir'):
         self.bld.fatal('mavgen: missing option output_dir')
 
-    inputs = self.to_nodes(self.source)
+    inputs = self.to_nodes(self.bld.srcnode.find_node(self.source))
+    # depend on fixed headers so a rebuild occurs if they change
+    mavlink_dir = self.env.get_flat('MAVLINK_DIR')
+    headers_dir = mavlink_dir+"/pymavlink/generator/C/include_v2.0"
+    headers = self.bld.root.find_node(headers_dir) # expected to be absolute
+    inputs.extend(headers.ant_glob("*.h"))
+    # also depend on the generator source itself
+    gen_src_dir = mavlink_dir+"/pymavlink/"
+    gen_src = self.bld.root.find_node(gen_src_dir)
+    inputs.extend(gen_src.ant_glob("__init__.py generator/*.py"))
+
     outputs = []
 
     self.source = []
@@ -88,15 +99,9 @@ def process_mavgen(self):
     task = self.create_task('mavgen', inputs, outputs)
     task.env['OUTPUT_DIR'] = self.output_dir.abspath()
 
-    task.env.env = dict(os.environ)
-    task.env.env['PYTHONPATH'] = task.env.MAVLINK_DIR
-
 def configure(cfg):
     """
     setup environment for mavlink header generator
     """
-    cfg.load('python')
-    cfg.check_python_version(minver=(2,7,0))
-
     env = cfg.env
     env.MAVLINK_DIR = cfg.srcnode.make_node('modules/mavlink/').abspath()

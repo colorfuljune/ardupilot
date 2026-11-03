@@ -25,6 +25,10 @@
 #include "Scheduler.h"
 #include "Device.h"
 
+#ifndef HAL_SPI_SCK_SAVE_RESTORE
+#define HAL_SPI_SCK_SAVE_RESTORE !defined(STM32F1)
+#endif
+
 namespace ChibiOS {
 
 class SPIBus : public DeviceBus {
@@ -35,7 +39,6 @@ public:
     SPIConfig spicfg;
     void dma_allocate(Shared_DMA *ctx);
     void dma_deallocate(Shared_DMA *ctx);
-    bool spi_started;
     uint8_t slowdown;
 
     // we need an additional lock in the dma_allocate and
@@ -43,6 +46,25 @@ public:
     // have two DMA channels that we are handling with the shared_dma
     // code
     mutex_t dma_lock;
+
+    // store the last spi mode for stop_peripheral()
+    uint32_t spi_mode;
+
+    // start and stop the hardware peripheral
+    void start_peripheral(void);
+    void stop_peripheral(void);
+
+    // restore hardware state needed by the polled crash dump path
+    void crashdump_prepare_peripheral(void);
+    void crashdump_restore_sck(void);
+
+private:
+    bool spi_started;
+
+    // mode line for SCK pin
+#if HAL_SPI_SCK_SAVE_RESTORE
+    iomode_t sck_mode;
+#endif
 };
 
 struct SPIDesc {
@@ -52,7 +74,7 @@ struct SPIDesc {
         : name(_name), bus(_bus), device(_device),
           pal_line(_pal_line), mode(_mode),
           lowspeed(_lowspeed), highspeed(_highspeed),
-          bank_select_cb(nullptr)
+          bank_select_cb(nullptr), register_rw_cb(nullptr)
     {
     }
 
@@ -64,6 +86,7 @@ struct SPIDesc {
     uint32_t lowspeed;
     uint32_t highspeed;
     AP_HAL::Device::BankSelectCb bank_select_cb;
+    AP_HAL::Device::RegisterRWCb register_rw_cb;
 };
 
 
@@ -83,6 +106,9 @@ public:
     /* See AP_HAL::SPIDevice::transfer_fullduplex() */
     bool transfer_fullduplex(const uint8_t *send, uint8_t *recv,
                              uint32_t len) override;
+
+    /* See AP_HAL::SPIDevice::transfer_fullduplex() */
+    bool transfer_fullduplex(uint8_t *send_recv, uint32_t len) override;
 
     /*
         Links the bank select callback to the spi bus, so that even when
@@ -125,6 +151,23 @@ public:
 
     SPIDriver * get_driver();
 
+    void get_crashdump_config(bool high_speed, uint32_t &config1,
+                              uint32_t &config2) const;
+    void crashdump_prepare_peripheral()
+    {
+        bus.crashdump_prepare_peripheral();
+    }
+    void crashdump_restore_sck()
+    {
+        bus.crashdump_restore_sck();
+    }
+
+    ioline_t get_chip_select_line() const { return device_desc.pal_line; }
+    struct bouncebuffer_t *prepare_crashdump_buffer(uint32_t size) {
+        return bus.prepare_crashdump_buffer(size);
+    }
+    void crashdump_deassert_all_cs();
+
 #ifdef HAL_SPI_CHECK_CLOCK_FREQ
     // used to measure clock frequencies
     static void test_clock_freq(void);
@@ -158,7 +201,9 @@ public:
         return static_cast<SPIDeviceManager*>(spi_mgr);
     }
 
-    AP_HAL::OwnPtr<AP_HAL::SPIDevice> get_device(const char *name) override;
+    AP_HAL::SPIDevice *get_device_ptr(const char *name) override;
+
+    void set_register_rw_callback(const char* name, AP_HAL::Device::RegisterRWCb cb) override;
 
 private:
     static SPIDesc device_table[];

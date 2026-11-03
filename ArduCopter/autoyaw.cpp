@@ -2,27 +2,28 @@
 
 Mode::AutoYaw Mode::auto_yaw;
 
-// roi_yaw - returns heading towards location held in roi
-float Mode::AutoYaw::roi_yaw()
+// roi_yaw_rad - returns heading towards location held in roi_ned_m
+float Mode::AutoYaw::roi_yaw_rad() const
 {
-    roi_yaw_counter++;
-    if (roi_yaw_counter >= 4) {
-        roi_yaw_counter = 0;
-        _roi_yaw = get_bearing_cd(copter.inertial_nav.get_position(), roi);
+    Vector2f pos_ne_m;
+    if (AP::ahrs().get_relative_position_NE_origin_float(pos_ne_m)){
+        return get_bearing_rad(pos_ne_m, roi_ned_m.xy());
     }
-
-    return _roi_yaw;
+    return copter.attitude_control->get_att_target_euler_rad().z;
 }
 
-float Mode::AutoYaw::look_ahead_yaw()
+// Returns the yaw angle (in radians) representing the direction of horizontal motion.
+float Mode::AutoYaw::look_ahead_yaw_rad()
 {
-    const Vector3f& vel = copter.inertial_nav.get_velocity();
-    float speed = norm(vel.x,vel.y);
     // Commanded Yaw to automatically look ahead.
-    if (copter.position_ok() && (speed > YAW_LOOK_AHEAD_MIN_SPEED)) {
-        _look_ahead_yaw = degrees(atan2f(vel.y,vel.x))*100.0f;
+    Vector3f vel_ned_ms;
+    if (copter.position_ok() && AP::ahrs().get_velocity_NED(vel_ned_ms)) {
+        const float speed_ms_sq = vel_ned_ms.xy().length_squared();
+        if (speed_ms_sq > (YAW_LOOK_AHEAD_MIN_SPEED_MS * YAW_LOOK_AHEAD_MIN_SPEED_MS)) {
+            _look_ahead_yaw_rad = atan2f(vel_ned_ms.y,vel_ned_ms.x);
+        }
     }
-    return _look_ahead_yaw;
+    return _look_ahead_yaw_rad;
 }
 
 void Mode::AutoYaw::set_mode_to_default(bool rtl)
@@ -32,126 +33,159 @@ void Mode::AutoYaw::set_mode_to_default(bool rtl)
 
 // default_mode - returns auto_yaw.mode() based on WP_YAW_BEHAVIOR parameter
 // set rtl parameter to true if this is during an RTL
-autopilot_yaw_mode Mode::AutoYaw::default_mode(bool rtl) const
+Mode::AutoYaw::Mode Mode::AutoYaw::default_mode(bool rtl) const
 {
-    switch (copter.g.wp_yaw_behavior) {
+    switch ((Copter::WPYawBehavior)copter.g.wp_yaw_behavior) {
 
-    case WP_YAW_BEHAVIOR_NONE:
-        return AUTO_YAW_HOLD;
+    case Copter::WPYawBehavior::NONE:
+        return Mode::HOLD;
 
-    case WP_YAW_BEHAVIOR_LOOK_AT_NEXT_WP_EXCEPT_RTL:
+    case Copter::WPYawBehavior::LOOK_AT_NEXT_WP_EXCEPT_RTL:
         if (rtl) {
-            return AUTO_YAW_HOLD;
+            return Mode::HOLD;
         } else {
-            return AUTO_YAW_LOOK_AT_NEXT_WP;
+            return Mode::LOOK_AT_NEXT_WP;
         }
 
-    case WP_YAW_BEHAVIOR_LOOK_AHEAD:
-        return AUTO_YAW_LOOK_AHEAD;
+    case Copter::WPYawBehavior::LOOK_AHEAD:
+        return Mode::LOOK_AHEAD;
 
-    case WP_YAW_BEHAVIOR_LOOK_AT_NEXT_WP:
+    case Copter::WPYawBehavior::LOOK_AT_NEXT_WP:
     default:
-        return AUTO_YAW_LOOK_AT_NEXT_WP;
+        return Mode::LOOK_AT_NEXT_WP;
     }
 }
 
 // set_mode - sets the yaw mode for auto
-void Mode::AutoYaw::set_mode(autopilot_yaw_mode yaw_mode)
+void Mode::AutoYaw::set_mode(Mode yaw_mode)
 {
     // return immediately if no change
     if (_mode == yaw_mode) {
         return;
     }
+    _last_mode = _mode;
     _mode = yaw_mode;
 
     // perform initialisation
     switch (_mode) {
 
-    case AUTO_YAW_LOOK_AT_NEXT_WP:
+    case Mode::HOLD:
+        _yaw_angle_rad = copter.attitude_control->get_att_target_euler_rad().z;
+        break;
+
+    case Mode::LOOK_AT_NEXT_WP:
         // wpnav will initialise heading when wpnav's set_destination method is called
         break;
 
-    case AUTO_YAW_ROI:
+    case Mode::ROI:
         // look ahead until we know otherwise
-        _roi_yaw = copter.ahrs.yaw_sensor;
         break;
 
-    case AUTO_YAW_FIXED:
+    case Mode::FIXED:
         // keep heading pointing in the direction held in fixed_yaw
         // caller should set the fixed_yaw
         break;
 
-    case AUTO_YAW_LOOK_AHEAD:
+    case Mode::LOOK_AHEAD:
         // Commanded Yaw to automatically look ahead.
-        _look_ahead_yaw = copter.ahrs.yaw_sensor;
+        _look_ahead_yaw_rad = copter.ahrs.get_yaw_rad();
         break;
 
-    case AUTO_YAW_RESETTOARMEDYAW:
-        // initial_armed_bearing will be set during arming so no init required
+    case Mode::RESET_TO_ARMED_YAW:
+        // initial_armed_bearing_rad will be set during arming so no init required
         break;
 
-    case AUTO_YAW_RATE:
+    case Mode::ANGLE_RATE:
+        break;
+
+    case Mode::RATE:
         // initialise target yaw rate to zero
-        _rate_cds = 0.0f;
+        _yaw_rate_rads = 0.0;
         break;
 
-    case AUTO_YAW_CIRCLE:
+    case Mode::CIRCLE:
+    case Mode::PILOT_RATE:
+    case Mode::WEATHERVANE:
         // no initialisation required
         break;
     }
 }
 
-// set_fixed_yaw - sets the yaw look at heading for auto mode
-void Mode::AutoYaw::set_fixed_yaw(float angle_deg, float turn_rate_dps, int8_t direction, bool relative_angle)
+// set_fixed_yaw_rad - sets the yaw look at heading for auto mode
+void Mode::AutoYaw::set_fixed_yaw_rad(float yaw_rad, float yaw_rate_rads, int8_t direction, bool relative_angle)
 {
-    const int32_t curr_yaw_target = copter.attitude_control->get_att_target_euler_cd().z;
+    _last_update_ms = millis();
+    const float angle_rad = yaw_rad;
 
     // calculate final angle as relative to vehicle heading or absolute
-    if (!relative_angle) {
-        // absolute angle
-        _fixed_yaw = wrap_360_cd(angle_deg * 100);
-    } else {
-        // relative angle
-        if (direction < 0) {
-            angle_deg = -angle_deg;
+    if (relative_angle) {
+        if (_mode == Mode::HOLD) {
+            _yaw_angle_rad = copter.ahrs.get_yaw_rad();
         }
-        _fixed_yaw = wrap_360_cd((angle_deg * 100) + curr_yaw_target);
+        _fixed_yaw_offset_rad = angle_rad * (direction >= 0 ? 1.0 : -1.0);
+    } else {
+        // absolute angle
+        _fixed_yaw_offset_rad = wrap_PI(angle_rad - _yaw_angle_rad);
+        if (direction < 0 && is_positive(_fixed_yaw_offset_rad)) {
+            _fixed_yaw_offset_rad -= M_2PI;
+        } else if (direction > 0 && is_negative(_fixed_yaw_offset_rad)) {
+            _fixed_yaw_offset_rad += M_2PI;
+        }
     }
 
     // get turn speed
-    if (is_zero(turn_rate_dps)) {
-        // default to regular auto slew rate
-        _fixed_yaw_slewrate = AUTO_YAW_SLEW_RATE;
+    if (!is_positive(yaw_rate_rads)) {
+        // default to default slew rate
+        _fixed_yaw_slewrate_rads = copter.attitude_control->get_slew_yaw_max_rads();
     } else {
-        const int32_t turn_rate = (wrap_180_cd(_fixed_yaw - curr_yaw_target) / 100) / turn_rate_dps;
-        _fixed_yaw_slewrate = constrain_int32(turn_rate, 1, 360);    // deg / sec
+        _fixed_yaw_slewrate_rads = MIN(copter.attitude_control->get_slew_yaw_max_rads(), yaw_rate_rads);
     }
 
     // set yaw mode
-    set_mode(AUTO_YAW_FIXED);
-
-    // TO-DO: restore support for clockwise and counter clockwise rotation held in cmd.content.yaw.direction.  1 = clockwise, -1 = counterclockwise
+    set_mode(Mode::FIXED);
 }
 
-// set_roi - sets the yaw to look at roi for auto mode
+// set_fixed_yaw_rad - sets the yaw look at heading for auto mode
+void Mode::AutoYaw::set_yaw_angle_and_rate_rad(float yaw_angle_rad, float yaw_rate_rads)
+{
+    _last_update_ms = millis();
+
+    _yaw_angle_rad = yaw_angle_rad;
+    _yaw_rate_rads = yaw_rate_rads;
+
+    // set yaw mode
+    set_mode(Mode::ANGLE_RATE);
+}
+
+// set_yaw_angle_offset_deg - sets the yaw look at heading for auto mode, as an offset from the current yaw angle
+void Mode::AutoYaw::set_yaw_angle_offset_deg(const float yaw_angle_offset_deg)
+{
+    _last_update_ms = millis();
+
+    _yaw_angle_rad = wrap_2PI(_yaw_angle_rad + radians(yaw_angle_offset_deg));
+    _yaw_rate_rads = 0.0f;
+
+    // set yaw mode
+    set_mode(Mode::ANGLE_RATE);
+}
+
+// set_roi - sets the yaw to look at roi_ned_m for auto mode
 void Mode::AutoYaw::set_roi(const Location &roi_location)
 {
     // if location is zero lat, lon and altitude turn off ROI
-    if (roi_location.alt == 0 && roi_location.lat == 0 && roi_location.lng == 0) {
+    if (!roi_location.initialised()) {
         // set auto yaw mode back to default assuming the active command is a waypoint command.  A more sophisticated method is required to ensure we return to the proper yaw control for the active command
         auto_yaw.set_mode_to_default(false);
 #if HAL_MOUNT_ENABLED
         // switch off the camera tracking if enabled
-        if (copter.camera_mount.get_mode() == MAV_MOUNT_MODE_GPS_POINT) {
-            copter.camera_mount.set_mode_to_default();
-        }
+        copter.camera_mount.clear_roi_target();
 #endif  // HAL_MOUNT_ENABLED
     } else {
 #if HAL_MOUNT_ENABLED
         // check if mount type requires us to rotate the quad
         if (!copter.camera_mount.has_pan_control()) {
-            if (roi_location.get_vector_from_origin_NEU(roi)) {
-                auto_yaw.set_mode(AUTO_YAW_ROI);
+            if (roi_location.get_vector_from_origin_NED_m(roi_ned_m)) {
+                auto_yaw.set_mode(Mode::ROI);
             }
         }
         // send the command to the camera mount
@@ -165,65 +199,231 @@ void Mode::AutoYaw::set_roi(const Location &roi_location)
         //      4: point at a target given a target id (can't be implemented)
 #else
         // if we have no camera mount aim the quad at the location
-        if (roi_location.get_vector_from_origin_NEU(roi)) {
-            auto_yaw.set_mode(AUTO_YAW_ROI);
+        if (roi_location.get_vector_from_origin_NED_m(roi_ned_m)) {
+            auto_yaw.set_mode(Mode::ROI);
         }
 #endif  // HAL_MOUNT_ENABLED
     }
 }
 
-// set auto yaw rate in centi-degrees per second
-void Mode::AutoYaw::set_rate(float turn_rate_cds)
+// set auto yaw rate in radians per second
+void Mode::AutoYaw::set_rate_rad(float turn_rate_rads)
 {
-    set_mode(AUTO_YAW_RATE);
-    _rate_cds = turn_rate_cds;
+    set_mode(Mode::RATE);
+    _yaw_rate_rads = turn_rate_rads;
 }
 
-// yaw - returns target heading depending upon auto_yaw.mode()
-float Mode::AutoYaw::yaw()
+// return true if fixed yaw target has been reached
+bool Mode::AutoYaw::reached_fixed_yaw_target()
+{
+    if (mode() != Mode::FIXED) {
+        // should not happen, not in the right mode
+        return true;
+    }
+
+    if (!is_zero(_fixed_yaw_offset_rad)) {
+        // still slewing yaw target
+        return false;
+    }
+
+    // Within 2 deg of target
+    return (fabsf(wrap_PI(_yaw_angle_rad - copter.ahrs.get_yaw_rad())) <= radians(2));
+}
+
+// yaw_rad - returns target heading depending upon auto_yaw.mode()
+float Mode::AutoYaw::yaw_rad()
 {
     switch (_mode) {
 
-    case AUTO_YAW_ROI:
-        // point towards a location held in roi
-        return roi_yaw();
+    case Mode::ROI:
+        // point towards a location held in roi_ned_m
+        _yaw_angle_rad = roi_yaw_rad();
+        break;
 
-    case AUTO_YAW_FIXED:
+    case Mode::FIXED: {
         // keep heading pointing in the direction held in fixed_yaw
         // with no pilot input allowed
-        return _fixed_yaw;
+        const uint32_t now_ms = millis();
+        float dt = (now_ms - _last_update_ms) * 0.001;
+        _last_update_ms = now_ms;
+        float yaw_angle_step_rad = constrain_float(_fixed_yaw_offset_rad, - dt * _fixed_yaw_slewrate_rads, dt * _fixed_yaw_slewrate_rads);
+        _fixed_yaw_offset_rad -= yaw_angle_step_rad;
+        _yaw_angle_rad += yaw_angle_step_rad;
+        break;
+    }
 
-    case AUTO_YAW_LOOK_AHEAD:
+    case Mode::LOOK_AHEAD:
         // Commanded Yaw to automatically look ahead.
-        return look_ahead_yaw();
+        _yaw_angle_rad = look_ahead_yaw_rad();
+        break;
 
-    case AUTO_YAW_RESETTOARMEDYAW:
+    case Mode::RESET_TO_ARMED_YAW:
         // changes yaw to be same as when quad was armed
-        return copter.initial_armed_bearing;
+        _yaw_angle_rad = copter.initial_armed_bearing_rad;
+        break;
 
-    case AUTO_YAW_CIRCLE:
+    case Mode::CIRCLE:
+#if MODE_CIRCLE_ENABLED
         if (copter.circle_nav->is_active()) {
-            return copter.circle_nav->get_yaw();
+            // standalone Circle mode provides its own yaw
+            _yaw_angle_rad = copter.circle_nav->get_yaw_rad();
+            break;
         }
-        // return the current attitude target
-        return wrap_360_cd(copter.attitude_control->get_att_target_euler_cd().z);
+        if (!copter.circle_nav->face_direction_of_travel()) {
+            // Auto's S-curve circle: face the circle center held by circle_nav, the parameter
+            // store the orbit leg was built from.  The position target is used rather than the
+            // estimate so the yaw target carries no position noise and does not lag by the
+            // tracking error (AC_Circle does the same).  If the target is exactly at the
+            // center, the last yaw target is held
+            const Vector2f pos_to_center_ne = (copter.circle_nav->get_center_NED_m().xy() - copter.pos_control->get_pos_desired_NED_m().xy()).tofloat();
+            if (!pos_to_center_ne.is_zero()) {
+                _yaw_angle_rad = pos_to_center_ne.angle();
+            }
+            break;
+        }
+        {
+            // FACE_DIRECTION_OF_TRAVEL option set: yaw follows the desired direction of travel.
+            // The last yaw target is held while the desired velocity is too small to define one
+            const Vector2f vel_desired_ne_ms = copter.pos_control->get_vel_desired_NED_ms().xy();
+            if (vel_desired_ne_ms.length() > 0.1f) {
+                _yaw_angle_rad = vel_desired_ne_ms.angle();
+            }
+        }
+#else
+        // circle mode compiled out: yaw follows the position controller's travel direction
+        _yaw_angle_rad = copter.pos_control->get_yaw_rad();
+#endif
+        break;
 
-    case AUTO_YAW_LOOK_AT_NEXT_WP:
+    case Mode::ANGLE_RATE:{
+        const uint32_t now_ms = millis();
+        float dt = (now_ms - _last_update_ms) * 0.001;
+        _last_update_ms = now_ms;
+        _yaw_angle_rad += _yaw_rate_rads * dt;
+        break;
+    }
+
+    case Mode::HOLD:
+    case Mode::RATE:
+    case Mode::WEATHERVANE:
+    case Mode::PILOT_RATE:
+        _yaw_angle_rad = copter.attitude_control->get_att_target_euler_rad().z;
+        break;
+
+    case Mode::LOOK_AT_NEXT_WP:
     default:
         // point towards next waypoint.
-        // we don't use wp_bearing because we don't want the copter to turn too much during flight
-        return copter.wp_nav->get_yaw();
+        // we don't use wp_bearing_deg because we don't want the copter to turn too much during flight
+        _yaw_angle_rad = copter.pos_control->get_yaw_rad();
+    break;
     }
+    return _yaw_angle_rad;
 }
 
 // returns yaw rate normally set by SET_POSITION_TARGET mavlink
 // messages (positive is clockwise, negative is counter clockwise)
-float Mode::AutoYaw::rate_cds() const
+float Mode::AutoYaw::rate_rads()
 {
-    if (_mode == AUTO_YAW_RATE) {
-        return _rate_cds;
+    switch (_mode) {
+
+    case Mode::HOLD:
+    case Mode::ROI:
+    case Mode::FIXED:
+    case Mode::LOOK_AHEAD:
+    case Mode::RESET_TO_ARMED_YAW:
+    case Mode::CIRCLE:
+        _yaw_rate_rads = 0.0f;
+        break;
+
+    case Mode::LOOK_AT_NEXT_WP:
+        _yaw_rate_rads = copter.pos_control->get_yaw_rate_rads();
+        break;
+
+    case Mode::PILOT_RATE:
+        _yaw_rate_rads = _pilot_yaw_rate_rads;
+        break;
+
+    case Mode::ANGLE_RATE:
+    case Mode::RATE:
+    case Mode::WEATHERVANE:
+        break;
     }
 
     // return zero turn rate (this should never happen)
-    return 0.0f;
+    return _yaw_rate_rads;
 }
+
+AC_AttitudeControl::HeadingCommand Mode::AutoYaw::get_heading()
+{
+    // process pilot's yaw input
+    _pilot_yaw_rate_rads = 0.0;
+    if (rc().has_valid_input() && copter.flightmode->use_pilot_yaw()) {
+        // get pilot's desired yaw rate
+        _pilot_yaw_rate_rads = copter.flightmode->get_pilot_desired_yaw_rate_rads();
+        if (!is_zero(_pilot_yaw_rate_rads)) {
+            auto_yaw.set_mode(AutoYaw::Mode::PILOT_RATE);
+        }
+    } else if (auto_yaw.mode() == AutoYaw::Mode::PILOT_RATE) {
+        // RC failsafe, or disabled make sure not in pilot control
+        auto_yaw.set_mode(AutoYaw::Mode::HOLD);
+    }
+
+#if WEATHERVANE_ENABLED
+    update_weathervane(_pilot_yaw_rate_rads);
+#endif
+
+    AC_AttitudeControl::HeadingCommand heading;
+    heading.yaw_angle_rad = auto_yaw.yaw_rad();
+    heading.yaw_rate_rads = auto_yaw.rate_rads();
+
+    switch (auto_yaw.mode()) {
+        case Mode::HOLD:
+        case Mode::RATE:
+        case Mode::PILOT_RATE:
+        case Mode::WEATHERVANE:
+            heading.heading_mode = AC_AttitudeControl::HeadingMode::Rate_Only;
+            break;
+        case Mode::LOOK_AT_NEXT_WP:
+        case Mode::ROI:
+        case Mode::FIXED:
+        case Mode::LOOK_AHEAD:
+        case Mode::RESET_TO_ARMED_YAW:
+        case Mode::ANGLE_RATE:
+        case Mode::CIRCLE:
+            heading.heading_mode = AC_AttitudeControl::HeadingMode::Angle_And_Rate;
+            break;
+    }
+
+    return heading;
+}
+
+// handle the interface to the weathervane library
+// pilot_yaw can be an angle or a rate or rcin from yaw channel. It just needs to represent a pilot's request to yaw the vehicle to enable pilot overrides.
+#if WEATHERVANE_ENABLED
+void Mode::AutoYaw::update_weathervane(const float pilot_yaw_rads)
+{
+    float yaw_rate_cds;
+    if (copter.flightmode->allows_weathervaning() &&
+        copter.g2.weathervane.get_yaw_out(yaw_rate_cds, rad_to_cd(pilot_yaw_rads), copter.flightmode->get_alt_above_ground_m(),
+                                                                       copter.pos_control->get_roll_cd()-copter.attitude_control->get_roll_trim_cd(),
+                                                                       copter.pos_control->get_pitch_cd(),
+                                                                       copter.flightmode->is_taking_off(),
+                                                                       copter.flightmode->is_landing())) {
+        set_mode(Mode::WEATHERVANE);
+        _yaw_rate_rads = cd_to_rad(yaw_rate_cds);
+        return;
+    }
+
+    // Weathervane not allowed in current mode, or weathervane thresholds not met
+
+    // if the weathervane controller has previously been activated we need to ensure we return control back to what was previously set
+    if (mode() == Mode::WEATHERVANE) {
+        _yaw_rate_rads = 0.0;
+        if (_last_mode == Mode::HOLD) {
+            set_mode_to_default(false);
+        } else {
+            set_mode(_last_mode);
+        }
+    }
+}
+#endif // WEATHERVANE_ENABLED

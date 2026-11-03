@@ -1,31 +1,85 @@
 #include "Copter.h"
 
-// FIXME? why are these static?
-static bool land_with_gps;
+// table of user settable parameters
+const AP_Param::GroupInfo ModeLand::var_info[] = {
 
-static uint32_t land_start_time;
-static bool land_pause;
+    // @Param: SPD_MS
+    // @DisplayName: Land speed
+    // @Description: The descent speed for the final stage of landing in m/s
+    // @Units: m/s
+    // @Range: 0.3 2
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("SPD_MS", 1, ModeLand, land_speed_ms, LAND_SPD_MS_DEFAULT),
+
+    // @Param: SPD_HIGH_MS
+    // @DisplayName: Land speed high
+    // @Description: The descent speed for the first stage of landing in m/s. If this is zero then WP_SPD_DN is used
+    // @Units: m/s
+    // @Range: 0 5
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("SPD_HIGH_MS", 2, ModeLand, land_speed_high_ms, 0),
+
+    // @Param: ALT_LOW_M
+    // @DisplayName: Land alt low
+    // @Description: Altitude during Landing at which vehicle slows to LAND_SPD_MS
+    // @Units: m
+    // @Range: 1 100
+    // @Increment: 0.1
+    // @User: Advanced
+    AP_GROUPINFO("ALT_LOW_M", 3, ModeLand, land_alt_low_m, 10),
+
+    AP_GROUPEND
+};
+
+// constructor
+ModeLand::ModeLand() : Mode()
+{
+    // load parameter defaults
+    AP_Param::setup_object_defaults(this, var_info);
+}
+
+// convert parameters
+void ModeLand::convert_params()
+{
+    // PARAMETER_CONVERSION - Added: Jan-2026 for ArduPilot-4.7
+
+    // return immediately if parameter conversion has already been performed
+    if (land_speed_ms.configured() || land_speed_high_ms.configured() || land_alt_low_m.configured()) {
+        return;
+    }
+
+    static const AP_Param::ConversionInfo conversion_info[] = {
+        { Parameters::k_param_land_speed_cms, 0, AP_PARAM_INT16, "LAND_SPD_MS" },     // LAND_SPEED moved to LAND_SPD_MS
+        { Parameters::k_param_land_speed_high_cms, 0, AP_PARAM_INT16, "LAND_SPD_HIGH_MS" },   // LAND_SPEED_HIGH moved to LAND_SPD_HIGH_MS
+        { Parameters::k_param_g2, 25, AP_PARAM_INT16, "LAND_ALT_LOW_M" },  // LAND_ALT_LOW moved to LAND_ALT_LOW_M
+    };
+    AP_Param::convert_old_parameters_scaled(conversion_info, ARRAY_SIZE(conversion_info), 0.01, 0);
+}
 
 // land_init - initialise land controller
 bool ModeLand::init(bool ignore_checks)
 {
     // check if we have GPS and decide which LAND we're going to do
-    land_with_gps = copter.position_ok();
-    if (land_with_gps) {
-        // set target to stopping point
-        Vector3f stopping_point;
-        loiter_nav->get_stopping_point_xy(stopping_point);
-        loiter_nav->init_target(stopping_point);
+    control_position = copter.position_ok();
+
+    // set horizontal speed and acceleration limits
+    pos_control->NE_set_max_speed_accel_m(wp_nav->get_default_speed_NE_ms(), wp_nav->get_wp_acceleration_mss());
+    pos_control->NE_set_correction_speed_accel_m(wp_nav->get_default_speed_NE_ms(), wp_nav->get_wp_acceleration_mss());
+
+    // initialise the horizontal position controller
+    if (control_position && !pos_control->NE_is_active()) {
+        pos_control->NE_init_controller();
     }
 
-    // initialize vertical speeds and leash lengths
-    pos_control->set_max_speed_z(wp_nav->get_default_speed_down(), wp_nav->get_default_speed_up());
-    pos_control->set_max_accel_z(wp_nav->get_accel_z());
+    // set vertical speed and acceleration limits
+    pos_control->D_set_max_speed_accel_m(wp_nav->get_default_speed_down_ms(), wp_nav->get_default_speed_up_ms(), wp_nav->get_accel_D_mss());
+    pos_control->D_set_correction_speed_accel_m(wp_nav->get_default_speed_down_ms(), wp_nav->get_default_speed_up_ms(), wp_nav->get_accel_D_mss());
 
-    // initialise position and desired velocity
-    if (!pos_control->is_active_z()) {
-        pos_control->set_alt_target_to_current_alt();
-        pos_control->set_desired_velocity_z(inertial_nav.get_velocity_z());
+    // initialise the vertical position controller
+    if (!pos_control->D_is_active()) {
+        pos_control->D_init_controller();
     }
 
     land_start_time = millis();
@@ -34,11 +88,21 @@ bool ModeLand::init(bool ignore_checks)
     // reset flag indicating if pilot has applied roll or pitch inputs during landing
     copter.ap.land_repo_active = false;
 
-    // initialise yaw
-    auto_yaw.set_mode(AUTO_YAW_HOLD);
+    // this will be set true if prec land is later active
+    copter.ap.prec_land_active = false;
 
+    // initialise yaw
+    auto_yaw.set_mode(AutoYaw::Mode::HOLD);
+
+#if AP_LANDINGGEAR_ENABLED
     // optionally deploy landing gear
     copter.landinggear.deploy_for_landing();
+#endif
+
+#if AC_PRECLAND_ENABLED
+    // initialise precland state machine
+    copter.precland_statemachine.init();
+#endif
 
     return true;
 }
@@ -47,7 +111,7 @@ bool ModeLand::init(bool ignore_checks)
 // should be called at 100hz or more
 void ModeLand::run()
 {
-    if (land_with_gps) {
+    if (control_position) {
         gps_run();
     } else {
         nogps_run();
@@ -66,20 +130,18 @@ void ModeLand::gps_run()
 
     // Land State Machine Determination
     if (is_disarmed_or_landed()) {
-        make_safe_spool_down();
-        loiter_nav->clear_pilot_desired_acceleration();
-        loiter_nav->init_target();
+        make_safe_ground_handling();
     } else {
         // set motors to full range
         motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
         // pause before beginning land descent
-        if(land_pause && millis()-land_start_time >= LAND_WITH_DELAY_MS) {
+        if (land_pause && millis()-land_start_time >= LAND_WITH_DELAY_MS) {
             land_pause = false;
         }
 
-        land_run_horizontal_control();
-        land_run_vertical_control(land_pause);
+        // run normal landing or precision landing (if enabled)
+        land_run_normal_or_precland(land_pause);
     }
 }
 
@@ -88,29 +150,21 @@ void ModeLand::gps_run()
 //      should be called at 100hz or more
 void ModeLand::nogps_run()
 {
-    float target_roll = 0.0f, target_pitch = 0.0f;
-    float target_yaw_rate = 0;
+    float target_roll_rad = 0.0f, target_pitch_rad = 0.0f;
 
     // process pilot inputs
-    if (!copter.failsafe.radio) {
+    if (rc().has_valid_input()) {
+#if MODE_ALTHOLD_ENABLED
         if ((g.throttle_behavior & THR_BEHAVE_HIGH_THROTTLE_CANCELS_LAND) != 0 && copter.rc_throttle_control_in_filter.get() > LAND_CANCEL_TRIGGER_THR){
-            AP::logger().Write_Event(LogEvent::LAND_CANCELLED_BY_PILOT);
+            LOGGER_WRITE_EVENT(LogEvent::LAND_CANCELLED_BY_PILOT);
             // exit land if throttle is high
             copter.set_mode(Mode::Number::ALT_HOLD, ModeReason::THROTTLE_LAND_ESCAPE);
         }
+#endif
 
         if (g.land_repositioning) {
-            // apply SIMPLE mode transform to pilot inputs
-            update_simple_mode();
-
             // get pilot desired lean angles
-            get_pilot_desired_lean_angles(target_roll, target_pitch, copter.aparm.angle_max, attitude_control->get_althold_lean_angle_max());
-        }
-
-        // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(channel_yaw->get_control_in());
-        if (!is_zero(target_yaw_rate)) {
-            auto_yaw.set_mode(AUTO_YAW_HOLD);
+            get_pilot_desired_lean_angles_rad(target_roll_rad, target_pitch_rad, attitude_control->lean_angle_max_rad(), attitude_control->get_althold_lean_angle_max_rad());
         }
     }
 
@@ -121,13 +175,13 @@ void ModeLand::nogps_run()
 
     // Land State Machine Determination
     if (is_disarmed_or_landed()) {
-        make_safe_spool_down();
+        make_safe_ground_handling();
     } else {
         // set motors to full range
         motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
         // pause before beginning land descent
-        if(land_pause && millis()-land_start_time >= LAND_WITH_DELAY_MS) {
+        if (land_pause && millis()-land_start_time >= LAND_WITH_DELAY_MS) {
             land_pause = false;
         }
 
@@ -135,7 +189,7 @@ void ModeLand::nogps_run()
     }
 
     // call attitude controller
-    attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(target_roll, target_pitch, target_yaw_rate);
+    attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw_rad(target_roll_rad, target_pitch_rad, auto_yaw.get_heading().yaw_rate_rads);
 }
 
 // do_not_use_GPS - forces land-mode to not use the GPS but instead rely on pilot input for roll and pitch
@@ -143,7 +197,14 @@ void ModeLand::nogps_run()
 //  has no effect if we are not already in LAND mode
 void ModeLand::do_not_use_GPS()
 {
-    land_with_gps = false;
+    control_position = false;
+}
+
+// returns true if pilot's yaw input should be used to adjust vehicle's heading
+bool ModeLand::use_pilot_yaw() const
+{
+    // only accept yaw input if repositioning is enabled
+    return g.land_repositioning;
 }
 
 // set_mode_land_with_pause - sets mode to LAND and triggers 4 second delay before descent starts
@@ -151,7 +212,7 @@ void ModeLand::do_not_use_GPS()
 void Copter::set_mode_land_with_pause(ModeReason reason)
 {
     set_mode(Mode::Number::LAND, reason);
-    land_pause = true;
+    mode_land.set_land_pause(true);
 
     // alert pilot to mode change
     AP_Notify::events.failsafe_mode_change = 1;
@@ -160,5 +221,6 @@ void Copter::set_mode_land_with_pause(ModeReason reason)
 // landing_with_GPS - returns true if vehicle is landing using GPS
 bool Copter::landing_with_GPS()
 {
-    return (control_mode == Mode::Number::LAND && land_with_gps);
+    return (flightmode->mode_number() == Mode::Number::LAND &&
+            mode_land.controlling_position());
 }

@@ -14,7 +14,9 @@
  */
 #include "AP_Baro_BMP388.h"
 
-#include <utility>
+#if AP_BARO_BMP388_ENABLED
+
+#include <AP_Math/AP_Math.h>
 
 extern const AP_HAL::HAL &hal;
 
@@ -24,8 +26,10 @@ extern const AP_HAL::HAL &hal;
 #define BMP388_MODE BMP388_MODE_NORMAL
 
 #define BMP388_ID            0x50
+#define BMP390_ID            0x60
 
 #define BMP388_REG_ID        0x00
+#define BMP388_REV_ID_ADDR   0x01
 #define BMP388_REG_ERR       0x02
 #define BMP388_REG_STATUS    0x03
 #define BMP388_REG_PRESS     0x04 // 24 bit
@@ -48,20 +52,17 @@ extern const AP_HAL::HAL &hal;
 #define BMP388_REG_CAL_P     0x36
 #define BMP388_REG_CAL_T     0x31
 
-AP_Baro_BMP388::AP_Baro_BMP388(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::Device> _dev)
+#define BMP388_SOFT_RESET    0xB6
+
+AP_Baro_BMP388::AP_Baro_BMP388(AP_Baro &baro, AP_HAL::Device &_dev)
     : AP_Baro_Backend(baro)
-    , dev(std::move(_dev))
+    , dev(&_dev)
 {
 }
 
-AP_Baro_Backend *AP_Baro_BMP388::probe(AP_Baro &baro,
-                                       AP_HAL::OwnPtr<AP_HAL::Device> _dev)
+AP_Baro_Backend *AP_Baro_BMP388::probe(AP_Baro &baro, AP_HAL::Device &_dev)
 {
-    if (!_dev) {
-        return nullptr;
-    }
-
-    AP_Baro_BMP388 *sensor = new AP_Baro_BMP388(baro, std::move(_dev));
+    AP_Baro_BMP388 *sensor = NEW_NOTHROW AP_Baro_BMP388(baro, _dev);
     if (!sensor || !sensor->init()) {
         delete sensor;
         return nullptr;
@@ -76,24 +77,36 @@ bool AP_Baro_BMP388::init()
     }
     WITH_SEMAPHORE(dev->get_semaphore());
 
-    has_sample = false;
-
     dev->set_speed(AP_HAL::Device::SPEED_HIGH);
 
     // setup to allow reads on SPI
     if (dev->bus_type() == AP_HAL::Device::BUS_TYPE_SPI) {
         dev->set_read_flag(0x80);
     }
+    uint8_t whoami;
+    if (!read_registers(BMP388_REG_ID, &whoami, 1)) {
+        return false;
+    }
+
+    switch (whoami) {
+    case BMP388_ID:
+        dev->set_device_type(DEVTYPE_BARO_BMP388);
+        break;
+    case BMP390_ID:
+        dev->set_device_type(DEVTYPE_BARO_BMP390);
+        break;
+    default:
+        return false;
+    }
+
+    // BMP390 needs a soft reset to start converting 
+    if (!dev->write_register(BMP388_REG_CMD, BMP388_SOFT_RESET)) {
+        return false;
+    }
+    hal.scheduler->delay(10);
 
     // normal mode, temp and pressure
     dev->write_register(BMP388_REG_PWR_CTRL, 0x33, true);
-    
-    uint8_t whoami;
-    if (!read_registers(BMP388_REG_ID, &whoami, 1)  ||
-        whoami != BMP388_ID) {
-        // not a BMP388
-        return false;
-    }
 
     // read the calibration data
     read_registers(BMP388_REG_CAL_P, (uint8_t *)&calib_p, sizeof(calib_p));
@@ -108,7 +121,6 @@ bool AP_Baro_BMP388::init()
 
     instance = _frontend.register_sensor();
 
-    dev->set_device_type(DEVTYPE_BARO_BMP388);
     set_bus_id(instance, dev->get_bus_id());
 
     // request 50Hz update
@@ -117,9 +129,7 @@ bool AP_Baro_BMP388::init()
     return true;
 }
 
-
-
-//  acumulate a new sensor reading
+//  accumulate a new sensor reading
 void AP_Baro_BMP388::timer(void)
 {
     uint8_t buf[7];
@@ -127,14 +137,20 @@ void AP_Baro_BMP388::timer(void)
     if (!read_registers(BMP388_REG_STATUS, buf, sizeof(buf))) {
         return;
     }
+
+    // inexplicably, some versions of GCC believe buf dies after a
+    // call.  Retrieve what we need from it beforehand to avoid a
+    // warning.
     const uint8_t status = buf[0];
+    const uint32_t pressure_data = (buf[3] << 16) | (buf[2] << 8) | buf[1];
+    const uint32_t temperature_data = (buf[6] << 16) | (buf[5] << 8) | buf[4];
     if ((status & 0x20) != 0) {
         // we have pressure data
-        update_pressure((buf[3] << 16) | (buf[2] << 8) | buf[1]);
+        update_pressure(pressure_data);
     }
     if ((status & 0x40) != 0) {
         // we have temperature data
-        update_temperature((buf[6] << 16) | (buf[5] << 8) | buf[4]);
+        update_temperature(temperature_data);
     }
 
     dev->check_next_register();
@@ -145,12 +161,16 @@ void AP_Baro_BMP388::update(void)
 {
     WITH_SEMAPHORE(_sem);
 
-    if (!has_sample) {
+    if (pressure_count == 0) {
         return;
     }
 
-    _copy_to_frontend(instance, pressure, temperature);
-    has_sample = false;
+    _copy_to_frontend(instance,
+                      pressure_sum/pressure_count,
+                      temperature);
+
+    pressure_sum = 0;
+    pressure_count = 0;
 }
 
 /*
@@ -211,9 +231,9 @@ void AP_Baro_BMP388::update_pressure(uint32_t data)
     float press = partial_out1 + partial_out2 + partial4;
 
     WITH_SEMAPHORE(_sem);
-    
-    pressure = press;
-    has_sample = true;
+
+    pressure_sum += press;
+    pressure_count++;
 }
 
 /*
@@ -230,9 +250,11 @@ bool AP_Baro_BMP388::read_registers(uint8_t reg, uint8_t *data, uint8_t len)
     uint8_t b[len+2];
     b[0] = reg | 0x80;
     memset(&b[1], 0, len+1);
-    if (!dev->transfer(b, len+2, b, len+2)) {
+    if (!dev->transfer_fullduplex(b, len+2)) {
         return false;
     }
     memcpy(data, &b[2], len);
     return true;
 }
+
+#endif  // AP_BARO_BMP388_ENABLED

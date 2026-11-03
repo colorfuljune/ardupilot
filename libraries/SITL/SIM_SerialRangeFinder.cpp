@@ -29,11 +29,29 @@ void SerialRangeFinder::update(float range)
     }
     last_sent_ms = now;
 
-    const uint16_t range_cm = uint16_t(range*100);
     uint8_t data[255];
-    const uint32_t packetlen = packet_for_alt(range_cm,
+    const uint32_t packetlen = packet_for_alt(range,
                                               data,
                                               ARRAY_SIZE(data));
 
+    write_to_autopilot((char*)data, packetlen);
+
+    if (has_temperature()) {
+        send_temperature();
+    }
+
+}
+
+void SerialRangeFinder::send_temperature()
+{
+    // Use the simple underwater model to get temperature
+    float rho, delta, theta;
+    AP_Baro::SimpleUnderWaterAtmosphere(-0.5 * 0.001, rho, delta, theta); // get simulated temperature for 0.5m depth
+    const float temperature = Aircraft::rand_normal(KELVIN_TO_C(SSL_AIR_TEMPERATURE * theta), 1); // FIXME pick a stddev based on data sheet
+
+    uint8_t data[255];
+    const uint32_t packetlen = packet_for_temperature(temperature,
+                                                        data,
+                                                        ARRAY_SIZE(data));
     write_to_autopilot((char*)data, packetlen);
 }

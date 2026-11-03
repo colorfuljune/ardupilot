@@ -15,7 +15,13 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "GCS_config.h"
+
+#if HAL_GCS_ENABLED
+
 #include "GCS.h"
+
+#if AP_MAVLINK_SIGNING_ENABLED
 
 extern const AP_HAL::HAL& hal;
 
@@ -63,7 +69,7 @@ bool GCS_MAVLINK::signing_key_load(struct SigningKey &key)
 /*
   handle a setup_signing message
  */
-void GCS_MAVLINK::handle_setup_signing(const mavlink_message_t &msg)
+void GCS_MAVLINK::handle_setup_signing(const mavlink_message_t &msg) const
 {
     // setting up signing key when armed generally not useful /
     // possibly not a good idea
@@ -76,7 +82,7 @@ void GCS_MAVLINK::handle_setup_signing(const mavlink_message_t &msg)
     mavlink_setup_signing_t packet;
     mavlink_msg_setup_signing_decode(&msg, &packet);
 
-    struct SigningKey key;
+    struct SigningKey key {};
     key.magic = SIGNING_KEY_MAGIC;
     key.timestamp = packet.initial_timestamp;
     memcpy(key.secret_key, packet.secret_key, 32);
@@ -86,8 +92,14 @@ void GCS_MAVLINK::handle_setup_signing(const mavlink_message_t &msg)
         return;
     }
 
-    // activate it immediately
-    load_signing_key();
+    // activate it immediately on all links:
+    for (uint8_t i=0; i<MAVLINK_COMM_NUM_BUFFERS; i++) {
+        GCS_MAVLINK *backend = gcs().chan(i);
+        if (backend == nullptr) {
+            return;
+        }
+        backend->load_signing_key();
+    }
 }
 
 
@@ -105,7 +117,7 @@ static bool accept_unsigned_callback(const mavlink_status_t *status, uint32_t ms
 {
     if (status == mavlink_get_channel_status(MAVLINK_COMM_0)) {
         // always accept channel 0, assumed to be secure channel. This
-        // is USB on PX4 boards
+        // is USB on ChibiOS boards
         return true;
     }
     for (uint8_t i=0; i<ARRAY_SIZE(accept_list); i++) {
@@ -123,13 +135,8 @@ static bool accept_unsigned_callback(const mavlink_status_t *status, uint32_t ms
 void GCS_MAVLINK::load_signing_key(void)
 {
     struct SigningKey key;
-    if (!signing_key_load(key)) {
+    if (option_enabled(Option::MAVLINK2_SIGNING_DISABLED) || !signing_key_load(key)) {
         return;
-    }
-    mavlink_status_t *status = mavlink_get_channel_status(chan);
-    if (status == nullptr) {
-        hal.console->printf("Failed to load signing key - no status");
-        return;        
     }
     memcpy(signing.secret_key, key.secret_key, 32);
     signing.link_id = (uint8_t)chan;
@@ -148,20 +155,13 @@ void GCS_MAVLINK::load_signing_key(void)
             break;
         }
     }
-    
-    // enable signing on all channels
-    for (uint8_t i=0; i<MAVLINK_COMM_NUM_BUFFERS; i++) {
-        mavlink_status_t *cstatus = mavlink_get_channel_status((mavlink_channel_t)(MAVLINK_COMM_0 + i));
-        if (cstatus != nullptr) {
-            if (all_zero) {
-                // disable signing
-                cstatus->signing = nullptr;
-                cstatus->signing_streams = nullptr;
-            } else {
-                cstatus->signing = &signing;
-                cstatus->signing_streams = &signing_streams;
-            }
-        }
+    if (all_zero) {
+        // disable signing
+        _channel_status.signing = nullptr;
+        _channel_status.signing_streams = nullptr;
+    } else {
+        _channel_status.signing = &signing;
+        _channel_status.signing_streams = &signing_streams;
     }
 }
 
@@ -234,11 +234,12 @@ void GCS_MAVLINK::save_signing_timestamp(bool force_save_now)
 bool GCS_MAVLINK::signing_enabled(void) const
 {
     const mavlink_status_t *status = mavlink_get_channel_status(chan);
-    if (status->signing && (status->signing->flags & MAVLINK_SIGNING_FLAG_SIGN_OUTGOING)) {
+    if ((status != nullptr) && status->signing && (status->signing->flags & MAVLINK_SIGNING_FLAG_SIGN_OUTGOING)) {
         return true;
     }
     return false;
 }
+#endif  // AP_MAVLINK_SIGNING_ENABLED
 
 /*
   return packet overhead in bytes for a channel
@@ -259,9 +260,25 @@ uint8_t GCS_MAVLINK::packet_overhead_chan(mavlink_channel_t chan)
     }
     
     const mavlink_status_t *status = mavlink_get_channel_status(chan);
-    if (status->signing && (status->signing->flags & MAVLINK_SIGNING_FLAG_SIGN_OUTGOING)) {
-        return MAVLINK_NUM_NON_PAYLOAD_BYTES + MAVLINK_SIGNATURE_BLOCK_LEN + reserved_space;
+
+    // Reserve the largest extended header: a wide target also widens an
+    // 8 bit source. Forwarded frames retain their original header even on
+    // a channel configured to originate MAVLink1 messages.
+    const uint8_t ext_header_space = MAVLINK_MAX_EXT_HEADER_BYTES;
+
+    if ((status != nullptr) && status->signing && (status->signing->flags & MAVLINK_SIGNING_FLAG_SIGN_OUTGOING)) {
+        return MAVLINK_NUM_NON_PAYLOAD_BYTES + ext_header_space + MAVLINK_SIGNATURE_BLOCK_LEN + reserved_space;
     }
-    return MAVLINK_NUM_NON_PAYLOAD_BYTES + reserved_space;
+    return MAVLINK_NUM_NON_PAYLOAD_BYTES + ext_header_space + reserved_space;
 }
 
+#if !AP_MAVLINK_SIGNING_ENABLED
+
+void GCS_MAVLINK::handle_setup_signing(const mavlink_message_t &msg) const
+{
+    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Signing is not enabled in this firmware");
+}
+
+#endif  // !AP_MAVLINK_SIGNING_ENABLED
+
+#endif  // HAL_GCS_ENABLED

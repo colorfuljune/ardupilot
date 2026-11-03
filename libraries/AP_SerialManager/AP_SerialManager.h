@@ -1,5 +1,5 @@
 /*
-   Please contribute your ideas! See https://dev.ardupilot.org for details
+   Please contribute your ideas! See https://ardupilot.org/dev for details
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -21,31 +21,24 @@
  */
 #pragma once
 
-#include <AP_HAL/AP_HAL.h>
-#include <GCS_MAVLink/GCS_MAVLink.h>
+#include "AP_SerialManager_config.h"
+
+#if AP_SERIALMANAGER_ENABLED
+
 #include <AP_Param/AP_Param.h>
 
-#ifdef HAL_UART_NUM_SERIAL_PORTS
-#if HAL_UART_NUM_SERIAL_PORTS >= 4
-#define SERIALMANAGER_NUM_PORTS HAL_UART_NUM_SERIAL_PORTS
-#else
-// we need a minimum of 4 to allow for a GPS due to the odd ordering
-// of hal.uartB as SERIAL3
-#define SERIALMANAGER_NUM_PORTS 4
-#endif
-#else
-// assume max 8 ports
-#define SERIALMANAGER_NUM_PORTS 8
-#endif
+// serial ports registered by AP_Networking will use IDs starting at 21 for the first port
+#define AP_SERIALMANAGER_NET_PORT_1         21 // NET_P1_*
 
- // console default baud rates and buffer sizes
-#ifdef HAL_SERIAL0_BAUD_DEFAULT
-# define AP_SERIALMANAGER_CONSOLE_BAUD          HAL_SERIAL0_BAUD_DEFAULT
-#else
-# define AP_SERIALMANAGER_CONSOLE_BAUD          115200
-#endif
-# define AP_SERIALMANAGER_CONSOLE_BUFSIZE_RX    128
-# define AP_SERIALMANAGER_CONSOLE_BUFSIZE_TX    512
+// serial ports registered by AP_DroneCAN will use IDs starting at 41/51 for the first port
+#define AP_SERIALMANAGER_CAN_D1_PORT_1         41 // CAN_D1_UC_S1_*
+#define AP_SERIALMANAGER_CAN_D2_PORT_1         51 // CAN_D2_UC_S1_*
+
+// serial device simulation ports registered by AP_Scripting will use IDs starting at 61 for the first port
+#define AP_SERIALMANAGER_SCR_PORT_1         61 // SCR_SDEV1_*
+
+#define AP_SERIALMANAGER_CONSOLE_BUFSIZE_RX    128
+#define AP_SERIALMANAGER_CONSOLE_BUFSIZE_TX    512
 
 // mavlink default baud rates and buffer sizes
 #define AP_SERIALMANAGER_MAVLINK_BAUD           57600
@@ -64,7 +57,7 @@
 
 // GPS default baud rates and buffer sizes
 // we need a 256 byte buffer for some GPS types (eg. UBLOX)
-#define AP_SERIALMANAGER_GPS_BAUD               38400
+#define AP_SERIALMANAGER_GPS_BAUD               230400
 #define AP_SERIALMANAGER_GPS_BUFSIZE_RX         256
 #define AP_SERIALMANAGER_GPS_BUFSIZE_TX         16
 
@@ -73,13 +66,9 @@
 #define AP_SERIALMANAGER_ALEXMOS_BUFSIZE_RX     128
 #define AP_SERIALMANAGER_ALEXMOS_BUFSIZE_TX     128
 
-#define AP_SERIALMANAGER_SToRM32_BAUD           115200
-#define AP_SERIALMANAGER_SToRM32_BUFSIZE_RX     128
-#define AP_SERIALMANAGER_SToRM32_BUFSIZE_TX     128
-
-#define AP_SERIALMANAGER_VOLZ_BAUD           115
-#define AP_SERIALMANAGER_VOLZ_BUFSIZE_RX     128
-#define AP_SERIALMANAGER_VOLZ_BUFSIZE_TX     128
+#define AP_SERIALMANAGER_GIMBAL_BAUD            115200
+#define AP_SERIALMANAGER_GIMBAL_BUFSIZE_RX      128
+#define AP_SERIALMANAGER_GIMBAL_BUFSIZE_TX      128
 
 #define AP_SERIALMANAGER_ROBOTIS_BUFSIZE_RX  128
 #define AP_SERIALMANAGER_ROBOTIS_BUFSIZE_TX  128
@@ -88,11 +77,6 @@
 #define AP_SERIALMANAGER_EFI_MS_BAUD           115
 #define AP_SERIALMANAGER_EFI_MS_BUFSIZE_RX     512
 #define AP_SERIALMANAGER_EFI_MS_BUFSIZE_TX     16
-
-// SBUS servo outputs
-#define AP_SERIALMANAGER_SBUS1_BAUD           100000
-#define AP_SERIALMANAGER_SBUS1_BUFSIZE_RX     16
-#define AP_SERIALMANAGER_SBUS1_BUFSIZE_TX     32
 
 #define AP_SERIALMANAGER_SLCAN_BAUD             115200
 #define AP_SERIALMANAGER_SLCAN_BUFSIZE_RX       128
@@ -103,13 +87,17 @@
 #define AP_SERIALMANAGER_MSP_BUFSIZE_TX     256
 #define AP_SERIALMANAGER_MSP_BAUD           115200
 
+// IMU OUT protocol
+#define AP_SERIALMANAGER_IMUOUT_BAUD           921600
+#define AP_SERIALMANAGER_IMUOUT_BUFSIZE_RX     128
+#define AP_SERIALMANAGER_IMUOUT_BUFSIZE_TX     2048
+
 class AP_SerialManager {
 public:
     AP_SerialManager();
 
     /* Do not allow copies */
-    AP_SerialManager(const AP_SerialManager &other) = delete;
-    AP_SerialManager &operator=(const AP_SerialManager&) = delete;
+    CLASS_NO_COPY(AP_SerialManager);
 
     enum SerialProtocol {
         SerialProtocol_None = -1,
@@ -121,11 +109,11 @@ public:
         SerialProtocol_GPS = 5,
         SerialProtocol_GPS2 = 6,                     // do not use - use GPS and provide instance of 1
         SerialProtocol_AlexMos = 7,
-        SerialProtocol_SToRM32 = 8,
+        SerialProtocol_Gimbal = 8,                   // SToRM32, Siyi custom serial protocols
         SerialProtocol_Rangefinder = 9,
         SerialProtocol_FrSky_SPort_Passthrough = 10, // FrSky SPort Passthrough (OpenTX) protocol (X-receivers)
         SerialProtocol_Lidar360 = 11,                // Lightware SF40C, TeraRanger Tower or RPLidarA2
-        SerialProtocol_Aerotenna_uLanding      = 12, // Ulanding support - deprecated, users should use Rangefinder
+        SerialProtocol_Aerotenna_USD1      = 12, // USD1 support - deprecated, users should use Rangefinder
         SerialProtocol_Beacon = 13,
         SerialProtocol_Volz = 14,                    // Volz servo protocol
         SerialProtocol_Sbus1 = 15,
@@ -137,7 +125,7 @@ public:
         SerialProtocol_WindVane = 21,
         SerialProtocol_SLCAN = 22,
         SerialProtocol_RCIN = 23,
-        SerialProtocol_EFI_MS = 24,                   // MegaSquirt EFI serial protocol
+        SerialProtocol_EFI = 24,                   // EFI serial protocol
         SerialProtocol_LTM_Telem = 25,
         SerialProtocol_RunCam = 26,
         SerialProtocol_Hott = 27,
@@ -147,6 +135,23 @@ public:
         SerialProtocol_Winch = 31,
         SerialProtocol_MSP = 32,
         SerialProtocol_DJI_FPV = 33,
+        SerialProtocol_AirSpeed = 34,
+        SerialProtocol_ADSB = 35,
+        SerialProtocol_AHRS = 36,
+        SerialProtocol_SmartAudio = 37,
+        SerialProtocol_FETtecOneWire = 38,
+        SerialProtocol_Torqeedo = 39,
+        SerialProtocol_AIS = 40,
+        SerialProtocol_CoDevESC = 41,
+        SerialProtocol_MSP_DisplayPort = 42,
+        SerialProtocol_MAVLinkHL = 43,
+        SerialProtocol_Tramp = 44,
+        SerialProtocol_DDS_XRCE = 45,
+        SerialProtocol_IMUOUT = 46,
+        // Reserving Serial Protocol 47 for SerialProtocol_IQ
+        SerialProtocol_PPP = 48,
+        SerialProtocol_IBUS_Telem = 49,                // i-BUS telemetry data, ie via sensor port of FS-iA6B
+        SerialProtocol_IOMCU = 50,                     // IOMCU 
         SerialProtocol_NumProtocols                    // must be the last value
     };
 
@@ -154,40 +159,35 @@ public:
     static AP_SerialManager *get_singleton(void) {
         return _singleton;
     }
-    
+
     // init_console - initialise console at default baud rate
     void init_console();
 
     // init - initialise serial ports
     void init();
 
+    bool pre_arm_checks(char *failure_msg, const uint8_t failure_msg_len);
+
     // find_serial - searches available serial ports that allows the given protocol
     //  instance should be zero if searching for the first instance, 1 for the second, etc
     //  returns uart on success, nullptr if a serial port cannot be found
+    // note that the SERIALn_OPTIONS are applied if the port is found
     AP_HAL::UARTDriver *find_serial(enum SerialProtocol protocol, uint8_t instance) const;
 
+    // have_serial - return true if we have the corresponding serial protocol configured
+    bool have_serial(enum SerialProtocol protocol, uint8_t instance) const;
+    
     // find_baudrate - searches available serial ports for the first instance that allows the given protocol
     //  instance should be zero if searching for the first instance, 1 for the second, etc
     //  returns the baudrate of that protocol on success, 0 if a serial port cannot be found
     uint32_t find_baudrate(enum SerialProtocol protocol, uint8_t instance) const;
 
-    // get_mavlink_channel - provides the mavlink channel associated with a given protocol (and instance)
-    //  instance should be zero if searching for the first instance, 1 for the second, etc
-    //  returns true if a channel is found, false if not
-    bool get_mavlink_channel(enum SerialProtocol protocol, uint8_t instance, mavlink_channel_t &mav_chan) const;
-
-    // should_forward_mavlink_telemetry - returns true if this port should forward telemetry
-    bool should_forward_mavlink_telemetry(enum SerialProtocol protocol, uint8_t instance) const;
-
-    // get_mavlink_protocol - provides the specific MAVLink protocol for a
-    // given channel, or SerialProtocol_None if not found
-    SerialProtocol get_mavlink_protocol(mavlink_channel_t mav_chan) const;
-    
-    // set_blocking_writes_all - sets block_writes on or off for all serial channels
-    void set_blocking_writes_all(bool blocking);
+    // find_portnum - find port number (SERIALn index) for a protocol and instance, -1 for not found
+    int8_t find_portnum(enum SerialProtocol protocol, uint8_t instance) const;
 
     // get the passthru ports if enabled
-    bool get_passthru(AP_HAL::UARTDriver *&port1, AP_HAL::UARTDriver *&port2, uint8_t &timeout_s) const;
+    bool get_passthru(AP_HAL::UARTDriver *&port1, AP_HAL::UARTDriver *&port2, uint8_t &timeout_s,
+                      uint32_t &baud1, uint32_t &baud2);
 
     // disable passthru by settings SERIAL_PASS2 to -1
     void disable_passthru(void);
@@ -198,39 +198,122 @@ public:
     // accessors for AP_Periph to set baudrate and type
     void set_protocol_and_baud(uint8_t sernum, enum SerialProtocol protocol, uint32_t baudrate);
 
+    void set_and_default_baud(enum SerialProtocol protocol, uint8_t instance, uint32_t _baud);
+
     static uint32_t map_baudrate(int32_t rate);
 
     // parameter var table
     static const struct AP_Param::GroupInfo var_info[];
 
+    class UARTState {
+        friend class AP_SerialManager;
+    public:
+        bool option_enabled(uint16_t option) const {
+            return (options & option) == option;
+        }
+        // returns a baudrate such as 9600.  May map from a special
+        // parameter value like "57" to "57600":
+        uint32_t baudrate() const {
+            return AP_SerialManager::map_baudrate(baud);
+        }
+        AP_SerialManager::SerialProtocol get_protocol() const {
+            return AP_SerialManager::SerialProtocol(protocol.get());
+        }
+        AP_Int32 baud;
+        AP_Int32 options;
+        AP_Int8 protocol;
+
+        // serial index number
+        uint8_t idx;
+
+#if HAL_LOGGING_ENABLED && HAL_UART_STATS_ENABLED
+        AP_HAL::UARTDriver::StatsTracker stats;
+#endif
+
+        // Enum for device type used in get_device_id
+        enum class DeviceType {
+            UNKNOWN,
+            UART,
+            NETWORKING,
+            CANBUS,
+            SCRIPTING,
+        };
+
+        // Return a device id for this port
+        uint32_t get_device_id() const;
+    };
+
+    // get a state from serial index
+    const UARTState *get_state_by_id(uint8_t id) const;
+
+    // search through managed serial connections looking for the
+    // instance-nth UART which is running protocol protocol.
+    // protocol_match is used to determine equivalence of one protocol
+    // to another, e.g. MAVLink2 is considered MAVLink1 for finding
+    // mavlink1 protocol instances.
+    const UARTState *find_protocol_instance(enum SerialProtocol protocol,
+                                            uint8_t instance) const;
+
+    // disable an option on a serial port:
+    void disable_option(uint8_t instance, uint32_t option) {
+        if (instance >= ARRAY_SIZE(state)) {
+            return;
+        }
+        state[instance].options.set_and_notify(state[instance].options & ~option);
+    }
+
+#if AP_SERIALMANAGER_REGISTER_ENABLED
+    /*
+      a class for a externally registered port
+      used by AP_Networking
+     */
+    class RegisteredPort : public AP_HAL::UARTDriver {
+    public:
+        uint32_t bw_in_bytes_per_second() const override { return state.baudrate()/10; }
+        uint32_t get_baud_rate() const override { return state.baudrate(); }
+        RegisteredPort *next;
+        UARTState state;
+    };
+    RegisteredPort *registered_ports;
+    HAL_Semaphore port_sem;
+
+    // register an externally managed port
+    void register_port(RegisteredPort *port);
+
+#if HAL_LOGGING_ENABLED && HAL_UART_STATS_ENABLED
+    // Log UART message for each registered serial port
+    void registered_ports_log();
+    uint32_t registered_ports_last_log_ms;
+#endif
+
+#endif // AP_SERIALMANAGER_REGISTER_ENABLED
+
+
 private:
     static AP_SerialManager *_singleton;
-    
-    // array of uart info
-    struct UARTState {
-        AP_Int8 protocol;
-        AP_Int32 baud;
-        AP_HAL::UARTDriver* uart;
-        AP_Int16 options;
-    } state[SERIALMANAGER_NUM_PORTS];
+
+    // array of uart info. See comment above about
+    // SERIALMANAGER_MAX_PORTS
+    UARTState state[SERIALMANAGER_MAX_PORTS];
 
     // pass-through serial support
     AP_Int8 passthru_port1;
     AP_Int8 passthru_port2;
     AP_Int8 passthru_timeout;
 
-    // search through managed serial connections looking for the
-    // instance-nth UART which is running protocol protocol
-    const UARTState *find_protocol_instance(enum SerialProtocol protocol,
-                                      uint8_t instance) const;
-
     // protocol_match - returns true if the protocols match
     bool protocol_match(enum SerialProtocol protocol1, enum SerialProtocol protocol2) const;
 
     // setup any special options
     void set_options(uint16_t i);
+
+    bool init_console_done;
+
+    void convert_parameters();
 };
 
 namespace AP {
     AP_SerialManager &serialmanager();
 };
+
+#endif  // AP_SERIALMANAGER_ENABLED

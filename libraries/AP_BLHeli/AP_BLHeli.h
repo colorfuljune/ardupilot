@@ -24,9 +24,11 @@
 #include <AP_Common/AP_Common.h>
 #include <AP_HAL/AP_HAL.h>
 
+#define HAVE_AP_BLHELI_SUPPORT HAL_SUPPORT_RCOUT_SERIAL
+
 #if HAL_SUPPORT_RCOUT_SERIAL
 
-#define HAVE_AP_BLHELI_SUPPORT
+#include <AP_ESC_Telem/AP_ESC_Telem_Backend.h>
 
 #include <AP_Param/AP_Param.h>
 #include <Filter/LowPassFilter.h>
@@ -35,62 +37,47 @@
 
 #define AP_BLHELI_MAX_ESCS 8
 
-class AP_BLHeli {
+class AP_BLHeli : public AP_ESC_Telem_Backend {
 
 public:
     AP_BLHeli();
     
     void update(void);
+    void init(uint32_t motor_mask, AP_HAL::RCOutput::output_mode mode);
     void update_telemetry(void);
     bool process_input(uint8_t b);
 
     static const struct AP_Param::GroupInfo var_info[];
 
-    struct telem_data {
-        int8_t temperature;  // degrees C, negative values allowed
-        uint16_t voltage;    // volts * 100
-        uint16_t current;    // amps * 100
-        uint16_t consumption;// mAh
-        uint16_t rpm;        // eRPM
-        uint16_t count;
-        uint32_t timestamp_ms;
-    };
-
-    // number of ESCs configured as BLHeli in channel mask
-    uint8_t get_num_motors(void) { return num_motors;};
-    // get the most recent telemetry data packet for a motor
-    bool get_telem_data(uint8_t esc_index, struct telem_data &td);
-    // return the average motor frequency in Hz for dynamic filtering
-    float get_average_motor_frequency_hz() const;
-    // return all of the motor frequencies in Hz for dynamic filtering
-    uint8_t get_motor_frequencies_hz(uint8_t nfreqs, float* freqs) const;
-
-    // return true if we have received any telemetry data
-    bool have_telem_data(void) const {
-        return received_telem_data;
+    bool has_bidir_dshot(uint8_t esc_index) const {
+        return channel_bidir_dshot_mask.get() & (1U << motor_map[esc_index]);
     }
+
+    uint32_t get_bidir_dshot_mask() const { return channel_bidir_dshot_mask.get(); }
+    uint8_t get_motor_poles() const { return motor_poles.get(); }
+    uint16_t get_telemetry_rate() const { return telem_rate.get(); }
 
     static AP_BLHeli *get_singleton(void) {
         return _singleton;
     }
-
-    // send ESC telemetry messages over MAVLink
-    void send_esc_telemetry_mavlink(uint8_t mav_chan);
     
 private:
     static AP_BLHeli *_singleton;
     
     // mask of channels to use for BLHeli protocol
-    AP_Int32 channel_mask;
-    AP_Int32 channel_reversible_mask;
+    AP_UInt32 channel_mask;
+    AP_UInt32 channel_reversible_mask;
+    AP_UInt32 channel_reversed_mask;
     AP_Int8 channel_auto;
     AP_Int8 run_test;
-    AP_Int16 timeout_sec;
-    AP_Int16 telem_rate;
+    AP_UInt16 timeout_sec;
+    AP_UInt16 telem_rate;
     AP_Int8 debug_level;
     AP_Int8 output_type;
     AP_Int8 control_port;
     AP_Int8 motor_poles;
+    // mask of channels with bi-directional dshot enabled
+    AP_UInt32 channel_bidir_dshot_mask;
     
     enum mspState {
         MSP_IDLE=0,
@@ -205,7 +192,7 @@ private:
         uint8_t ack;
     } blheli;
 
-    const uint16_t esc_status_addr = 0xEB00;
+    static constexpr uint16_t esc_status_addr = 0xEB00;
     
     // protocol reported by ESC in esc_status
     enum esc_protocol {
@@ -214,7 +201,7 @@ private:
         ESC_PROTOCOL_ONESHOT125=2,
         ESC_PROTOCOL_DSHOT=5,
     };
-    
+
     // ESC status structure at address 0xEB00
     struct PACKED esc_status {
         uint8_t unknown[3];
@@ -227,19 +214,13 @@ private:
     
     AP_HAL::UARTDriver *uart;
     AP_HAL::UARTDriver *debug_uart;
-    AP_HAL::UARTDriver *telem_uart;    
-    
+    AP_HAL::UARTDriver *telem_uart;
+
     static const uint8_t max_motors = AP_BLHELI_MAX_ESCS;
     uint8_t num_motors;
 
-    struct telem_data last_telem[max_motors];
-    uint32_t received_telem_data;
-
     // last log output to avoid beat frequencies
     uint32_t last_log_ms[max_motors];
-
-    // previous motor rpm so that changes can be slewed
-    float prev_motor_rpm[max_motors];
 
     // have we initialised the interface?
     bool initialised;
@@ -252,16 +233,21 @@ private:
 
     // have we disabled motor outputs?
     bool motors_disabled;
+    // mask of channels that should normally be disabled
+    uint32_t motors_disabled_mask;
 
     // have we locked the UART?
     bool uart_locked;
 
-    // true if we have a mix of reversable and normal ESC
+    // true if we have a mix of reversible and normal ESC
     bool mixed_type;
 
     // mapping from BLHeli motor numbers to RC output channels
     uint8_t motor_map[max_motors];
-    uint16_t motor_mask;
+    uint32_t motor_mask;
+
+    // convert between servo number and FMU channel number for ESC telemetry
+    uint8_t chan_offset;
 
     // when did we last request telemetry?
     uint32_t last_telem_request_us;
@@ -271,9 +257,12 @@ private:
     uint32_t last_telem_byte_read_us;
     int8_t last_control_port;
 
+    void serial_end();
     bool msp_process_byte(uint8_t c);
     void blheli_crc_update(uint8_t c);
     bool blheli_4way_process_byte(uint8_t c);
+    uint8_t blheli_chan_to_output_chan(uint8_t motor);
+    void msp_send_ack(uint8_t cmd);
     void msp_send_reply(uint8_t cmd, const uint8_t *buf, uint8_t len);
     void putU16(uint8_t *b, uint16_t v);
     uint16_t getU16(const uint8_t *b);
@@ -295,13 +284,13 @@ private:
     void BL_SendCMDRunRestartBootloader(void);
     uint8_t BL_SendCMDSetBuffer(const uint8_t *buf, uint16_t nbytes);
     bool BL_WriteA(uint8_t cmd, const uint8_t *buf, uint16_t nbytes, uint32_t timeout);
-    uint8_t BL_WriteFlash(const uint8_t *buf, uint16_t n);
+    bool BL_WriteFlash(const uint8_t *buf, uint16_t n);
     bool BL_VerifyFlash(const uint8_t *buf, uint16_t n);
     void blheli_process_command(void);
     void run_connection_test(uint8_t chan);
-    uint8_t telem_crc8(uint8_t crc, uint8_t crc_seed) const;
     void read_telemetry_packet(void);
-    
+    void log_bidir_telemetry(void);
+
     // protocol handler hook
     bool protocol_handler(uint8_t , AP_HAL::UARTDriver *);
 };

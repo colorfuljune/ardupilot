@@ -5,7 +5,7 @@
 #if FRAME_CONFIG == HELI_FRAME
 
 #ifndef HELI_DYNAMIC_FLIGHT_SPEED_MIN
- #define HELI_DYNAMIC_FLIGHT_SPEED_MIN      500     // we are in "dynamic flight" when the speed is over 5m/s for 2 seconds
+#define HELI_DYNAMIC_FLIGHT_SPEED_MIN      250     // we are in "dynamic flight" when the speed is over 2.5m/s for 2 seconds
 #endif
 
 // counter to control dynamic flight profile
@@ -16,14 +16,14 @@ void Copter::heli_init()
 {
     // pre-load stab col values as mode is initialized as Stabilize, but stabilize_init() function is not run on start-up.
     input_manager.set_use_stab_col(true);
-    input_manager.set_stab_col_ramp(1.0);
+    input_manager.set_collective_ramp(0);
 }
 
 // heli_check_dynamic_flight - updates the dynamic_flight flag based on our horizontal velocity
 // should be called at 50hz
 void Copter::check_dynamic_flight(void)
 {
-    if (motors->get_spool_state() != AP_Motors::SpoolState::THROTTLE_UNLIMITED ||
+    if ((motors->get_spool_state() != AP_Motors::SpoolState::THROTTLE_UNLIMITED && !motors->in_autorotation()) ||
         flightmode->is_landing()) {
         heli_dynamic_flight_counter = 0;
         heli_flags.dynamic_flight = false;
@@ -33,21 +33,23 @@ void Copter::check_dynamic_flight(void)
     bool moving = false;
 
     // with GPS lock use inertial nav to determine if we are moving
-    if (position_ok()) {
+    Vector3f vel_ned_ms;
+    if (AP::ahrs().get_velocity_NED(vel_ned_ms)) {
         // get horizontal speed
-        const float speed = inertial_nav.get_speed_xy();
-        moving = (speed >= HELI_DYNAMIC_FLIGHT_SPEED_MIN);
-    }else{
+        moving = (vel_ned_ms.xy().length() * 100.0 >= HELI_DYNAMIC_FLIGHT_SPEED_MIN);
+    } else {
         // with no GPS lock base it on throttle and forward lean angle
-        moving = (motors->get_throttle() > 0.8f || ahrs.pitch_sensor < -1500);
+        moving = (motors->get_throttle() > 0.8f || ahrs.get_pitch_deg() < -15);
     }
 
+#if AP_RANGEFINDER_ENABLED
     if (!moving && rangefinder_state.enabled && rangefinder.status_orient(ROTATION_PITCH_270) == RangeFinder::Status::Good) {
         // when we are more than 2m from the ground with good
         // rangefinder lock consider it to be dynamic flight
-        moving = (rangefinder.distance_cm_orient(ROTATION_PITCH_270) > 200);
+        moving = (rangefinder.distance_orient(ROTATION_PITCH_270) > 2);
     }
-    
+#endif
+
     if (moving) {
         // if moving for 2 seconds, set the dynamic flight flag
         if (!heli_flags.dynamic_flight) {
@@ -57,12 +59,12 @@ void Copter::check_dynamic_flight(void)
                 heli_dynamic_flight_counter = 100;
             }
         }
-    }else{
+    } else {
         // if not moving for 2 seconds, clear the dynamic flight flag
         if (heli_flags.dynamic_flight) {
             if (heli_dynamic_flight_counter > 0) {
                 heli_dynamic_flight_counter--;
-            }else{
+            } else {
                 heli_flags.dynamic_flight = false;
             }
         }
@@ -73,12 +75,24 @@ void Copter::check_dynamic_flight(void)
 // should be run between the rate controller and the servo updates.
 void Copter::update_heli_control_dynamics(void)
 {
-    // Use Leaky_I if we are not moving fast
-    attitude_control->use_leaky_i(!heli_flags.dynamic_flight);
 
-    if (ap.land_complete || (is_zero(motors->get_desired_rotor_speed()))){
+    if (!motors->using_leaky_integrator()) {
+        //turn off leaky_I
+        attitude_control->use_leaky_i(false);
+        if (ap.land_complete || ap.land_complete_maybe) {
+            motors->set_land_complete(true);
+        } else {
+            motors->set_land_complete(false);
+        }
+    } else {
+        // Use Leaky_I if we are not moving fast
+        attitude_control->use_leaky_i(!heli_flags.dynamic_flight);
+        motors->set_land_complete(false);
+    }
+
+    if (ap.land_complete || (is_zero(motors->get_desired_rotor_speed()))) {
         // if we are landed or there is no rotor power demanded, decrement slew scalar
-        hover_roll_trim_scalar_slew--;        
+        hover_roll_trim_scalar_slew--;
     } else {
         // if we are not landed and motor power is demanded, increment slew scalar
         hover_roll_trim_scalar_slew++;
@@ -87,13 +101,18 @@ void Copter::update_heli_control_dynamics(void)
 
     // set hover roll trim scalar, will ramp from 0 to 1 over 1 second after we think helicopter has taken off
     attitude_control->set_hover_roll_trim_scalar((float) hover_roll_trim_scalar_slew/(float) scheduler.get_loop_rate_hz());
+
+    // set manual collective mode in motors to aid in runup complete determination in RSC
+    // if copter is set to a manual throttle flight mode, then heli is using a manual collective mode
+    motors->set_using_manual_collective_mode(flightmode->has_manual_throttle());
 }
 
 bool Copter::should_use_landing_swash() const
 {
     if (flightmode->has_manual_throttle() ||
-        control_mode == Mode::Number::DRIFT) {
-        // manual modes always uses full swash range
+        flightmode->mode_number() == Mode::Number::DRIFT ||
+        attitude_control->get_inverted_flight()) {
+        // manual modes or modes using inverted flight uses full swash range
         return false;
     }
     if (flightmode->is_landing()) {
@@ -124,6 +143,7 @@ bool Copter::should_use_landing_swash() const
 void Copter::heli_update_landing_swash()
 {
     motors->set_collective_for_landing(should_use_landing_swash());
+    update_collective_low_flag(channel_throttle->get_control_in());
 }
 
 // convert motor interlock switch's position to desired rotor speed expressed as a value from 0 to 1
@@ -141,50 +161,20 @@ float Copter::get_pilot_desired_rotor_speed() const
 // heli_update_rotor_speed_targets - reads pilot input and passes new rotor speed targets to heli motors object
 void Copter::heli_update_rotor_speed_targets()
 {
-
-    static bool rotor_runup_complete_last = false;
-
     // get rotor control method
     uint8_t rsc_control_mode = motors->get_rsc_mode();
 
-    switch (rsc_control_mode) {
-        case ROTOR_CONTROL_MODE_SPEED_PASSTHROUGH:
-            // pass through pilot desired rotor speed from the RC
-            if (get_pilot_desired_rotor_speed() > 0.01) {
-                ap.motor_interlock_switch = true;
-                motors->set_desired_rotor_speed(get_pilot_desired_rotor_speed());
-            } else {
-                ap.motor_interlock_switch = false;
-                motors->set_desired_rotor_speed(0.0f);
-            }
-            break;
-        case ROTOR_CONTROL_MODE_SPEED_SETPOINT:
-        case ROTOR_CONTROL_MODE_OPEN_LOOP_POWER_OUTPUT:
-        case ROTOR_CONTROL_MODE_CLOSED_LOOP_POWER_OUTPUT:
-            // pass setpoint through as desired rotor speed. Needs work, this is pointless as it is
-            // not used by closed loop control. Being used as a catch-all for other modes regardless
-            // of whether or not they actually use it
-            // set rpm from rotor speed sensor
-            if (motors->get_interlock()) {
-#if RPM_ENABLED == ENABLED
-                float rpm = -1;
-                rpm_sensor.get_rpm(0, rpm);
-                motors->set_rpm(rpm);
-#endif
-                motors->set_desired_rotor_speed(motors->get_rsc_setpoint());
-            }else{
-                motors->set_desired_rotor_speed(0.0f);
-            }
-            break;
+    if (rsc_control_mode == ROTOR_CONTROL_MODE_PASSTHROUGH) {
+        // pass through pilot desired rotor speed from the RC
+        if (get_pilot_desired_rotor_speed() > 0.01) {
+            ap.motor_interlock_switch = true;
+            motors->set_desired_rotor_speed(get_pilot_desired_rotor_speed());
+        } else {
+            ap.motor_interlock_switch = false;
+            motors->set_desired_rotor_speed(0.0f);
+        }
     }
 
-    // when rotor_runup_complete changes to true, log event
-    if (!rotor_runup_complete_last && motors->rotor_runup_complete()){
-        AP::logger().Write_Event(LogEvent::ROTOR_RUNUP_COMPLETE);
-    } else if (rotor_runup_complete_last && !motors->rotor_runup_complete()){
-        AP::logger().Write_Event(LogEvent::ROTOR_SPEED_BELOW_CRITICAL);
-    }
-    rotor_runup_complete_last = motors->rotor_runup_complete();
 }
 
 
@@ -192,37 +182,39 @@ void Copter::heli_update_rotor_speed_targets()
 // to autorotation flight mode if manual collective is not being used.
 void Copter::heli_update_autorotation()
 {
-#if MODE_AUTOROTATE_ENABLED == ENABLED
-    // check if flying and interlock disengaged
-    if (!ap.land_complete && !motors->get_interlock()) {
-        if (!flightmode->has_manual_throttle() && g2.arot.is_enable()) {
-            // set autonomous autorotation flight mode
-            set_mode(Mode::Number::AUTOROTATE, ModeReason::AUTOROTATION_START);
-        }
-        // set flag to facilitate both auto and manual autorotations
-        heli_flags.in_autorotation = true;
-    } else {
-        heli_flags.in_autorotation = false;
+    bool in_autorotation_mode = false;
+#if MODE_AUTOROTATE_ENABLED
+    in_autorotation_mode = flightmode == &mode_autorotate;
+#endif
+
+    // If we have landed then we do not want to be in autorotation and we do not want to via the bailout state
+    if (ap.land_complete || ap.land_complete_maybe) {
+        motors->force_deactivate_autorotation();
+        return;
     }
 
-    // sets autorotation flags through out libraries
-    heli_set_autorotation(heli_flags.in_autorotation);
-    if (!ap.land_complete) {
-        motors->set_enable_bailout(true);
+    // if we got this far we are flying, check for conditions to set autorotation state
+    if (!motors->get_interlock() && (flightmode->has_manual_throttle() || in_autorotation_mode)) {
+        // set state in motors to facilitate manual and assisted autorotations
+        motors->set_autorotation_active(true);
     } else {
-        motors->set_enable_bailout(false);
+        // deactivate the autorotation state via the bailout case
+        motors->set_autorotation_active(false);
     }
-#else
-    heli_flags.in_autorotation = false;
-    motors->set_enable_bailout(false);
-#endif
 }
 
-#if MODE_AUTOROTATE_ENABLED == ENABLED
-// heli_set_autorotation - set the autorotation flag throughout libraries
-void Copter::heli_set_autorotation(bool autorotation)
+// update collective low flag.  Use a debounce time of 400 milliseconds.
+void Copter::update_collective_low_flag(int16_t throttle_control)
 {
-    motors->set_in_autorotation(autorotation);
+    static uint32_t last_nonzero_collective_ms = 0;
+    uint32_t tnow_ms = millis();
+
+    if (throttle_control > 0) {
+        last_nonzero_collective_ms = tnow_ms;
+        heli_flags.coll_stk_low = false;
+    } else if (tnow_ms - last_nonzero_collective_ms > 400) {
+        heli_flags.coll_stk_low = true;
+    }
 }
-#endif
+
 #endif  // FRAME_CONFIG == HELI_FRAME

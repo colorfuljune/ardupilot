@@ -4,11 +4,6 @@
 
 #include <AP_RangeFinder/AP_RangeFinder_Backend.h>
 
-uint8_t GCS_Rover::sysid_this_mav() const
-{
-    return rover.g.sysid_this_mav;
-}
-
 bool GCS_Rover::simple_input_active() const
 {
     if (rover.control_mode != &rover.mode_simple) {
@@ -27,13 +22,7 @@ bool GCS_Rover::supersimple_input_active() const
 
 void GCS_Rover::update_vehicle_sensor_status_flags(void)
 {
-    // first what sensors/controllers we have
-    const AP_Proximity *proximity = AP_Proximity::get_singleton();
-    if (proximity && proximity->get_status() > AP_Proximity::Status::NotConnected) {
-        control_sensors_present |= MAV_SYS_STATUS_SENSOR_LASER_POSITION;
-        control_sensors_enabled |= MAV_SYS_STATUS_SENSOR_LASER_POSITION;
-    }
-
+    // mode-specific:
     control_sensors_present |=
         MAV_SYS_STATUS_SENSOR_ANGULAR_RATE_CONTROL |
         MAV_SYS_STATUS_SENSOR_ATTITUDE_STABILIZATION |
@@ -53,6 +42,18 @@ void GCS_Rover::update_vehicle_sensor_status_flags(void)
         control_sensors_health |= MAV_SYS_STATUS_SENSOR_XY_POSITION_CONTROL; // X/Y position control
     }
 
+#if HAL_PROXIMITY_ENABLED
+    const AP_Proximity *proximity = AP_Proximity::get_singleton();
+    if (proximity && proximity->get_status() > AP_Proximity::Status::NotConnected) {
+        control_sensors_present |= MAV_SYS_STATUS_SENSOR_LASER_POSITION;
+        control_sensors_enabled |= MAV_SYS_STATUS_SENSOR_LASER_POSITION;
+    }
+    if (proximity && proximity->get_status() != AP_Proximity::Status::NoData) {
+        control_sensors_health |= MAV_SYS_STATUS_SENSOR_LASER_POSITION;
+    }
+#endif
+
+#if AP_RANGEFINDER_ENABLED
     const RangeFinder *rangefinder = RangeFinder::get_singleton();
     if (rangefinder && rangefinder->num_sensors() > 0) {
         control_sensors_present |= MAV_SYS_STATUS_SENSOR_LASER_POSITION;
@@ -62,7 +63,5 @@ void GCS_Rover::update_vehicle_sensor_status_flags(void)
             control_sensors_health |= MAV_SYS_STATUS_SENSOR_LASER_POSITION;
         }
     }
-    if (proximity && proximity->get_status() != AP_Proximity::Status::NoData) {
-        control_sensors_health |= MAV_SYS_STATUS_SENSOR_LASER_POSITION;
-    }
+#endif
 }

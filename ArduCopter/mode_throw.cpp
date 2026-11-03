@@ -1,6 +1,6 @@
 #include "Copter.h"
 
-#if MODE_THROW_ENABLED == ENABLED
+#if MODE_THROW_ENABLED
 
 // throw_init - initialise throw controller
 bool ModeThrow::init(bool ignore_checks)
@@ -18,6 +18,14 @@ bool ModeThrow::init(bool ignore_checks)
     // init state
     stage = Throw_Disarmed;
     nextmode_attempted = false;
+
+    // initialise pos controller speed and acceleration
+    pos_control->NE_set_max_speed_accel_m(wp_nav->get_default_speed_NE_ms(), BRAKE_MODE_DECEL_RATE_MSS);
+    pos_control->NE_set_correction_speed_accel_m(wp_nav->get_default_speed_NE_ms(), BRAKE_MODE_DECEL_RATE_MSS);
+
+    // set vertical speed and acceleration limits
+    pos_control->D_set_max_speed_accel_m(BRAKE_MODE_SPEED_Z_MS, BRAKE_MODE_SPEED_Z_MS, BRAKE_MODE_DECEL_RATE_MSS);
+    pos_control->D_set_correction_speed_accel_m(BRAKE_MODE_SPEED_Z_MS, BRAKE_MODE_SPEED_Z_MS, BRAKE_MODE_DECEL_RATE_MSS);
 
     return true;
 }
@@ -43,32 +51,31 @@ void ModeThrow::run()
         stage = Throw_Detecting;
 
     } else if (stage == Throw_Detecting && throw_detected()){
-        gcs().send_text(MAV_SEVERITY_INFO,"throw detected - uprighting");
-        stage = Throw_Uprighting;
+        gcs().send_text(MAV_SEVERITY_INFO,"throw detected - spooling motors");
+        copter.set_land_complete(false);
+        stage = Throw_Wait_Throttle_Unlimited;
 
         // Cancel the waiting for throw tone sequence
         AP_Notify::flags.waiting_for_throw = false;
 
+    } else if (stage == Throw_Wait_Throttle_Unlimited &&
+               motors->get_spool_state() == AP_Motors::SpoolState::THROTTLE_UNLIMITED) {
+        gcs().send_text(MAV_SEVERITY_INFO,"throttle is unlimited - uprighting");
+        stage = Throw_Uprighting;
     } else if (stage == Throw_Uprighting && throw_attitude_good()) {
         gcs().send_text(MAV_SEVERITY_INFO,"uprighted - controlling height");
         stage = Throw_HgtStabilise;
 
-        // initialize vertical speed and acceleration limits
-        // use brake mode values for rapid response
-        pos_control->set_max_speed_z(BRAKE_MODE_SPEED_Z, BRAKE_MODE_SPEED_Z);
-        pos_control->set_max_accel_z(BRAKE_MODE_DECEL_RATE);
+        // initialise the z controller
+        pos_control->D_init_controller_no_descent();
 
-        // initialise the demanded height to 3m above the throw height
-        // we want to rapidly clear surrounding obstacles
-        if (g2.throw_type == ThrowType_Drop) {
-            pos_control->set_alt_target(inertial_nav.get_altitude() - 100);
+        // initialise the demanded height below/above the throw height from user parameters
+        // this allows for rapidly clearing surrounding obstacles
+        if (g2.throw_type == ThrowType::Drop) {
+            pos_control->set_pos_desired_U_m(pos_control->get_pos_estimate_U_m() - g.throw_altitude_descend);
         } else {
-            pos_control->set_alt_target(inertial_nav.get_altitude() + 300);
+            pos_control->set_pos_desired_U_m(pos_control->get_pos_estimate_U_m() + g.throw_altitude_ascend);
         }
-
-        // set the initial velocity of the height controller demand to the measured velocity if it is going up
-        // if it is going down, set it to zero to enforce a very hard stop
-        pos_control->set_desired_velocity_z(fmaxf(inertial_nav.get_velocity_z(),0.0f));
 
         // Set the auto_arm status to true to avoid a possible automatic disarm caused by selection of an auto mode with throttle at minimum
         copter.set_auto_armed(true);
@@ -77,9 +84,8 @@ void ModeThrow::run()
         gcs().send_text(MAV_SEVERITY_INFO,"height achieved - controlling position");
         stage = Throw_PosHold;
 
-        // initialise the loiter target to the current position and velocity
-        loiter_nav->clear_pilot_desired_acceleration();
-        loiter_nav->init_target();
+        // initialise position controller
+        pos_control->NE_init_controller();
 
         // Set the auto_arm status to true to avoid a possible automatic disarm caused by selection of an auto mode with throttle at minimum
         copter.set_auto_armed(true);
@@ -108,14 +114,14 @@ void ModeThrow::run()
     case Throw_Disarmed:
 
         // prevent motors from rotating before the throw is detected unless enabled by the user
-        if (g.throw_motor_start == 1) {
+        if (g.throw_motor_start == PreThrowMotorState::RUNNING) {
             motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::GROUND_IDLE);
         } else {
             motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::SHUT_DOWN);
         }
 
         // demand zero throttle (motors will be stopped anyway) and continually reset the attitude controller
-        attitude_control->set_yaw_target_to_current_heading();
+        attitude_control->reset_yaw_target_and_rate();
         attitude_control->reset_rate_controller_I_terms();
         attitude_control->set_throttle_out(0,true,g.throttle_filt);
         break;
@@ -123,19 +129,28 @@ void ModeThrow::run()
     case Throw_Detecting:
 
         // prevent motors from rotating before the throw is detected unless enabled by the user
-        if (g.throw_motor_start == 1) {
+        if (g.throw_motor_start == PreThrowMotorState::RUNNING) {
             motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::GROUND_IDLE);
         } else {
             motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::SHUT_DOWN);
         }
 
         // Hold throttle at zero during the throw and continually reset the attitude controller
-        attitude_control->set_yaw_target_to_current_heading();
+        attitude_control->reset_yaw_target_and_rate();
         attitude_control->reset_rate_controller_I_terms();
         attitude_control->set_throttle_out(0,true,g.throttle_filt);
 
         // Play the waiting for throw tone sequence to alert the user
         AP_Notify::flags.waiting_for_throw = true;
+
+        break;
+
+    case Throw_Wait_Throttle_Unlimited:
+
+        // set motors to full range
+        motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
+        // ignore motor checks
+        motors->set_spoolup_block(false);
 
         break;
 
@@ -145,7 +160,7 @@ void ModeThrow::run()
         motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
         // demand a level roll/pitch attitude with zero yaw rate
-        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(0.0f, 0.0f, 0.0f);
+        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw_rad(0.0f, 0.0f, 0.0f);
 
         // output 50% throttle and turn off angle boost to maximise righting moment
         attitude_control->set_throttle_out(0.5f, false, g.throttle_filt);
@@ -158,11 +173,11 @@ void ModeThrow::run()
         motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
         // call attitude controller
-        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(0.0f, 0.0f, 0.0f);
+        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw_rad(0.0f, 0.0f, 0.0f);
 
         // call height controller
-        pos_control->set_alt_target_from_climb_rate_ff(0.0f, G_Dt, false);
-        pos_control->update_z_controller();
+        pos_control->D_set_pos_target_from_climb_rate_ms(0.0f);
+        pos_control->D_update_controller();
 
         break;
 
@@ -171,33 +186,37 @@ void ModeThrow::run()
         // set motors to full range
         motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
-        // run loiter controller
-        loiter_nav->update();
+        // use position controller to stop
+        Vector2f vel_zero;
+        Vector2f accel_zero;
+        pos_control->input_vel_accel_NE_m(vel_zero, accel_zero);
+        pos_control->NE_update_controller();
 
         // call attitude controller
-        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(loiter_nav->get_roll(), loiter_nav->get_pitch(), 0.0f);
+        attitude_control->input_thrust_vector_rate_heading_rads(pos_control->get_thrust_vector(), 0.0f);
 
         // call height controller
-        pos_control->set_alt_target_from_climb_rate_ff(0.0f, G_Dt, false);
-        pos_control->update_z_controller();
+        pos_control->D_set_pos_target_from_climb_rate_ms(0.0f);
+        pos_control->D_update_controller();
 
         break;
     }
 
+#if HAL_LOGGING_ENABLED
     // log at 10hz or if stage changes
     uint32_t now = AP_HAL::millis();
     if ((stage != prev_stage) || (now - last_log_ms) > 100) {
         prev_stage = stage;
         last_log_ms = now;
-        const float velocity = inertial_nav.get_velocity().length();
-        const float velocity_z = inertial_nav.get_velocity().z;
-        const float accel = copter.ins.get_accel().length();
-        const float ef_accel_z = ahrs.get_accel_ef().z;
+        const float velocity_ms = pos_control->get_vel_estimate_NED_ms().length();
+        const float velocity_z_ms = pos_control->get_vel_estimate_U_ms();
+        const float accel_mss = copter.ins.get_accel().length();
+        const float ef_accel_z_mss = ahrs.get_accel_ef().z;
         const bool throw_detect = (stage > Throw_Detecting) || throw_detected();
         const bool attitude_ok = (stage > Throw_Uprighting) || throw_attitude_good();
         const bool height_ok = (stage > Throw_HgtStabilise) || throw_height_good();
         const bool pos_ok = (stage > Throw_PosHold) || throw_position_good();
-        
+
 // @LoggerMessage: THRO
 // @Description: Throw Mode messages
 // @URL: https://ardupilot.org/copter/docs/throw-mode.html
@@ -209,10 +228,10 @@ void ModeThrow::run()
 // @Field: AccEfZ: Vertical earth frame accelerometer value
 // @Field: Throw: True if a throw has been detected since entering this mode
 // @Field: AttOk: True if the vehicle is upright 
-// @Field: HgtOk: True if the vehicle is within 50cm of the demanded height
-// @Field: PosOk: True if the vehicle is within 50cm of the demanded horizontal position
-        
-        AP::logger().Write(
+// @Field: HgtOk: True if the vehicle is within 0.5 m of the demanded height
+// @Field: PosOk: True if the vehicle is within 0.5 m of the demanded horizontal position
+
+        AP::logger().WriteStreaming(
             "THRO",
             "TimeUS,Stage,Vel,VelZ,Acc,AccEfZ,Throw,AttOk,HgtOk,PosOk",
             "s-nnoo----",
@@ -220,78 +239,94 @@ void ModeThrow::run()
             "QBffffbbbb",
             AP_HAL::micros64(),
             (uint8_t)stage,
-            (double)velocity,
-            (double)velocity_z,
-            (double)accel,
-            (double)ef_accel_z,
+            (double)velocity_ms,
+            (double)velocity_z_ms,
+            (double)accel_mss,
+            (double)ef_accel_z_mss,
             throw_detect,
             attitude_ok,
             height_ok,
             pos_ok);
     }
+#endif  // HAL_LOGGING_ENABLED
 }
 
 bool ModeThrow::throw_detected()
 {
-    // Check that we have a valid navigation solution
-    nav_filter_status filt_status = inertial_nav.get_filter_status();
-    if (!filt_status.flags.attitude || !filt_status.flags.horiz_pos_abs || !filt_status.flags.vert_pos) {
+    // Check that the AHRS is healthy enough for us to be doing detection:
+    if (!ahrs.configured_backend_has_status(AP_AHRS::Status::ATTITUDE_VALID)) {
+        return false;
+    }
+    if (!ahrs.configured_backend_has_status(AP_AHRS::Status::HORIZ_POS_ABS)) {
+        return false;
+    }
+    if (!ahrs.configured_backend_has_status(AP_AHRS::Status::VERT_POS)) {
         return false;
     }
 
-    // Check for high speed (>500 cm/s)
-    bool high_speed = inertial_nav.get_velocity().length() > THROW_HIGH_SPEED;
+    // Check for high speed ( >5 m/s)
+    bool high_speed = pos_control->get_vel_estimate_NED_ms().length_squared() > (THROW_HIGH_SPEED_MS * THROW_HIGH_SPEED_MS);
 
-    // check for upwards or downwards trajectory (airdrop) of 50cm/s
+    // check for upwards or downwards trajectory (airdrop) of 0.50 m/s
     bool changing_height;
-    if (g2.throw_type == ThrowType_Drop) {
-        changing_height = inertial_nav.get_velocity().z < -THROW_VERTICAL_SPEED;
+    if (g2.throw_type == ThrowType::Drop) {
+        changing_height = pos_control->get_vel_estimate_U_ms() < -THROW_VERTICAL_SPEED_MS;
     } else {
-        changing_height = inertial_nav.get_velocity().z > THROW_VERTICAL_SPEED;
+        changing_height = pos_control->get_vel_estimate_U_ms() > THROW_VERTICAL_SPEED_MS;
     }
 
-    // Check the vertical acceleraton is greater than 0.25g
+    // Check the vertical acceleration is greater than 0.25g
     bool free_falling = ahrs.get_accel_ef().z > -0.25 * GRAVITY_MSS;
 
     // Check if the accel length is < 1.0g indicating that any throw action is complete and the copter has been released
     bool no_throw_action = copter.ins.get_accel().length() < 1.0f * GRAVITY_MSS;
 
-    // High velocity or free-fall combined with increasing height indicate a possible air-drop or throw release
-    bool possible_throw_detected = (free_falling || high_speed) && changing_height && no_throw_action;
+    // fetch the altitude above home
+    float altitude_above_home_m;  // Use altitude above home if it is set, otherwise relative to EKF origin
+    if (ahrs.home_is_set()) {
+        ahrs.get_relative_position_D_home(altitude_above_home_m);
+        altitude_above_home_m = -altitude_above_home_m; // altitude above home is returned as negative
+    } else {
+        altitude_above_home_m = pos_control->get_pos_estimate_U_m();
+    }
+
+    // Check that the altitude is within user defined limits
+    const bool height_within_params = (g.throw_altitude_min == 0 || altitude_above_home_m > g.throw_altitude_min) && (g.throw_altitude_max == 0 || (altitude_above_home_m < g.throw_altitude_max));
+
+    // High velocity or free-fall combined with increasing height indicate a possible air-drop or throw release  
+    bool possible_throw_detected = (free_falling || high_speed) && changing_height && no_throw_action && height_within_params;
+
 
     // Record time and vertical velocity when we detect the possible throw
     if (possible_throw_detected && ((AP_HAL::millis() - free_fall_start_ms) > 500)) {
         free_fall_start_ms = AP_HAL::millis();
-        free_fall_start_velz = inertial_nav.get_velocity().z;
+        free_fall_start_vel_u_ms = pos_control->get_vel_estimate_U_ms();
     }
 
     // Once a possible throw condition has been detected, we check for 2.5 m/s of downwards velocity change in less than 0.5 seconds to confirm
-    bool throw_condition_confirmed = ((AP_HAL::millis() - free_fall_start_ms < 500) && ((inertial_nav.get_velocity().z - free_fall_start_velz) < -250.0f));
+    bool throw_condition_confirmed = ((AP_HAL::millis() - free_fall_start_ms < 500) && ((pos_control->get_vel_estimate_U_ms() - free_fall_start_vel_u_ms) < -2.5));
 
     // start motors and enter the control mode if we are in continuous freefall
-    if (throw_condition_confirmed) {
-        return true;
-    } else {
-        return false;
-    }
+    return throw_condition_confirmed;
 }
 
-bool ModeThrow::throw_attitude_good()
+bool ModeThrow::throw_attitude_good() const
 {
     // Check that we have uprighted the copter
     const Matrix3f &rotMat = ahrs.get_rotation_body_to_ned();
     return (rotMat.c.z > 0.866f); // is_upright
 }
 
-bool ModeThrow::throw_height_good()
+bool ModeThrow::throw_height_good() const
 {
     // Check that we are within 0.5m of the demanded height
-    return (pos_control->get_alt_error() < 50.0f);
+    return (fabsf(pos_control->get_pos_error_D_m()) < 0.5);
 }
 
-bool ModeThrow::throw_position_good()
+bool ModeThrow::throw_position_good() const
 {
-    // check that our horizontal position error is within 50cm
-    return (pos_control->get_horizontal_error() < 50.0f);
+    // check that our horizontal position error is within 0.5 m
+    return (pos_control->get_pos_error_NE_m() < 0.50);
 }
+
 #endif

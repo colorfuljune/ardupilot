@@ -27,12 +27,13 @@ namespace SITL {
  */
 class Tracker : public Aircraft {
 public:
-    Tracker(const char *frame_str);
+    using Aircraft::Aircraft;
+
     void update(const struct sitl_input &input) override;
 
     /* static object creator */
     static Aircraft *create(const char *frame_str) {
-        return new Tracker(frame_str);
+        return NEW_NOTHROW Tracker(frame_str);
     }
 
 private:
@@ -42,17 +43,17 @@ private:
     const float pitchrate = 1.0f;
     const float pitch_range = 45;
     const float yaw_range = 170;
-    const float zero_yaw = 270;  // yaw direction at startup
-    const float zero_pitch = 10; // pitch at startup
-    uint64_t last_debug_us = 0;
+    const float zero_yaw = 270;  // yaw at the centre of the yaw range
+    const float zero_pitch = 10; // pitch at the centre of the pitch range
+    uint64_t last_debug_us;
 
     float pitch_input;
     float yaw_input;
     float yaw_current_relative;
     float pitch_current_relative;
 
-    void update_position_servos(float delta_time, float &yaw_rate, float &pitch_rate);
-    void update_onoff_servos(float &yaw_rate, float &pitch_rate);
+    void update_position_servos(float delta_time, float &yaw_rate, float &pitch_rate) const;
+    void update_onoff_servos(float &yaw_rate, float &pitch_rate) const;
 };
 
 } // namespace SITL

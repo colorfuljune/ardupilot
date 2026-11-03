@@ -31,19 +31,17 @@ class QuadPlane : public Plane {
 public:
     QuadPlane(const char *frame_str);
 
+    ~QuadPlane() {
+        delete frame;
+    }
+
     /* update model by one time step */
     void update(const struct sitl_input &input) override;
 
     /* static object creator */
     static Aircraft *create(const char *frame_str) {
-        return new QuadPlane(frame_str);
+        return NEW_NOTHROW QuadPlane(frame_str);
     }
-
-    // get motor offset for model
-    virtual uint16_t get_motors_offset() const override {
-        return frame->motor_offset;
-    }
-
 
 private:
     Frame *frame;

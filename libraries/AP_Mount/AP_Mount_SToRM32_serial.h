@@ -3,43 +3,52 @@
  */
 #pragma once
 
-#include <AP_HAL/AP_HAL.h>
-#include <AP_AHRS/AP_AHRS.h>
+#include "AP_Mount_config.h"
 
+#if HAL_MOUNT_STORM32SERIAL_ENABLED
+
+#include "AP_Mount_Backend_Serial.h"
+
+#include <AP_HAL/AP_HAL.h>
 #include <AP_Math/AP_Math.h>
 #include <AP_Common/AP_Common.h>
-#include <GCS_MAVLink/GCS_MAVLink.h>
-#include "AP_Mount_Backend.h"
-#if HAL_MOUNT_ENABLED
 
-#define AP_MOUNT_STORM32_SERIAL_RESEND_MS   1000    // resend angle targets to gimbal once per second
+// timeout for no-response-received (gimbal only sends data when we
+// send it data first)
+#define AP_MOUNT_STORM32_SERIAL_TIMEOUT_MS   2000
 
-class AP_Mount_SToRM32_serial : public AP_Mount_Backend
+class AP_Mount_SToRM32_serial : public AP_Mount_Backend_Serial
 {
 
 public:
     // Constructor
-    AP_Mount_SToRM32_serial(AP_Mount &frontend, AP_Mount::mount_state &state, uint8_t instance);
-
-    // init - performs any required initialisation for this instance
-    void init() override;
+    using AP_Mount_Backend_Serial::AP_Mount_Backend_Serial;
 
     // update mount position - should be called periodically
     void update() override;
 
-    // has_pan_control - returns true if this mount can control it's pan (required for multicopters)
-    bool has_pan_control() const override;
+    // has_pan_control - returns true if this mount can control its pan (required for multicopters)
+    bool has_pan_control() const override { return yaw_range_valid(); };
 
-    // set_mode - sets mount's mode
-    void set_mode(enum MAV_MOUNT_MODE mode) override;
+protected:
 
-    // send_mount_status - called to allow mounts to send their status to GCS using the MOUNT_STATUS message
-    void send_mount_status(mavlink_channel_t chan) override;
+    // get attitude as a quaternion.  returns true on success
+    bool get_attitude_quaternion(Quaternion& att_quat) override;
 
 private:
 
+    // SToRM32-serial can only send angles
+    uint8_t natively_supported_mount_target_types() const override {
+        return NATIVE_ANGLES_ONLY;
+    };
+    
+    // allow removing lean angles for pitch and roll locks
+    bool apply_bf_roll_pitch_adjustments_in_rc_targeting() const override {
+        return true;
+    }
+
     // send_target_angles
-    void send_target_angles(float pitch_deg, float roll_deg, float yaw_deg);
+    void send_target_angles(const MountAngleTarget& angle_target_rad) override;
 
     // send read data request
     void get_angles();
@@ -56,7 +65,7 @@ private:
 
     //void add_next_reply(ReplyType reply_type);
     uint8_t get_reply_size(ReplyType reply_type);
-    bool can_send(bool with_control);
+    bool can_send();
 
     struct PACKED SToRM32_reply_data_struct {
         uint16_t state;
@@ -129,14 +138,10 @@ private:
 
 
     // internal variables
-    AP_HAL::UARTDriver *_port;
-
-    bool _initialised;              // true once the driver has been initialised
     uint32_t _last_send;            // system time of last do_mount_control sent to gimbal
-
     uint8_t _reply_length;
     uint8_t _reply_counter;
-    ReplyType _reply_type;
+    ReplyType _reply_type = ReplyType_UNKNOWN;
 
 
     union PACKED SToRM32_reply {
@@ -148,4 +153,4 @@ private:
     // keep the last _current_angle values
     Vector3l _current_angle;
 };
-#endif // HAL_MOUNT_ENABLED
+#endif // HAL_MOUNT_STORM32SERIAL_ENABLED

@@ -18,12 +18,15 @@
  */
 #include "AP_Compass_IST8310.h"
 
+#if AP_COMPASS_IST8310_ENABLED
+
 #include <stdio.h>
 #include <utility>
 
 #include <AP_HAL/AP_HAL.h>
 #include <AP_HAL/utility/sparse-endian.h>
 #include <AP_Math/AP_Math.h>
+#include <AP_BoardConfig/AP_BoardConfig.h>
 
 #define WAI_REG 0x0
 #define DEVICE_ID 0x10
@@ -75,7 +78,7 @@ static const int16_t IST8310_MIN_VAL_Z  = -IST8310_MAX_VAL_Z;
 
 extern const AP_HAL::HAL &hal;
 
-AP_Compass_Backend *AP_Compass_IST8310::probe(AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev,
+AP_Compass_Backend *AP_Compass_IST8310::probe(AP_HAL::OwnPtr<AP_HAL::Device> dev,
                                               bool force_external,
                                               enum Rotation rotation)
 {
@@ -83,7 +86,7 @@ AP_Compass_Backend *AP_Compass_IST8310::probe(AP_HAL::OwnPtr<AP_HAL::I2CDevice> 
         return nullptr;
     }
 
-    AP_Compass_IST8310 *sensor = new AP_Compass_IST8310(std::move(dev), force_external, rotation);
+    AP_Compass_IST8310 *sensor = NEW_NOTHROW AP_Compass_IST8310(std::move(dev), force_external, rotation);
     if (!sensor || !sensor->init()) {
         delete sensor;
         return nullptr;
@@ -109,6 +112,22 @@ bool AP_Compass_IST8310::init()
 
     // high retries for init
     _dev->set_retries(10);
+
+    /*
+      unfortunately the IST8310 employs the novel concept of a
+      writeable WHOAMI register. The register can become corrupt due
+      to bus noise, and what is worse it persists the corruption even
+      across a power cycle. If you power it off for 30s or more then
+      it will reset to the default of 0x10, but for less than that the
+      value of WAI is unreliable.
+
+      To avoid this issue we do a reset of the device before we probe
+      the WAI register. This is nasty as we don't yet know we've found
+      a real IST8310, but it is the best we can do given the bad
+      hardware design of the sensor
+     */
+    _dev->write_register(CNTL2_REG, CNTL2_VAL_SRST);
+    hal.scheduler->delay(10);
 
     uint8_t whoami;
     if (!_dev->read_registers(WAI_REG, &whoami, 1) ||
@@ -153,25 +172,21 @@ bool AP_Compass_IST8310::init()
 
     // register compass instance
     _dev->set_device_type(DEVTYPE_IST8310);
-    if (!register_compass(_dev->get_bus_id(), _instance)) {
+    if (!register_compass(_dev->get_bus_id())) {
         return false;
     }
-    set_dev_id(_instance, _dev->get_bus_id());
 
     printf("%s found on bus %u id %u address 0x%02x\n", name,
-           _dev->bus_num(), _dev->get_bus_id(), _dev->get_bus_address());
+           _dev->bus_num(), unsigned(_dev->get_bus_id()), _dev->get_bus_address());
 
-    set_rotation(_instance, _rotation);
+    set_rotation(_rotation);
 
     if (_force_external) {
-        set_external(_instance, true);
+        set_external(true);
     }
     
     _periodic_handle = _dev->register_periodic_callback(SAMPLING_PERIOD_USEC,
         FUNCTOR_BIND_MEMBER(&AP_Compass_IST8310::timer, void));
-
-    _perf_xfer_err = hal.util->perf_alloc(AP_HAL::Util::PC_COUNT, "IST8310_xfer_err");
-    _perf_bad_data = hal.util->perf_alloc(AP_HAL::Util::PC_COUNT, "IST8310_bad_data");
 
     return true;
 
@@ -183,7 +198,6 @@ fail:
 void AP_Compass_IST8310::start_conversion()
 {
     if (!_dev->write_register(CNTL1_REG, CNTL1_VAL_SINGLE_MEASUREMENT_MODE)) {
-        hal.util->perf_count(_perf_xfer_err);
         _ignore_next_sample = true;
     }
 }
@@ -204,7 +218,6 @@ void AP_Compass_IST8310::timer()
 
     bool ret = _dev->read_registers(OUTPUT_X_L_REG, (uint8_t *) &buffer, sizeof(buffer));
     if (!ret) {
-        hal.util->perf_count(_perf_xfer_err);
         return;
     }
 
@@ -224,7 +237,6 @@ void AP_Compass_IST8310::timer()
     if (x > IST8310_MAX_VAL_XY || x < IST8310_MIN_VAL_XY ||
         y > IST8310_MAX_VAL_XY || y < IST8310_MIN_VAL_XY ||
         z > IST8310_MAX_VAL_Z  || z < IST8310_MIN_VAL_Z) {
-        hal.util->perf_count(_perf_bad_data);
         return;
     }
 
@@ -234,10 +246,7 @@ void AP_Compass_IST8310::timer()
     /* Resolution: 0.3 µT/LSB - already convert to milligauss */
     Vector3f field = Vector3f{x * 3.0f, y * 3.0f, z * 3.0f};
 
-    accumulate_sample(field, _instance);
+    accumulate_sample(field);
 }
 
-void AP_Compass_IST8310::read()
-{
-    drain_accumulated_samples(_instance);
-}
+#endif  // AP_COMPASS_IST8310_ENABLED

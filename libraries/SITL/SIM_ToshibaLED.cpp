@@ -1,46 +1,35 @@
 #include "SIM_ToshibaLED.h"
 
+#if AP_SIM_TOSHIBALED_ENABLED
+
 #include <stdio.h>
 
-#define TOSHIBA_LED_PWM0    0x01    // pwm0 register
-#define TOSHIBA_LED_PWM1    0x02    // pwm1 register
-#define TOSHIBA_LED_PWM2    0x03    // pwm2 register
-#define TOSHIBA_LED_ENABLE  0x04    // enable register
-
-int SITL::ToshibaLED::rdwr(I2C::i2c_rdwr_ioctl_data *&data)
+void SITL::ToshibaLED::update(const class Aircraft &aircraft)
 {
-    if (data->nmsgs != 1) {
-        // this is really just because it is unexpected from the
-        // ArduPilot code, rather than being incorrect from a
-        // simulated device perspective.
-        AP_HAL::panic("Reading from Toshiba LED?!");
+    if (last_print_pwm0 == get_register(ToshibaLEDDevReg::PWM0) &&
+        last_print_pwm1 == get_register(ToshibaLEDDevReg::PWM1) &&
+        last_print_pwm2 == get_register(ToshibaLEDDevReg::PWM2) &&
+        last_print_enable == get_register(ToshibaLEDDevReg::ENABLE)) {
+        return;
     }
-    const struct I2C::i2c_msg &msg = data->msgs[0];
-    const uint8_t reg = msg.buf[0];
-    const uint8_t val = msg.buf[1];
-    switch(reg) {
-    case TOSHIBA_LED_PWM0:
-        // ::fprintf(stderr, "ToshibaLED: pwm0=%u %u %u\n", msg.buf[1], msg.buf[2], msg.buf[3]);
-        _pwm0 = val;
-        break;
-    case TOSHIBA_LED_PWM1:
-        // ::fprintf(stderr, "ToshibaLED: pwm1=%u\n", val);
-        _pwm1 = val;
-        break;
-    case TOSHIBA_LED_PWM2:
-        // ::fprintf(stderr, "ToshibaLED: pwm2=%u\n", val);
-        _pwm2 = val;
-        break;
-    case TOSHIBA_LED_ENABLE:
-        if (val != 0x03) {
-            AP_HAL::panic("Unexpected enable value (%u)", val);
-        }
-        // ::fprintf(stderr, "ToshibaLED: enabling\n");
-        _enabled = true;
-        break;
-    default:
-        AP_HAL::panic("Unexpected register (%u)", reg);
+
+    last_print_pwm0 = get_register(ToshibaLEDDevReg::PWM0);
+    last_print_pwm1 = get_register(ToshibaLEDDevReg::PWM1);
+    last_print_pwm2 = get_register(ToshibaLEDDevReg::PWM2);
+    last_print_enable = get_register(ToshibaLEDDevReg::ENABLE);
+    // GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SIM_ToshibaLED: PWM0=%u PWM1=%u PWM2=%u ENABLE=%u", last_print_pwm0, last_print_pwm1, last_print_pwm2, last_print_enable);
+
+    if (get_register(ToshibaLEDDevReg::ENABLE)) {
+        // here we convert from 0-15 BGR (the PWM values from the i2c bus)
+        // to 0-255 RGB (what SIM_RGBLED wants):
+        rgbled.set_colours(
+            get_register(ToshibaLEDDevReg::PWM2) * 17,
+            get_register(ToshibaLEDDevReg::PWM1) * 17,
+            get_register(ToshibaLEDDevReg::PWM0) * 17
+            );
+    } else {
+        rgbled.set_colours(0, 0, 0);
     }
-    // kill(0, SIGTRAP);
-    return -1;
 }
+
+#endif

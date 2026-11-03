@@ -13,11 +13,16 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "AP_Proximity_config.h"
+
+#if AP_PROXIMITY_LIGHTWARE_SF40C_ENABLED
+
+#include "AP_Proximity_LightWareSF40C.h"
+
 #include <AP_Common/AP_Common.h>
 #include <AP_HAL/AP_HAL.h>
 #include <AP_HAL/utility/sparse-endian.h>
 #include <AP_Math/crc.h>
-#include "AP_Proximity_LightWareSF40C.h"
 
 extern const AP_HAL::HAL& hal;
 
@@ -48,9 +53,6 @@ void AP_Proximity_LightWareSF40C::update(void)
 // initialise sensor
 void AP_Proximity_LightWareSF40C::initialise()
 {
-    // initialise boundary
-    init_boundary();
-
     // exit immediately if we've sent initialisation requests in the last second
     uint32_t now_ms = AP_HAL::millis();
     if ((now_ms - _last_request_ms) < 1000) {
@@ -204,7 +206,7 @@ void AP_Proximity_LightWareSF40C::process_replies()
 void AP_Proximity_LightWareSF40C::parse_byte(uint8_t b)
 {
     // check that payload buffer is large enough
-    static_assert(ARRAY_SIZE(_msg.payload) == PROXIMITY_SF40C_PAYLOAD_LEN_MAX, "AP_Proximity_LightwareSF40C: check _msg.payload array size ");
+    static_assert(ARRAY_SIZE(_msg.payload) == PROXIMITY_SF40C_PAYLOAD_LEN_MAX, "AP_Proximity_LightWareSF40C: check _msg.payload array size");
 
     // process byte depending upon current state
     switch (_msg.state) {
@@ -308,10 +310,10 @@ void AP_Proximity_LightWareSF40C::process_message()
 
         // process each point
         const float angle_inc_deg = (1.0f / point_total) * 360.0f;
-        const float angle_sign = (frontend.get_orientation(state.instance) == 1) ? -1.0f : 1.0f;
-        const float angle_correction = frontend.get_yaw_correction(state.instance);
-        const uint16_t dist_min_cm = distance_min() * 100;
-        const uint16_t dist_max_cm = distance_max() * 100;
+        const float angle_sign = (params.orientation == 1) ? -1.0f : 1.0f;
+        const float angle_correction = params.yaw_correction;
+        const uint16_t dist_min_cm = distance_min_m() * 100;
+        const uint16_t dist_max_cm = distance_max_m() * 100;
 
         // mini sectors are used to combine several readings together
         uint8_t combined_count = 0;
@@ -321,31 +323,31 @@ void AP_Proximity_LightWareSF40C::process_message()
             const uint16_t idx = 14 + (i * 2);
             const int16_t dist_cm = (int16_t)buff_to_uint16(_msg.payload[idx], _msg.payload[idx+1]);
             const float angle_deg = wrap_360((point_start_index + i) * angle_inc_deg * angle_sign + angle_correction);
-            const uint8_t sector = convert_angle_to_sector(angle_deg);
+            const AP_Proximity_Boundary_3D::Face face = frontend.boundary.get_face(angle_deg);
 
-            // if we've entered a new sector then finish off previous sector
-            if (sector != _last_sector) {
+            // if point is on a new face then finish off previous face
+            if (face != _face) {
                 // update boundary used for avoidance
-                if (_last_sector != UINT8_MAX) {
-                    update_boundary_for_sector(_last_sector, false);
+                if (_face_distance_valid) {
+                    frontend.boundary.set_face_attributes(_face, _face_yaw_deg, _face_distance, state.instance);
+                } else {
+                    // mark previous face invalid
+                    frontend.boundary.reset_face(_face, state.instance);
                 }
-                // init for new sector
-                _last_sector = sector;
-                _distance[sector] = INT16_MAX;
-                _distance_valid[sector] = false;
+                // init for new face
+                _face = face;
+                _face_distance_valid = false;
             }
 
             // check reading is not within an ignore zone
-            if (!ignore_reading(angle_deg)) {
+            const float dist_m = dist_cm * 0.01f;
+            if (!ignore_reading(angle_deg, dist_m)) {
                 // check distance reading is valid
                 if ((dist_cm >= dist_min_cm) && (dist_cm <= dist_max_cm)) {
-                    const float dist_m = dist_cm * 0.01f;
-
-                    // update shortest distance for this sector
-                    if (dist_m < _distance[sector]) {
-                        _angle[sector] = angle_deg;
-                        _distance[sector] = dist_m;
-                        _distance_valid[sector] = true;
+                    // update shortest distance for this face
+                    if (!_face_distance_valid || dist_m < _face_distance) {
+                        _face_distance = dist_m;
+                        _face_distance_valid = true;
                     }
 
                     // calculate shortest of last few readings
@@ -421,3 +423,5 @@ uint16_t AP_Proximity_LightWareSF40C::buff_to_uint16(uint8_t b0, uint8_t b1) con
     uint16_t leval = (uint16_t)b0 | (uint16_t)b1 << 8;
     return leval;
 }
+
+#endif // AP_PROXIMITY_LIGHTWARE_SF40C_ENABLED

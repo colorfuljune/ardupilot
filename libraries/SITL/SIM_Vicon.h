@@ -13,10 +13,24 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 /*
-  simple particle sensor simulation
+  VICON (visual positioning) simulation
+
+./Tools/autotest/sim_vehicle.py --gdb --debug -v ArduCopter -A --serial5=sim:vicon:
+param set SERIAL5_PROTOCOL 1
+graph SIMSTATE.lat-GPS_GLOBAL_ORIGIN.latitude SIMSTATE.lng-GPS_GLOBAL_ORIGIN.longitude
+reboot
+
+mavproxy.py --master tcp:localhost:5763 --source-system=72
+vehicle 17
+graph VISION_POSITION_ESTIMATE.x VISION_POSITION_ESTIMATE.y
+
 */
 
 #pragma once
+
+#include "SIM_config.h"
+
+#if AP_SIM_VICON_ENABLED
 
 #include "SIM_Aircraft.h"
 
@@ -34,17 +48,13 @@ public:
     Vicon();
 
     // update state
-    void update(const Location &loc, const Vector3f &position, const Vector3f &velocity, const Quaternion &attitude);
+    void update(const Location &loc, const Vector3d &position, const Vector3f &velocity, const Quaternion &attitude);
 
 private:
 
     // TODO: make these parameters:
     const uint8_t system_id = 17;
     const uint8_t component_id = 18;
-
-    // we share channels with the ArduPilot binary!
-    // Beware: the mavlink rangefinder shares this channel.
-    const mavlink_channel_t mavlink_ch = (mavlink_channel_t)(MAVLINK_COMM_0+5);
 
     uint64_t last_observation_usec; // time last observation was sent
     uint64_t time_offset_us;        // simulated timeoffset between external system and autopilot
@@ -59,22 +69,32 @@ private:
     enum class ViconTypeMask : uint8_t {
         VISION_POSITION_ESTIMATE    = (1 << 0),
         VISION_SPEED_ESTIMATE       = (1 << 1),
-        VICON_POSITION_ESTIMATE     = (1 << 2)
+        VICON_POSITION_ESTIMATE     = (1 << 2),
+        VISION_POSITION_DELTA       = (1 << 3),
+        ODOMETRY                    = (1 << 4),
     };
 
     // return true if the given message type should be sent
-    bool should_send(ViconTypeMask type_mask) const { return (((uint8_t)type_mask & _sitl->vicon_type_mask.get()) > 0); }
+    bool should_send(ViconTypeMask type_mask) const { return (((uint8_t)type_mask & _sitl->vicon.type_mask.get()) > 0); }
 
     // get unused index in msg_buf
     bool get_free_msg_buf_index(uint8_t &index);
 
     void update_vicon_position_estimate(const Location &loc,
-                                        const Vector3f &position,
+                                        const Vector3d &position,
                                         const Vector3f &velocity,
                                         const Quaternion &attitude);
 
     void maybe_send_heartbeat();
     uint32_t last_heartbeat_ms;
+
+    // position delta message 
+    Quaternion _attitude_prev; // Rotation to previous MAV_FRAME_BODY_FRD from MAV_FRAME_LOCAL_NED
+    Vector3d _position_prev;  // previous position from origin (m) MAV_FRAME_LOCAL_NED
+
+    mavlink_status_t mav_status;
 };
 
 }
+
+#endif  // AP_SIM_VICON_ENABLED

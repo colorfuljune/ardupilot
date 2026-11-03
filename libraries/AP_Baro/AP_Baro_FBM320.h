@@ -1,10 +1,11 @@
 #pragma once
 
+#include "AP_Baro_Backend.h"
+
+#if AP_BARO_FBM320_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include <AP_HAL/Device.h>
-#include <AP_HAL/utility/OwnPtr.h>
-
-#include "AP_Baro_Backend.h"
 
 #ifndef HAL_BARO_FBM320_I2C_ADDR
  #define HAL_BARO_FBM320_I2C_ADDR  0x6C
@@ -16,12 +17,12 @@
 
 class AP_Baro_FBM320 : public AP_Baro_Backend {
 public:
-    AP_Baro_FBM320(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::Device> dev);
+    AP_Baro_FBM320(AP_Baro &baro, AP_HAL::Device &dev);
 
     /* AP_Baro public interface: */
     void update() override;
 
-    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::Device> dev);
+    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::Device &dev);
 
 private:
     bool init(void);
@@ -29,7 +30,7 @@ private:
     void timer(void);
     void calculate_PT(int32_t UT, int32_t UP, int32_t &pressure, int32_t &temperature);
 
-    AP_HAL::OwnPtr<AP_HAL::Device> dev;
+    AP_HAL::Device *dev;
 
     uint8_t instance;
 
@@ -46,3 +47,5 @@ private:
         uint32_t C4, C5, C7;
     } calibration;
 };
+
+#endif  // AP_BARO_FBM320_ENABLED

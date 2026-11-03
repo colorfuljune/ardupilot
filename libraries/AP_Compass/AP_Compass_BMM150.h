@@ -16,25 +16,30 @@
  */
 #pragma once
 
+#include "AP_Compass_config.h"
+
+#if AP_COMPASS_BMM150_ENABLED
+
 #include <AP_Common/AP_Common.h>
 #include <AP_HAL/AP_HAL.h>
-#include <AP_HAL/I2CDevice.h>
+#include <AP_HAL/Device.h>
 #include <AP_Math/AP_Math.h>
 
 #include "AP_Compass.h"
 #include "AP_Compass_Backend.h"
 
+#define BMM150_I2C_ADDR_MIN 0x10
+#define BMM150_I2C_ADDR_MAX 0x13
+
 class AP_Compass_BMM150 : public AP_Compass_Backend
 {
 public:
-    static AP_Compass_Backend *probe(AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev, enum Rotation rotation);
-
-    void read() override;
+    static AP_Compass_Backend *probe(AP_HAL::OwnPtr<AP_HAL::Device> dev, bool force_external, enum Rotation rotation);
 
     static constexpr const char *name = "BMM150";
 
 private:
-    AP_Compass_BMM150(AP_HAL::OwnPtr<AP_HAL::Device> dev, enum Rotation rotation);
+    AP_Compass_BMM150(AP_HAL::OwnPtr<AP_HAL::Device> dev, bool force_external, enum Rotation rotation);
 
     /**
      * Device periodic callback to read data from the sensor.
@@ -42,12 +47,10 @@ private:
     bool init();
     void _update();
     bool _load_trim_values();
-    int16_t _compensate_xy(int16_t xy, uint32_t rhall, int32_t txy1, int32_t txy2);
-    int16_t _compensate_z(int16_t z, uint32_t rhall);
+    int16_t _compensate_xy(int16_t xy, uint32_t rhall, int32_t txy1, int32_t txy2) const;
+    int16_t _compensate_z(int16_t z, uint32_t rhall) const;
 
     AP_HAL::OwnPtr<AP_HAL::Device> _dev;
-
-    uint8_t _compass_instance;
 
     struct {
         int8_t x1;
@@ -64,6 +67,8 @@ private:
     } _dig;
 
     uint32_t _last_read_ms;
-    AP_HAL::Util::perf_counter_t _perf_err;
     enum Rotation _rotation;
+    bool _force_external;
 };
+
+#endif  // AP_COMPASS_BMM150_ENABLED

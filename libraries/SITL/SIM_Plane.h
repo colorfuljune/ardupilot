@@ -21,6 +21,8 @@
 #include "SIM_Aircraft.h"
 #include "SIM_ICEngine.h"
 #include <Filter/LowPassFilter.h>
+#include <AP_InternalError/AP_InternalError.h>
+#include <AP_JSON/AP_JSON.h>
 
 namespace SITL {
 
@@ -36,16 +38,15 @@ public:
 
     /* static object creator */
     static Aircraft *create(const char *frame_str) {
-        return new Plane(frame_str);
+        return NEW_NOTHROW Plane(frame_str);
     }
 
 protected:
     const float hover_throttle = 0.7f;
-    const float air_density = 1.225; // kg/m^3 at sea level, ISA conditions
     float angle_of_attack;
     float beta;
 
-    struct {
+    const struct Coefficients {
         // from last_letter skywalker_2013/aerodynamics.yaml
         // thanks to Georacer!
         float s = 0.45;
@@ -89,17 +90,23 @@ protected:
         // the X CoG offset should be -0.02, but that makes the plane too tail heavy
         // in manual flight. Adjusted to -0.15 gives reasonable flight
         Vector3f CGOffset{-0.15, 0, -0.05};
-    } coefficient;
+    } default_coefficients;
+
+    struct Coefficients coefficient;
 
     float thrust_scale;
     bool reverse_thrust;
     bool elevons;
     bool vtail;
     bool dspoilers;
+    bool redundant;
     bool reverse_elevator_rudder;
     bool ice_engine;
     bool tailsitter;
+    bool aerobatic;
+    bool copter_tailsitter;
     bool have_launcher;
+    bool have_steering;
     float launch_accel;
     float launch_time;
     uint64_t launch_start_ms;
@@ -114,14 +121,28 @@ protected:
         choke_servo,
         ignition_servo,
         starter_servo,
-        slewrate
+        slewrate,
+        true
     };
 
+    // load aero coefficients from a json model file
+    void load_coeffs(const char *model_json);
     float liftCoeff(float alpha) const;
     float dragCoeff(float alpha) const;
     Vector3f getForce(float inputAileron, float inputElevator, float inputRudder) const;
     Vector3f getTorque(float inputAileron, float inputElevator, float inputRudder, float inputThrust, const Vector3f &force) const;
-    void calculate_forces(const struct sitl_input &input, Vector3f &rot_accel, Vector3f &body_accel);
+    void calculate_forces(const struct sitl_input &input, Vector3f &rot_accel);
+
+private:
+    // json parsing helpers (TODO reduce code duplication)
+    void parse_float(AP_JSON::value val, const char* label, float &param);
+    void parse_vector3(AP_JSON::value val, const char* label, Vector3f &param);
+
+    void update_battery(const struct sitl_input &input) override;
+    // Plane needs the sitl_input, should never use the parent's input-free version.
+    // (Using it would be using the wrong battery model, but it would silently work.)
+    void update_battery() override { INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control); };
+    bool battery_is_empty() { return battery_voltage < 0.5f; };
 };
 
 } // namespace SITL

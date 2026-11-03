@@ -1,5 +1,7 @@
+# flake8: noqa
+
 """
-WAF Tool to select the correct toolchain based on the target archtecture.
+WAF Tool to select the correct toolchain based on the target architecture.
 
 This tool loads compiler_c and compiler_cxx, so you don't need to load them
 (and you must not load them before this tool). Use the environment variable
@@ -21,10 +23,11 @@ from waflib import Logs
 
 import os
 import re
+import sys
 
 @conf
 def find_gxx(conf):
-    names = ['g++', 'c++']
+    names = ['g++', 'eg++', 'c++']
     if conf.env.TOOLCHAIN != 'native':
         names = ['%s-%s' % (conf.env.TOOLCHAIN, n) for n in names]
     cxx = conf.find_program(names, var='CXX')
@@ -33,7 +36,7 @@ def find_gxx(conf):
 
 @conf
 def find_gcc(conf):
-    names = ['gcc', 'cc']
+    names = ['gcc', 'egcc', 'cc']
     if conf.env.TOOLCHAIN != 'native':
         names = ['%s-%s' % (conf.env.TOOLCHAIN, n) for n in names]
     cc = conf.find_program(names, var='CC')
@@ -49,7 +52,7 @@ def _clang_cross_support(cfg):
     try:
         cfg.find_program(prefix + 'gcc', var='CROSS_GCC')
     except Errors.ConfigurationError as e:
-        cfg.fatal('toolchain: clang: couldn\'t find cross GCC', ex=e)
+        cfg.fatal("toolchain: clang: couldn't find cross GCC", ex=e)
 
     environ = dict(os.environ)
     if 'TOOLCHAIN_CROSS_AR' in environ:
@@ -62,7 +65,7 @@ def _clang_cross_support(cfg):
             environ=environ,
         )
     except Errors.ConfigurationError as e:
-        cfg.fatal('toolchain: clang: couldn\'t find toolchain path', ex=e)
+        cfg.fatal("toolchain: clang: couldn't find toolchain path", ex=e)
 
     toolchain_path = os.path.join(cfg.env.TOOLCHAIN_CROSS_AR[0], '..', '..')
     toolchain_path = os.path.abspath(toolchain_path)
@@ -118,7 +121,7 @@ def _set_pkgconfig_crosscompilation_wrapper(cfg):
 
     @conf
     def new_validate_cfg(kw):
-        if not 'path' in kw:
+        if 'path' not in kw:
             if not cfg.env.PKGCONFIG:
                 cfg.find_program('%s-pkg-config' % cfg.env.TOOLCHAIN, var='PKGCONFIG')
             kw['path'] = cfg.env.PKGCONFIG
@@ -132,21 +135,39 @@ def configure(cfg):
     _filter_supported_cxx_compilers('g++', 'clang++')
 
     cfg.msg('Using toolchain', cfg.env.TOOLCHAIN)
+    if cfg.env.TOOLCHAIN == "custom":
+        return
 
     if cfg.env.TOOLCHAIN == 'native':
-        cfg.load('compiler_cxx compiler_c')
-
-        if not cfg.options.disable_gccdeps:
-            cfg.load('gccdeps')
+        cfg.load('compiler_cxx compiler_c gccdeps')
+        cfg.find_program('nm', var='NM')
 
         return
 
-    _set_pkgconfig_crosscompilation_wrapper(cfg)
-    cfg.find_program('%s-ar' % cfg.env.TOOLCHAIN, var='AR', quiet=True)
-    cfg.load('compiler_cxx compiler_c')
+    if cfg.env.TOOLCHAIN == 'emscripten':
+        cc = cfg.find_program('emcc', var='CC')
+        # Waf's probe requires EMSCRIPTEN; restore CC afterwards so it is not defined during compilation.
+        cfg.env.CC = cc + ['-DEMSCRIPTEN=1']
+        cfg.load('c_emscripten')
+        cfg.env.CC = cc
+        cfg.env.cstlib_PATTERN = 'lib%s.a'
+        cfg.env.cxxstlib_PATTERN = 'lib%s.a'
+        # Waf adds this PE/COFF option, which wasm-ld does not support.
+        cfg.env.LINKFLAGS = [f for f in cfg.env.LINKFLAGS if f != '-Wl,--enable-auto-import']
+        return
 
-    if not cfg.options.disable_gccdeps:
-        cfg.load('gccdeps')
+    _set_pkgconfig_crosscompilation_wrapper(cfg)
+    if sys.platform.startswith("cygwin"):
+        # on cygwin arm-none-eabi-ar doesn't support the @FILE syntax for splitting long lines
+        cfg.find_program('ar', var='AR', quiet=True)
+    else:
+        cfg.find_program('%s-ar' % cfg.env.TOOLCHAIN, var='AR', quiet=True)
+    cfg.load('compiler_cxx compiler_c gccdeps')
+
+    if sys.platform.startswith("cygwin"):
+        cfg.find_program('nm', var='NM')
+    else:
+        cfg.find_program('%s-nm' % cfg.env.TOOLCHAIN, var='NM')
 
     if cfg.env.COMPILER_CC == 'clang':
         cfg.env.CFLAGS += cfg.env.CLANG_FLAGS

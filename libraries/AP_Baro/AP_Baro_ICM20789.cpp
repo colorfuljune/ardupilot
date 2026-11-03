@@ -13,17 +13,16 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <AP_HAL/AP_HAL.h>
-#include <AP_HAL/I2CDevice.h>
-#include <utility>
-
-#include <AP_Common/AP_Common.h>
-#include <AP_HAL/AP_HAL.h>
-#include <AP_Math/AP_Math.h>
-#include <AP_BoardConfig/AP_BoardConfig.h>
 #include "AP_Baro_ICM20789.h"
 
-#include <utility>
+#if AP_BARO_ICM20789_ENABLED
+
+#include <AP_HAL/AP_HAL.h>
+#include <AP_HAL/Device.h>
+
+#include <AP_Common/AP_Common.h>
+#include <AP_BoardConfig/AP_BoardConfig.h>
+
 #include <stdio.h>
 
 #include <AP_Math/AP_Math.h>
@@ -65,22 +64,19 @@ extern const AP_HAL::HAL &hal;
 /*
   constructor
  */
-AP_Baro_ICM20789::AP_Baro_ICM20789(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::I2CDevice> _dev, AP_HAL::OwnPtr<AP_HAL::Device> _dev_imu)
+AP_Baro_ICM20789::AP_Baro_ICM20789(AP_Baro &baro, AP_HAL::Device &_dev, AP_HAL::Device &_dev_imu)
     : AP_Baro_Backend(baro)
-    , dev(std::move(_dev))
-    , dev_imu(std::move(_dev_imu))
+    , dev(&_dev)
+    , dev_imu(&_dev_imu)
 {
 }
 
 AP_Baro_Backend *AP_Baro_ICM20789::probe(AP_Baro &baro,
-                                         AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev,
-                                         AP_HAL::OwnPtr<AP_HAL::Device> dev_imu)
+                                         AP_HAL::Device &dev,
+                                         AP_HAL::Device &dev_imu)
 {
     debug("Probing for ICM20789 baro\n");
-    if (!dev || !dev_imu) {
-        return nullptr;
-    }
-    AP_Baro_ICM20789 *sensor = new AP_Baro_ICM20789(baro, std::move(dev), std::move(dev_imu));
+    AP_Baro_ICM20789 *sensor = NEW_NOTHROW AP_Baro_ICM20789(baro, dev, dev_imu);
     if (!sensor || !sensor->init()) {
         delete sensor;
         return nullptr;
@@ -349,7 +345,7 @@ void AP_Baro_ICM20789::update()
 // @Field: Praw: raw pressure from sensor
 // @Field: P: pressure
 // @Field: T: temperature
-    AP::logger().Write("ICMB", "TimeUS,Traw,Praw,P,T", "QIIff",
+    AP::logger().WriteStreaming("ICMB", "TimeUS,Traw,Praw,P,T", "QIIff",
                                            AP_HAL::micros64(),
                                            dd.Traw, dd.Praw, dd.P, dd.T);
 #endif
@@ -363,3 +359,4 @@ void AP_Baro_ICM20789::update()
     }
 }
 
+#endif  // AP_BARO_ICM20789_ENABLED

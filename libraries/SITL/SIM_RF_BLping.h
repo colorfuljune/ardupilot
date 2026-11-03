@@ -15,7 +15,7 @@
 /*
   Simulator for the BLping rangefinder
 
-./Tools/autotest/sim_vehicle.py --gdb --debug -v ArduSub -A --uartF=sim:blping --speedup=1 -l 33.810313,-118.393867,0,185
+./Tools/autotest/sim_vehicle.py --gdb --debug -v ArduSub -A --serial5=sim:blping --speedup=1 -l 33.810313,-118.393867,0,185
 
 param set SERIAL5_PROTOCOL 9
 param set RNGFND1_TYPE 23
@@ -36,7 +36,9 @@ namespace SITL {
 class RF_BLping : public SerialRangeFinder {
 public:
 
-    uint32_t packet_for_alt(uint16_t alt_cm, uint8_t *buffer, uint8_t buflen) override;
+    static SerialRangeFinder *create() { return NEW_NOTHROW RF_BLping(); }
+
+    uint32_t packet_for_alt(float alt_m, uint8_t *buffer, uint8_t buflen) override;
 
 };
 

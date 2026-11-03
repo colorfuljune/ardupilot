@@ -38,6 +38,7 @@ public:
 #define I2C_M_RD 1
 #define I2C_RDWR 0
     struct i2c_msg {
+        uint8_t bus;
         uint8_t addr;
         uint8_t flags;
         uint8_t *buf;
@@ -50,6 +51,12 @@ public:
     // end "the following"
 
 private:
+    // one-time setup of the simulated device table.  Self-guarded by
+    // initialised and called lazily from update()/ioctl() (either may
+    // run first), so the simulated bus needs no external init() call.
+    void init();
+    bool initialised;
+
     int ioctl_rdwr(i2c_rdwr_ioctl_data *data);
 
 };

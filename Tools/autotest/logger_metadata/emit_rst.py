@@ -1,13 +1,15 @@
-#!/usr/bin/env python
-
-from __future__ import print_function
-
+'''
+AP_FLAKE8_CLEAN
+'''
 import emitter
+
 
 class RSTEmitter(emitter.Emitter):
     def preface(self):
-        return """.. Dynamically generated list of Logger Messages
-.. This page was generated using Tools/autotest/logger_metdata/parse.py
+        metadata = self.firmware_metadata()
+        metadata_block = f"\n\n{metadata}" if metadata else ""
+        return f""".. Dynamically generated list of Logger Messages
+.. This page was generated using Tools/autotest/logger_metdata/parse.py{metadata_block}
 
 .. DO NOT EDIT
 
@@ -19,6 +21,17 @@ Onboard Message Log Messages
 This is a list of log messages which may be present in logs produced and stored onboard ArduPilot vehicles.
 
 """
+
+    def firmware_metadata(self):
+        lines = []
+        if self.git_sha is not None or self.git_branch is not None:
+            lines.append(".. Firmware metadata")
+        if self.git_sha is not None:
+            lines.append(f".. git_sha: {self.git_sha}")
+        if self.git_branch is not None:
+            lines.append(f".. git_branch: {self.git_branch}")
+        return "\n".join(lines)
+
     def postface(self):
         return ""
 
@@ -26,29 +39,60 @@ This is a list of log messages which may be present in logs produced and stored 
         self.fh = open("LogMessages.rst", mode='w')
         print(self.preface(), file=self.fh)
 
-    def emit(self, doccos):
+    def emit(self, doccos, enumerations):
         self.start()
         for docco in doccos:
             print('.. _%s:' % docco.name, file=self.fh)
             print("", file=self.fh)
             desc = docco.description
-            if desc is None:
-                desc = ""
-            line = '%s: %s' % (docco.name, desc)
-            print(line, file=self.fh)
-            print("~" * len(line), file=self.fh)
+            print(docco.name, file=self.fh)
+            print("~" * len(docco.name), file=self.fh)
+            if desc is not None:
+                print("\n%s\n" % desc, file=self.fh)
 
             rows = []
             for f in docco.fields_order:
+                # Populate the description column
                 if "description" in docco.fields[f]:
                     fdesc = docco.fields[f]["description"]
                 else:
                     fdesc = ""
-                rows.append([f, fdesc])
-#                if "bits" in docco.fields[f]:
-#                    print('                <bits>%s</bits>' %
-#                          docco.fields[f]["bits"], file=self.fh)
-            print(self.tablify(rows), file=self.fh)
+                # Initialise Type/Unit and check for enum/bitfields
+                ftypeunit = ""
+                fieldnamething = None
+                if "bitmaskenum" in docco.fields[f]:
+                    fieldnamething = "bitmaskenum"
+                    table_label = "Bitmask values"
+                    ftypeunit = "bitmask"
+                elif "valueenum" in docco.fields[f]:
+                    fieldnamething = "valueenum"
+                    table_label = "Values"
+                    ftypeunit = "enum"
+                # If an enum/bitmask is defined, build the table
+                if fieldnamething is not None:
+                    enum_name = docco.fields[f][fieldnamething]
+                    if enum_name not in enumerations:
+                        raise Exception("Unknown enum (%s) (have %s)" %
+                                        (enum_name, "\n".join(sorted(enumerations.keys()))))
+                    enumeration = enumerations[enum_name]
+                    bitmaskrows = []
+                    for enumentry in enumeration.entries:
+                        # print("enumentry: %s" % str(enumentry))
+                        comment = enumentry.comment
+                        if comment is None:
+                            comment = ""
+                        bitmaskrows.append([enumentry.name, str(enumentry.value), comment])
+                    fdesc += "\n%s:\n\n%s" % (table_label, self.tablify(bitmaskrows))
+                # Populate the Type/Units column
+                if "units" in docco.fields[f] and docco.fields[f]["units"] != "":
+                    ftypeunit = docco.fields[f]["units"]
+                elif "fmt" in docco.fields[f] and "char" in docco.fields[f]["fmt"]:
+                    ftypeunit = docco.fields[f]["fmt"]
+                # Add the new row
+                rows.append([f, ftypeunit, fdesc])
+
+            if rows:
+                print(self.tablify(rows), file=self.fh)
 
             print("", file=self.fh)
         self.stop()
@@ -56,7 +100,6 @@ This is a list of log messages which may be present in logs produced and stored 
     def stop(self):
         print(self.postface(), file=self.fh)
         self.fh.close()
-
 
     # tablify swiped from rstemit.py
 
@@ -178,4 +221,3 @@ This is a list of log messages which may be present in logs produced and stored 
             ret += bar + "\n"
 
         return ret
-

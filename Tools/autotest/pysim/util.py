@@ -1,69 +1,53 @@
-from __future__ import print_function
+'''
+AP_FLAKE8_CLEAN
+'''
+
+from __future__ import annotations
 
 import atexit
 import math
 import os
-import random
 import re
 import shlex
+import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import time
-from math import acos, atan2, cos, pi, sqrt
 
 import pexpect
 
-from . rotmat import Matrix3, Vector3
-
-if (sys.version_info[0] >= 3):
-    ENCODING = 'ascii'
-else:
-    ENCODING = None
-
 RADIUS_OF_EARTH = 6378100.0  # in meters
-
 
 # List of open terminal windows for macosx
 windowID = []
-
-def m2ft(x):
-    """Meters to feet."""
-    return float(x) / 0.3048
-
-
-def ft2m(x):
-    """Feet to meters."""
-    return float(x) * 0.3048
-
-
-def kt2mps(x):
-    return x * 0.514444444
-
-
-def mps2kt(x):
-    return x / 0.514444444
 
 
 def topdir():
     """Return top of git tree where autotest is running from."""
     d = os.path.dirname(os.path.realpath(__file__))
-    assert(os.path.basename(d) == 'pysim')
+    assert os.path.basename(d) == 'pysim'
     d = os.path.dirname(d)
-    assert(os.path.basename(d) == 'autotest')
+    assert os.path.basename(d) == 'autotest'
     d = os.path.dirname(d)
-    assert(os.path.basename(d) == 'Tools')
+    assert os.path.basename(d) == 'Tools'
     d = os.path.dirname(d)
     return d
 
 
+def relcurdir(path):
+    """Return a path relative to current dir"""
+    return os.path.relpath(path, os.getcwd())
+
+
 def reltopdir(path):
-    """Return a path relative to topdir()."""
+    """Returns the normalized ABSOLUTE path for 'path', where path is a path relative to topdir"""
     return os.path.normpath(os.path.join(topdir(), path))
 
 
-def run_cmd(cmd, directory=".", show=True, output=False, checkfail=True):
+def run_cmd(cmd, directory=".", show=True, output=False, checkfail=True, env=None):
     """Run a shell command."""
     shell = False
     if not isinstance(cmd, list):
@@ -72,18 +56,18 @@ def run_cmd(cmd, directory=".", show=True, output=False, checkfail=True):
     if show:
         print("Running: (%s) in (%s)" % (cmd_as_shell(cmd), directory,))
     if output:
-        return subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, cwd=directory).communicate()[0]
+        return subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, cwd=directory, env=env).communicate()[0]
     elif checkfail:
-        return subprocess.check_call(cmd, shell=shell, cwd=directory)
+        return subprocess.check_call(cmd, shell=shell, cwd=directory, env=env)
     else:
-        return subprocess.call(cmd, shell=shell, cwd=directory)
+        return subprocess.call(cmd, shell=shell, cwd=directory, env=env)
 
 
 def rmfile(path):
     """Remove a file if it exists."""
     try:
         os.unlink(path)
-    except Exception:
+    except (OSError, FileNotFoundError):
         pass
 
 
@@ -96,17 +80,71 @@ def relwaf():
     return "./modules/waf/waf-light"
 
 
-def waf_configure(board, j=None, debug=False, math_check_indexes=False, extra_args=[]):
+def waf_configure(board,
+                  j=None,
+                  debug=False,
+                  math_check_indexes=False,
+                  coverage=False,
+                  ekf_single=False,
+                  postype_single=False,
+                  force_32bit=False,
+                  extra_args: list | None = None,
+                  extra_hwdef=None,
+                  ubsan=False,
+                  ubsan_abort=False,
+                  num_aux_imus=0,
+                  dronecan_tests=False,
+                  extra_defines: dict | None = None,
+                  asan=False):
+
+    if extra_args is None:
+        extra_args = []
+    if extra_defines is None:
+        extra_defines = {}
+
     cmd_configure = [relwaf(), "configure", "--board", board]
     if debug:
         cmd_configure.append('--debug')
+    if coverage:
+        cmd_configure.append('--coverage')
     if math_check_indexes:
         cmd_configure.append('--enable-math-check-indexes')
+    if ekf_single:
+        cmd_configure.append('--ekf-single')
+    if postype_single:
+        cmd_configure.append('--postype-single')
+    if force_32bit:
+        cmd_configure.append('--force-32bit')
+    if ubsan:
+        cmd_configure.append('--ubsan')
+    if ubsan_abort:
+        cmd_configure.append('--ubsan-abort')
+    if num_aux_imus > 0:
+        cmd_configure.append('--num-aux-imus=%u' % num_aux_imus)
+    if dronecan_tests:
+        cmd_configure.append('--enable-dronecan-tests')
+    if extra_hwdef is not None:
+        cmd_configure.extend(['--extra-hwdef', extra_hwdef])
+    for nv in extra_defines.items():
+        cmd_configure.extend(['--define', "%s=%s" % nv])
     if j is not None:
         cmd_configure.extend(['-j', str(j)])
     pieces = [shlex.split(x) for x in extra_args]
     for piece in pieces:
         cmd_configure.extend(piece)
+
+    if asan:
+        cmd_configure.append('--asan')
+        if not debug:
+            cmd_configure.append('--debug')  # waf enforces this; be explicit
+        # The compiler is left alone so that CXX/CC, if the caller has set
+        # them, reach waf as they would otherwise.  ASAN works with gcc as
+        # well as clang, and picking clang here would have a surprising
+        # side effect: AP_Networking_Config.h disables
+        # AP_NETWORKING_ENABLED for clang on linux, so choosing the
+        # compiler silently compiles all of the networking code out of
+        # every sanitizer build.
+
     run_cmd(cmd_configure, directory=topdir(), checkfail=True)
 
 
@@ -114,8 +152,37 @@ def waf_clean():
     run_cmd([relwaf(), "clean"], directory=topdir(), checkfail=True)
 
 
-def build_SITL(build_target, j=None, debug=False, board='sitl', clean=True, configure=True, math_check_indexes=False, extra_configure_args=[]):
-    """Build desktop SITL."""
+def waf_build(target=None):
+    cmd = [relwaf(), "build"]
+    if target is not None:
+        cmd.append(target)
+    run_cmd(cmd, directory=topdir(), checkfail=True)
+
+
+def build_SITL(
+        build_target,
+        board='sitl',
+        clean=True,
+        configure=True,
+        coverage=False,
+        debug=False,
+        ekf_single=False,
+        extra_configure_args: list | None = None,
+        extra_defines: dict | None = None,
+        j=None,
+        math_check_indexes=False,
+        postype_single=False,
+        force_32bit=False,
+        ubsan=False,
+        ubsan_abort=False,
+        num_aux_imus=0,
+        dronecan_tests=False,
+        asan=False,
+):
+    if extra_configure_args is None:
+        extra_configure_args = []
+    if extra_defines is None:
+        extra_defines = {}
 
     # first configure
     if configure:
@@ -123,7 +190,17 @@ def build_SITL(build_target, j=None, debug=False, board='sitl', clean=True, conf
                       j=j,
                       debug=debug,
                       math_check_indexes=math_check_indexes,
-                      extra_args=extra_configure_args)
+                      ekf_single=ekf_single,
+                      postype_single=postype_single,
+                      coverage=coverage,
+                      force_32bit=force_32bit,
+                      ubsan=ubsan,
+                      ubsan_abort=ubsan_abort,
+                      extra_defines=extra_defines,
+                      num_aux_imus=num_aux_imus,
+                      dronecan_tests=dronecan_tests,
+                      extra_args=extra_configure_args,
+                      asan=asan,)
 
     # then clean
     if clean:
@@ -137,9 +214,73 @@ def build_SITL(build_target, j=None, debug=False, board='sitl', clean=True, conf
     return True
 
 
-def build_examples(board, j=None, debug=False, clean=False):
+def build_SITL_frame(
+        vehicleinfo_key,
+        frame,
+        extra_configure_args: list | None = None,
+        **build_kwargs,
+):
+    '''Build the main vehicle SITL plus (when defined) the AP_Periph
+    companion for a frame entry in pysim/vehicleinfo.json.
+
+    Reads the frame's `waf_target`, `configure_args` and (optional)
+    `periph_board` fields, then runs `build_SITL()` once for the vehicle
+    and (if the frame defines a periph_board) once more for the
+    companion AP_Periph build. `configure_args` are passed through to
+    waf configure for both builds and prepended to any caller-supplied
+    `extra_configure_args`.
+
+    `build_kwargs` are forwarded verbatim to `build_SITL()` (e.g. debug,
+    clean, j, ...).
+
+    Returns the frame's options dict so callers can read
+    `periph_extra_args` / `periph_params_filename` for follow-up work.
+    '''
+    from pysim import vehicleinfo
+    vinfo = vehicleinfo.VehicleInfo()
+    frame_opts = vinfo.options[vehicleinfo_key]['frames'][frame]
+
+    configure_args = list(frame_opts.get('configure_args', []))
+    if extra_configure_args is not None:
+        configure_args += list(extra_configure_args)
+
+    build_SITL(frame_opts['waf_target'],
+               extra_configure_args=configure_args,
+               **build_kwargs)
+
+    periph_board = frame_opts.get('periph_board')
+    if periph_board is not None:
+        build_SITL('bin/AP_Periph',
+                   board=periph_board,
+                   extra_configure_args=configure_args,
+                   **build_kwargs)
+
+    return frame_opts
+
+
+def build_examples(board, j=None, debug=False, clean=False, configure=True, math_check_indexes=False, coverage=False,
+                   ekf_single=False, postype_single=False, force_32bit=False, ubsan=False, ubsan_abort=False,
+                   num_aux_imus=0, dronecan_tests=False,
+                   extra_configure_args: list | None = None,
+                   asan=False):
+    if extra_configure_args is None:
+        extra_configure_args = []
+
     # first configure
-    waf_configure(board, j=j, debug=debug)
+    if configure:
+        waf_configure(board,
+                      j=j,
+                      debug=debug,
+                      math_check_indexes=math_check_indexes,
+                      ekf_single=ekf_single,
+                      postype_single=postype_single,
+                      coverage=coverage,
+                      force_32bit=force_32bit,
+                      ubsan=ubsan,
+                      ubsan_abort=ubsan_abort,
+                      extra_args=extra_configure_args,
+                      dronecan_tests=dronecan_tests,
+                      asan=asan)
 
     # then clean
     if clean:
@@ -150,9 +291,56 @@ def build_examples(board, j=None, debug=False, clean=False):
     run_cmd(cmd_make, directory=topdir(), checkfail=True, show=True)
     return True
 
-def build_tests(board, j=None, debug=False, clean=False):
+
+def build_replay(board, j=None, debug=False, clean=False):
     # first configure
     waf_configure(board, j=j, debug=debug)
+
+    # then clean
+    if clean:
+        waf_clean()
+
+    # then build
+    cmd_make = [relwaf(), "replay"]
+    run_cmd(cmd_make, directory=topdir(), checkfail=True, show=True)
+    return True
+
+
+def build_tests(board,
+                j=None,
+                debug=False,
+                clean=False,
+                configure=True,
+                math_check_indexes=False,
+                coverage=False,
+                ekf_single=False,
+                postype_single=False,
+                force_32bit=False,
+                ubsan=False,
+                ubsan_abort=False,
+                num_aux_imus=0,
+                dronecan_tests=False,
+                extra_configure_args: list | None = None,
+                asan=False):
+    if extra_configure_args is None:
+        extra_configure_args = []
+
+    # first configure
+    if configure:
+        waf_configure(board,
+                      j=j,
+                      debug=debug,
+                      math_check_indexes=math_check_indexes,
+                      ekf_single=ekf_single,
+                      postype_single=postype_single,
+                      coverage=coverage,
+                      force_32bit=force_32bit,
+                      ubsan=ubsan,
+                      ubsan_abort=ubsan_abort,
+                      num_aux_imus=num_aux_imus,
+                      dronecan_tests=dronecan_tests,
+                      extra_args=extra_configure_args,
+                      asan=asan,)
 
     # then clean
     if clean:
@@ -162,19 +350,18 @@ def build_tests(board, j=None, debug=False, clean=False):
     run_cmd([relwaf(), "tests"], directory=topdir(), checkfail=True, show=True)
     return True
 
+
 # list of pexpect children to close on exit
 close_list = []
 
 
 def pexpect_autoclose(p):
     """Mark for autoclosing."""
-    global close_list
     close_list.append(p)
 
 
 def pexpect_close(p):
     """Close a pexpect child."""
-    global close_list
 
     ex = None
     if p is None:
@@ -187,18 +374,35 @@ def pexpect_close(p):
         ex = e
         pass
     if ex is None:
-        # give the process some time to go away
-        for i in range(20):
+        # give the process some time to go away.  SITL exits within a
+        # couple of milliseconds, so poll finely:
+        for i in range(100):
             if not p.isalive():
+                # the child is gone; pexpect's close() otherwise sleeps
+                # for delayafterclose waiting for it:
+                p.ptyproc.delayafterclose = 0
+                p.ptyproc.delayafterterminate = 0
                 break
-            time.sleep(0.05)
+            # MAVProxy's SIGTERM handler only sets a flag; its main
+            # thread is blocked reading stdin via readline, and that
+            # read is restarted once the handler returns (PEP 475), so
+            # the flag goes unnoticed until some input arrives.  Feed it
+            # a newline to release the read.  We do this each time
+            # around the loop as the first newline can arrive before the
+            # signal has been handled.  Other children do not read
+            # stdin, so this is harmless to them:
+            try:
+                p.send("\n")
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.01)
     try:
         p.close()
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     try:
         p.close(force=True)
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     if p in close_list:
         close_list.remove(p)
@@ -206,17 +410,15 @@ def pexpect_close(p):
 
 def pexpect_close_all():
     """Close all pexpect children."""
-    global close_list
     for p in close_list[:]:
         pexpect_close(p)
 
 
 def pexpect_drain(p):
     """Drain any pending input."""
-    import pexpect
     try:
         p.read_nonblocking(1000, timeout=0)
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -228,47 +430,192 @@ def make_safe_filename(text):
     """Return a version of text safe for use as a filename."""
     r = re.compile("([^a-zA-Z0-9_.+-])")
     text.replace('/', '-')
-    filename = r.sub(lambda m: "%" + str(hex(ord(str(m.group(1))))).upper(), text)
+    filename = r.sub(lambda m: str(hex(ord(str(m.group(1))))).upper(), text)
     return filename
 
 
 def valgrind_log_filepath(binary, model):
+    if model is None:
+        model = 'None'
     return make_safe_filename('%s-%s-valgrind.log' % (os.path.basename(binary), model,))
+
+
+def asan_log_filepath(binary, model):
+    if model is None:
+        model = 'None'
+    # ASAN appends .<pid> to this path; glob with asan_log_filepath(...)+".*"
+    return make_safe_filename('%s-%s-asan' % (os.path.basename(binary), model))
 
 
 def kill_screen_gdb():
     cmd = ["screen", "-X", "-S", "ardupilot-gdb", "quit"]
     subprocess.Popen(cmd)
 
+
 def kill_mac_terminal():
-    global windowID
     for window in windowID:
         cmd = ("osascript -e \'tell application \"Terminal\" to close "
-            "(window(get index of window id %s))\'" % window)
+               "(window(get index of window id %s))\'" % window)
         os.system(cmd)
+
+
+class FakeMacOSXSpawn(object):
+    """something that looks like a pspawn child so we can ignore attempts
+    to pause (and otherwise kill(1) SITL.  MacOSX using osascript to
+    start/stop sitl
+    """
+    def __init__(self):
+        pass
+
+    def progress(self, message):
+        print(message)
+
+    def kill(self, sig):
+        # self.progress("FakeMacOSXSpawn: ignoring kill(%s)" % str(sig))
+        pass
+
+    def isalive(self):
+        self.progress("FakeMacOSXSpawn: assuming process is alive")
+        return True
+
+
+class PSpawnStdPrettyPrinter(object):
+    '''a fake filehandle-like object which prefixes a string to all lines
+    before printing to stdout/stderr.  To be used to pass to
+    pexpect.spawn's logfile argument
+    '''
+    def __init__(self, output=sys.stdout, prefix="stdout"):
+        self.output = output
+        self.prefix = prefix
+        self.buffer = ""
+
+    def close(self):
+        self.print_prefixed_line(self.buffer)
+
+    def write(self, data):
+        self.buffer += data
+        lines = self.buffer.split("\n")
+        self.buffer = lines[-1]
+        lines.pop()
+        for line in lines:
+            self.print_prefixed_line(line)
+
+    def print_prefixed_line(self, line):
+        print("%s: %s" % (self.prefix, line), file=self.output)
+
+    def flush(self):
+        pass
+
+
+def unix_domain_socket_path(serial, cwd=None):
+    if cwd is None:
+        cwd = os.getcwd()
+    return os.path.join(cwd, "APM-UDS-serial%u" % serial)
+
+
+def unix_domain_socket_serial_args():
+    ret = []
+    for serial in [0, 1, 2, 5, 6, 7, 8]:
+        path = "uds:APM-UDS-serial%u" % serial
+        if serial == 0:
+            path += ":wait"
+        ret.append("--serial%u=%s" % (serial, path))
+    return ret
+
+
+def unix_domain_socket_rcin_path(cwd=None, offset=0):
+    if cwd is None:
+        cwd = os.getcwd()
+    suffix = "" if offset == 0 else str(offset)
+    return os.path.join(cwd, "APM-UDS-rcin%s" % suffix)
+
+
+class UnixDatagramOutput(object):
+    '''a reconnecting Unix domain datagram output'''
+
+    def __init__(self, path):
+        if not path:
+            raise ValueError("Unix domain socket path must be specified")
+        self.path = path
+        self.port = None
+
+    def _connect(self):
+        port = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            port.connect(self.path)
+            port.setblocking(False)
+        except OSError:
+            port.close()
+            return False
+        self.port = port
+        return True
+
+    def close(self):
+        if self.port is not None:
+            self.port.close()
+            self.port = None
+
+    def write(self, buf):
+        if self.port is None and not self._connect():
+            return 0
+        try:
+            return self.port.send(buf)
+        except BlockingIOError:
+            return 0
+        except OSError:
+            self.close()
+            return 0
+
+
+def sitl_rcin_connection(device):
+    if device.startswith("uds:"):
+        return UnixDatagramOutput(device[4:])
+    from pymavlink import mavutil
+    return mavutil.mavudp(device, input=False)
+
 
 def start_SITL(binary,
                valgrind=False,
+               callgrind=False,
+               cwd=None,
                gdb=False,
+               gdb_no_tui=False,
                wipe=False,
-               synthetic_clock=True,
                home=None,
                model=None,
                speedup=1,
-               defaults_filepath=None,
+               sim_rate_hz=None,
+               defaults_filepath: list | None = None,
+               param_defaults=None,  # dictionary
                unhide_parameters=False,
                gdbserver=False,
-               breakpoints=[],
+               breakpoints: list | None = None,
                disable_breakpoints=False,
-               customisations=[],
-               lldb=False):
-
-    if model is None:
-        raise ValueError("model must not be None")
-
+               customisations: list | None = None,
+               lldb=False,
+               strace=False,
+               enable_fgview=False,
+               supplementary=False,
+               stdout_prefix=None,
+               asan=False,
+               unix_domain_socket=False,
+               ):
     """Launch a SITL instance."""
+
+    if defaults_filepath is None:
+        defaults_filepath = []
+    if breakpoints is None:
+        breakpoints = []
+    if customisations is None:
+        customisations = []
+
     cmd = []
-    if valgrind and os.path.exists('/usr/bin/valgrind'):
+    # pexpect doesn't like pathlib:
+    if cwd is not None:
+        cwd = str(cwd)
+    if not isinstance(binary, str):
+        binary = str(binary)
+    if (callgrind or valgrind) and os.path.exists('/usr/bin/valgrind'):
         # we specify a prefix for vgdb-pipe because on Vagrant virtual
         # machines the pipes are created on the mountpoint for the
         # shared directory with the host machine.  mmap's,
@@ -283,14 +630,16 @@ def start_SITL(binary,
             '--vgdb-prefix=%s' % vgdb_prefix,
             '-q',
             '--log-file=%s' % log_file])
+        if callgrind:
+            cmd.extend(["--tool=callgrind"])
     if gdbserver:
         cmd.extend(['gdbserver', 'localhost:3333'])
         if gdb:
             # attach gdb to the gdbserver:
             f = open("/tmp/x.gdb", "w")
             f.write("target extended-remote localhost:3333\nc\n")
-            for breakpoint in breakpoints:
-                f.write("b %s\n" % (breakpoint,))
+            for breakingpoint in breakpoints:
+                f.write("b %s\n" % (breakingpoint,))
             if disable_breakpoints:
                 f.write("disable\n")
             f.close()
@@ -299,10 +648,12 @@ def start_SITL(binary,
     elif gdb:
         f = open("/tmp/x.gdb", "w")
         f.write("set pagination off\n")
-        for breakpoint in breakpoints:
-            f.write("b %s\n" % (breakpoint,))
+        for breakingpoint in breakpoints:
+            f.write("b %s\n" % (breakingpoint,))
         if disable_breakpoints:
             f.write("disable\n")
+        if not gdb_no_tui:
+            f.write("tui enable\n")
         f.write("r\n")
         f.close()
         if sys.platform == "darwin" and os.getenv('DISPLAY'):
@@ -315,11 +666,15 @@ def start_SITL(binary,
                         '-d',
                         '-m',
                         '-S', 'ardupilot-gdb',
-                        'gdb', '-x', '/tmp/x.gdb', binary, '--args'])
+                        'gdb', '--cd', os.getcwd(), '-x', '/tmp/x.gdb', binary, '--args'])
+    elif strace:
+        cmd.append("strace")
+        strace_options = ['-f', '-o', binary + '.strace', '-s', '8000', '-ttt']
+        cmd.extend(strace_options)
     elif lldb:
         f = open("/tmp/x.lldb", "w")
-        for breakpoint in breakpoints:
-            f.write("b %s\n" % (breakpoint,))
+        for breakingpoint in breakpoints:
+            f.write("b %s\n" % (breakingpoint,))
         if disable_breakpoints:
             f.write("disable\n")
         f.write("settings set target.process.stop-on-exec false\n")
@@ -328,40 +683,75 @@ def start_SITL(binary,
         if sys.platform == "darwin" and os.getenv('DISPLAY'):
             cmd.extend(['lldb', '-s', '/tmp/x.lldb', '--'])
         elif os.environ.get('DISPLAY'):
-            cmd.extend(['xterm', '-e', 'lldb', '-s','/tmp/x.lldb', '--'])
+            cmd.extend(['xterm', '-e', 'lldb', '-s', '/tmp/x.lldb', '--'])
         else:
             raise RuntimeError("DISPLAY was not set")
 
     cmd.append(binary)
-    if wipe:
-        cmd.append('-w')
-    if synthetic_clock:
-        cmd.append('-S')
-    if home is not None:
-        cmd.extend(['--home', home])
-    cmd.extend(['--model', model])
-    if speedup != 1:
-        cmd.extend(['--speedup', str(speedup)])
-    if defaults_filepath is not None:
-        if type(defaults_filepath) == list:
-            defaults_filepath = ",".join(defaults_filepath)
-        cmd.extend(['--defaults', defaults_filepath])
-    if unhide_parameters:
-        cmd.extend(['--unhide-groups'])
+
+    if defaults_filepath is None:
+        defaults_filepath = []
+    if not isinstance(defaults_filepath, list):
+        defaults_filepath = [defaults_filepath]
+    defaults = [reltopdir(path) for path in defaults_filepath]
+
+    if param_defaults is not None:
+        text = "".join([f"{name} {value}\n" for (name, value) in param_defaults.items()])
+        filepath = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        print(text, file=filepath)
+        filepath.close()
+        defaults.append(str(filepath.name))
+
+    if not supplementary:
+        if wipe:
+            cmd.append('-w')
+        if home is not None:
+            cmd.extend(['--home', home])
+        if model is not None:
+            cmd.extend(['--model', model])
+        if speedup is not None and speedup != 1:
+            ntf = tempfile.NamedTemporaryFile(mode="w", delete=False)
+            print(f"SIM_SPEEDUP {speedup}", file=ntf)
+            ntf.close()
+            # prepend it so that a caller can override the speedup in
+            # passed-in defaults:
+            defaults = [ntf.name] + defaults
+        if sim_rate_hz is not None:
+            cmd.extend(['--rate', str(sim_rate_hz)])
+        if unhide_parameters:
+            cmd.extend(['--unhide-groups'])
+        if unix_domain_socket:
+            cmd.extend(unix_domain_socket_serial_args())
+            cmd.append("--rc-in-port=uds:APM-UDS-rcin")
+        else:
+            # somewhere for MAVProxy to connect to:
+            cmd.append('--serial1=tcp:2')
+        if enable_fgview:
+            cmd.append("--enable-fgview")
+
+    if len(defaults):
+        cmd.extend(['--defaults', ",".join(defaults)])
+
     cmd.extend(customisations)
 
+    if "--defaults" in customisations:
+        raise ValueError("--defaults must be passed in via defaults_filepath keyword argument, not as part of customisation list")  # noqa
+
+    pexpect_logfile_prefix = stdout_prefix
+    if pexpect_logfile_prefix is None:
+        pexpect_logfile_prefix = os.path.basename(binary)
+    pexpect_logfile = PSpawnStdPrettyPrinter(prefix=pexpect_logfile_prefix)
+
     if (gdb or lldb) and sys.platform == "darwin" and os.getenv('DISPLAY'):
-        global windowID
         # on MacOS record the window IDs so we can close them later
         atexit.register(kill_mac_terminal)
         child = None
         mydir = os.path.dirname(os.path.realpath(__file__))
         autotest_dir = os.path.realpath(os.path.join(mydir, '..'))
         runme = [os.path.join(autotest_dir, "run_in_terminal_window.sh"), 'mactest']
-        runme.extend(cmd) 
-        print(runme)
+        runme.extend(cmd)
         print(cmd)
-        out = subprocess.Popen(runme, stdout=subprocess.PIPE).communicate()[0]
+        out = subprocess.Popen(runme, stdout=subprocess.PIPE, cwd=cwd).communicate()[0]
         out = out.decode('utf-8')
         p = re.compile('tab 1 of window id (.*)')
 
@@ -379,27 +769,48 @@ def start_SITL(binary,
             windowID.append(tabs[0])
         else:
             print("Cannot find %s process terminal" % binary)
+        child = FakeMacOSXSpawn()
     elif gdb and not os.getenv('DISPLAY'):
-        subprocess.Popen(cmd)
+        subprocess.Popen(cmd, cwd=cwd)
         atexit.register(kill_screen_gdb)
         # we are expected to return a pexpect wrapped around the
         # stdout of the ArduPilot binary.  Not going to happen until
         # AP gets a redirect-stdout-to-filehandle option.  So, in the
         # meantime, return a dummy:
         return pexpect.spawn("true", ["true"],
-                             logfile=sys.stdout,
-                             encoding=ENCODING,
+                             logfile=pexpect_logfile,
+                             encoding='ascii',
                              timeout=5)
     else:
         print("Running: %s" % cmd_as_shell(cmd))
 
-
         first = cmd[0]
         rest = cmd[1:]
-        child = pexpect.spawn(first, rest, logfile=sys.stdout, encoding=ENCODING, timeout=5)
+        spawn_env = dict(os.environ)
+        # Tell SITL where to find dumpstack.sh and dumpcore.sh.  It looks
+        # for them relative to its working directory, which works for a
+        # serial run - that runs in the repo root - but not under
+        # --parallel, where each instance runs in its own directory and
+        # every lookup misses.  A panic there produces no backtrace at
+        # all, which is exactly when one is wanted.
+        spawn_env.setdefault('AP_SCRIPTS_DIR_PATH',
+                             os.path.abspath(reltopdir('Tools/scripts')))
+        if asan:
+            log_base = asan_log_filepath(binary=binary, model=model)
+            existing = spawn_env.get('ASAN_OPTIONS', '')
+            # Append our options after any inherited ones so that our
+            # log_path and verbosity=0 take precedence (last value wins).
+            # verbosity=0 suppresses startup noise that would make the log
+            # non-empty even when no errors are detected, and
+            # print_suppressions=0 stops the summary of the leaks we
+            # deliberately ignore doing the same.
+            our_opts = 'log_path=%s:symbolize=1:verbosity=0:print_suppressions=0' % log_base
+            spawn_env['ASAN_OPTIONS'] = (existing + ':' + our_opts) if existing else our_opts
+            # stop llvm-symbolizer trying to fetch debug info over the
+            # network, which blocks for ~90 seconds a frame
+            spawn_env['DEBUGINFOD_URLS'] = ''
+        child = pexpect.spawn(str(first), rest, logfile=pexpect_logfile, encoding='ascii', timeout=5, cwd=cwd, env=spawn_env)
         pexpect_autoclose(child)
-    # give time for parameters to properly setup
-    time.sleep(3)
     if gdb or lldb:
         # if we run GDB we do so in an xterm.  "Waiting for
         # connection" is never going to appear on xterm's output.
@@ -408,27 +819,92 @@ def start_SITL(binary,
         # TODO: have a SITL-compiled ardupilot able to have its
         # console on an output fd.
     else:
-        child.expect('Waiting for connection', timeout=300)
+        child.expect('Waiting for ', timeout=300)
     return child
 
 
 def mavproxy_cmd():
-    '''return path to which mavproxy to use'''
+    """return path to which mavproxy to use"""
     return os.getenv('MAVPROXY_CMD', 'mavproxy.py')
 
+
 def MAVProxy_version():
-    '''return the current version of mavproxy as a tuple e.g. (1,8,8)'''
+    """return the current version of mavproxy as a tuple e.g. (1,8,8)"""
     command = "%s --version" % mavproxy_cmd()
     output = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE).communicate()[0]
     output = output.decode('ascii')
     match = re.search("MAVProxy Version: ([0-9]+)[.]([0-9]+)[.]([0-9]+)", output)
     if match is None:
         raise ValueError("Unable to determine MAVProxy version from (%s)" % output)
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
-def start_MAVProxy_SITL(atype, aircraft=None, setup=False, master='tcp:127.0.0.1:5760',
-                        options=[], logfile=sys.stdout):
+
+def mavproxy_python():
+    """return the interpreter which runs mavproxy_cmd(), as an argv list.
+
+    MAVPROXY_CMD can name a MAVProxy installed somewhere other than the
+    interpreter running the test suite - a virtualenv, say - so
+    importing MAVProxy here would answer questions about the wrong
+    MAVProxy.  Take the interpreter out of the script's shebang line
+    instead.  Returns None if it can't be worked out.
+    """
+    path = shutil.which(mavproxy_cmd())
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as f:
+            first_line = f.readline()
+    except OSError:
+        return None
+    if not first_line.startswith(b"#!"):
+        # not a script at all; a compiled wrapper, perhaps
+        return None
+    return shlex.split(first_line[2:].strip().decode("utf-8"))
+
+
+def MAVProxy_ftp_module_has_command(command):
+    """return True if MAVProxy's ftp module implements "ftp <command>".
+
+    Asks the MAVProxy which mavproxy_cmd() will run, not the one this
+    process happens to be able to import.  Returns None if that can't be
+    asked.
+    """
+    python = mavproxy_python()
+    if python is None:
+        return None
+    program = (
+        "from MAVProxy.modules import mavproxy_ftp;"
+        "print(hasattr(mavproxy_ftp.FTPModule, %s))" % repr("cmd_%s" % command)
+    )
+    try:
+        completed = subprocess.run(
+            python + ["-c", program],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.decode("ascii").strip() == "True"
+
+
+def start_MAVProxy_SITL(atype,
+                        aircraft=None,
+                        setup=False,
+                        master=None,
+                        options: list | None = None,
+                        sitl_rcin_port: int | str = 5501,
+                        pexpect_timeout=60,
+                        logfile=sys.stdout):
     """Launch mavproxy connected to a SITL instance."""
+    if options is None:
+        options = []
+
+    if master is None:
+        raise ValueError("Expected a master")
+
     local_mp_modules_dir = os.path.abspath(
         os.path.join(__file__, '..', '..', '..', 'mavproxy_modules'))
     env = dict(os.environ)
@@ -437,24 +913,39 @@ def start_MAVProxy_SITL(atype, aircraft=None, setup=False, master='tcp:127.0.0.1
     if old is not None:
         env['PYTHONPATH'] += os.path.pathsep + old
 
-    import pexpect
-    global close_list
     cmd = []
     cmd.append(mavproxy_cmd())
     cmd.extend(['--master', master])
-    cmd.extend(['--out', '127.0.0.1:14550'])
+    if isinstance(sitl_rcin_port, int):
+        sitl_rcin_endpoint = "localhost:%u" % sitl_rcin_port
+    else:
+        sitl_rcin_endpoint = sitl_rcin_port
+    cmd.extend(['--sitl', sitl_rcin_endpoint])
     if setup:
         cmd.append('--setup')
     if aircraft is None:
         aircraft = 'test.%s' % atype
     cmd.extend(['--aircraft', aircraft])
     cmd.extend(options)
-    cmd.extend(['--default-modules', 'misc,terrain,wp,rally,fence,param,arm,mode,rc,cmdlong,output'])
+    cmd.extend(['--default-modules', 'misc,wp,rally,fence,param,arm,mode,rc,cmdlong,output'])
 
     print("PYTHONPATH: %s" % str(env['PYTHONPATH']))
     print("Running: %s" % cmd_as_shell(cmd))
 
-    ret = pexpect.spawn(cmd[0], cmd[1:], logfile=logfile, encoding=ENCODING, timeout=60, env=env)
+    ret = pexpect.spawn(cmd[0], cmd[1:], logfile=logfile, encoding='ascii', timeout=pexpect_timeout, env=env)
+    ret.delaybeforesend = 0
+    pexpect_autoclose(ret)
+    return ret
+
+
+def start_PPP_daemon(ips, sockaddr):
+    """Start pppd for networking"""
+
+    cmd = "sudo pppd socket %s debug noauth nodetach %s" % (sockaddr, ips)
+    cmd = cmd.split()
+    print("Running: %s" % cmd_as_shell(cmd))
+
+    ret = pexpect.spawn(cmd[0], cmd[1:], logfile=sys.stdout, encoding='ascii', timeout=30)
     ret.delaybeforesend = 0
     pexpect_autoclose(ret)
     return ret
@@ -463,8 +954,6 @@ def start_MAVProxy_SITL(atype, aircraft=None, setup=False, master='tcp:127.0.0.1
 def expect_setup_callback(e, callback):
     """Setup a callback that is called once a second while waiting for
        patterns."""
-    import pexpect
-
     def _expect_callback(pattern, timeout=e.timeout):
         tstart = time.time()
         while time.time() < tstart + timeout:
@@ -508,7 +997,7 @@ def lock_file(fname):
     f = open(fname, mode='w')
     try:
         fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except Exception:
+    except OSError:
         return None
     return f
 
@@ -518,67 +1007,27 @@ def check_parent(parent_pid=None):
     if parent_pid is None:
         try:
             parent_pid = os.getppid()
-        except Exception:
+        except OSError:
             pass
     if parent_pid is None:
         return
     try:
         os.kill(parent_pid, 0)
-    except Exception:
+    except OSError:
         print("Parent had finished - exiting")
         sys.exit(1)
-
-
-def EarthRatesToBodyRates(dcm, earth_rates):
-    """Convert the angular velocities from earth frame to
-    body frame. Thanks to James Goppert for the formula
-
-    all inputs and outputs are in radians
-
-    returns a gyro vector in body frame, in rad/s .
-    """
-    from math import sin, cos
-
-    (phi, theta, psi) = dcm.to_euler()
-    phiDot   = earth_rates.x
-    thetaDot = earth_rates.y
-    psiDot   = earth_rates.z
-
-    p = phiDot - psiDot * sin(theta)
-    q = cos(phi) * thetaDot + sin(phi) * psiDot * cos(theta)
-    r = cos(phi) * psiDot * cos(theta) - sin(phi) * thetaDot
-    return Vector3(p, q, r)
-
-
-def BodyRatesToEarthRates(dcm, gyro):
-    """Convert the angular velocities from body frame to
-    earth frame.
-
-    all inputs and outputs are in radians/s
-
-    returns a earth rate vector.
-    """
-    from math import sin, cos, tan, fabs
-
-    p      = gyro.x
-    q      = gyro.y
-    r      = gyro.z
-
-    (phi, theta, psi) = dcm.to_euler()
-
-    phiDot   = p + tan(theta) * (q * sin(phi) + r * cos(phi))
-    thetaDot = q * cos(phi) - r * sin(phi)
-    if fabs(cos(theta)) < 1.0e-20:
-        theta += 1.0e-10
-    psiDot   = (q * sin(phi) + r * cos(phi)) / cos(theta)
-    return Vector3(phiDot, thetaDot, psiDot)
 
 
 def gps_newpos(lat, lon, bearing, distance):
     """Extrapolate latitude/longitude given a heading and distance
     thanks to http://www.movable-type.co.uk/scripts/latlong.html .
     """
-    from math import sin, asin, cos, atan2, radians, degrees
+    from math import asin
+    from math import atan2
+    from math import cos
+    from math import degrees
+    from math import radians
+    from math import sin
 
     lat1 = radians(lat)
     lon1 = radians(lon)
@@ -589,7 +1038,7 @@ def gps_newpos(lat, lon, bearing, distance):
                 cos(lat1) * sin(dr) * cos(brng))
     lon2 = lon1 + atan2(sin(brng) * sin(dr) * cos(lat1),
                         cos(dr) - sin(lat1) * sin(lat2))
-    return (degrees(lat2), degrees(lon2))
+    return degrees(lat2), degrees(lon2)
 
 
 def gps_distance(lat1, lon1, lat2, lon2):
@@ -624,132 +1073,6 @@ def gps_bearing(lat1, lon1, lat2, lon2):
     return bearing
 
 
-class Wind(object):
-    """A wind generation object."""
-    def __init__(self, windstring, cross_section=0.1):
-        a = windstring.split(',')
-        if len(a) != 3:
-            raise RuntimeError("Expected wind in speed,direction,turbulance form, not %s" % windstring)
-        self.speed      = float(a[0])  # m/s
-        self.direction  = float(a[1])  # direction the wind is going in
-        self.turbulance = float(a[2])  # turbulance factor (standard deviation)
-
-        # the cross-section of the aircraft to wind. This is multiplied by the
-        # difference in the wind and the velocity of the aircraft to give the acceleration
-        self.cross_section = cross_section
-
-        # the time constant for the turbulance - the average period of the
-        # changes over time
-        self.turbulance_time_constant = 5.0
-
-        # wind time record
-        self.tlast = time.time()
-
-        # initial turbulance multiplier
-        self.turbulance_mul = 1.0
-
-    def current(self, deltat=None):
-        """Return current wind speed and direction as a tuple
-        speed is in m/s, direction in degrees."""
-        if deltat is None:
-            tnow = time.time()
-            deltat = tnow - self.tlast
-            self.tlast = tnow
-
-        # update turbulance random walk
-        w_delta = math.sqrt(deltat) * (1.0 - random.gauss(1.0, self.turbulance))
-        w_delta -= (self.turbulance_mul - 1.0) * (deltat / self.turbulance_time_constant)
-        self.turbulance_mul += w_delta
-        speed = self.speed * math.fabs(self.turbulance_mul)
-        return (speed, self.direction)
-
-    # Calculate drag.
-    def drag(self, velocity, deltat=None):
-        """Return current wind force in Earth frame.  The velocity parameter is
-           a Vector3 of the current velocity of the aircraft in earth frame, m/s ."""
-        from math import radians
-
-        # (m/s, degrees) : wind vector as a magnitude and angle.
-        (speed, direction) = self.current(deltat=deltat)
-        # speed = self.speed
-        # direction = self.direction
-
-        # Get the wind vector.
-        w = toVec(speed, radians(direction))
-
-        obj_speed = velocity.length()
-
-        # Compute the angle between the object vector and wind vector by taking
-        # the dot product and dividing by the magnitudes.
-        d = w.length() * obj_speed
-        if d == 0:
-            alpha = 0
-        else:
-            alpha = acos((w * velocity) / d)
-
-        # Get the relative wind speed and angle from the object.  Note that the
-        # relative wind speed includes the velocity of the object; i.e., there
-        # is a headwind equivalent to the object's speed even if there is no
-        # absolute wind.
-        (rel_speed, beta) = apparent_wind(speed, obj_speed, alpha)
-
-        # Return the vector of the relative wind, relative to the coordinate
-        # system.
-        relWindVec = toVec(rel_speed, beta + atan2(velocity.y, velocity.x))
-
-        # Combine them to get the acceleration vector.
-        return Vector3(acc(relWindVec.x, drag_force(self, relWindVec.x)), acc(relWindVec.y, drag_force(self, relWindVec.y)), 0)
-
-
-def apparent_wind(wind_sp, obj_speed, alpha):
-    """http://en.wikipedia.org/wiki/Apparent_wind
-
-    Returns apparent wind speed and angle of apparent wind.  Alpha is the angle
-    between the object and the true wind.  alpha of 0 rads is a headwind; pi a
-    tailwind.  Speeds should always be positive."""
-    delta = wind_sp * cos(alpha)
-    x = wind_sp**2 + obj_speed**2 + 2 * obj_speed * delta
-    rel_speed = sqrt(x)
-    if rel_speed == 0:
-        beta = pi
-    else:
-        beta = acos((delta + obj_speed) / rel_speed)
-
-    return (rel_speed, beta)
-
-
-def drag_force(wind, sp):
-    """See http://en.wikipedia.org/wiki/Drag_equation
-
-    Drag equation is F(a) = cl * p/2 * v^2 * a, where cl : drag coefficient
-    (let's assume it's low, .e.g., 0.2), p : density of air (assume about 1
-    kg/m^3, the density just over 1500m elevation), v : relative speed of wind
-    (to the body), a : area acted on (this is captured by the cross_section
-    parameter).
-
-    So then we have
-    F(a) = 0.2 * 1/2 * v^2 * cross_section = 0.1 * v^2 * cross_section."""
-    return (sp**2.0) * 0.1 * wind.cross_section
-
-
-def acc(val, mag):
-    """ Function to make the force vector.  relWindVec is the direction the apparent
-    wind comes *from*.  We want to compute the accleration vector in the direction
-    the wind blows to."""
-    if val == 0:
-        return mag
-    else:
-        return (val / abs(val)) * (0 - mag)
-
-
-def toVec(magnitude, angle):
-    """Converts a magnitude and angle (radians) to a vector in the xy plane."""
-    v = Vector3(magnitude, 0, 0)
-    m = Matrix3()
-    m.from_euler(0, 0, angle)
-    return m.transposed() * v
-
-
 def constrain(value, minv, maxv):
     """Constrain a value to a range."""
     if value < minv:
@@ -757,6 +1080,22 @@ def constrain(value, minv, maxv):
     if value > maxv:
         value = maxv
     return value
+
+
+def load_local_module(fname):
+    """load a python module from within the ardupilot tree"""
+    fname = os.path.join(topdir(), fname)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("local_module", fname)
+    ret = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ret)
+    return ret
+
+
+def get_git_hash(short=False):
+    short_v = "--short=8 " if short else ""
+    githash = run_cmd(f'git rev-parse {short_v}HEAD', output=True, directory=reltopdir('.')).strip()
+    return githash.decode('utf-8')
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@
 void Tracker::init_servos()
 {
     // update assigned functions and enable auxiliary servos
-    SRV_Channels::enable_aux_servos();
+    AP::srv().enable_aux_servos();
 
     SRV_Channels::set_default_function(CH_YAW, SRV_Channel::k_tracker_yaw);
     SRV_Channels::set_default_function(CH_PITCH, SRV_Channel::k_tracker_pitch);
@@ -32,6 +32,10 @@ void Tracker::init_servos()
  */
 void Tracker::update_pitch_servo(float pitch)
 {
+    // store the target/actual values for tuning because update_error() will reset them to zero
+    const AP_PIDInfo *pid_info = &g.pidPitch2Srv.get_pid_info();
+    const float target = pid_info->target, actual = pid_info->actual;
+
     switch ((enum ServoType)g.servo_pitch_type.get()) {
     case SERVO_TYPE_ONOFF:
         update_pitch_onoff_servo(pitch);
@@ -46,6 +50,9 @@ void Tracker::update_pitch_servo(float pitch)
         update_pitch_position_servo();
         break;
     }
+
+    g.pidPitch2Srv.set_target_rate(target);
+    g.pidPitch2Srv.set_actual_rate(actual);
 }
 
 /**
@@ -74,7 +81,7 @@ void Tracker::update_pitch_position_servo()
     // PITCH2SRV_IMAX   4000.000000
 
     // calculate new servo position
-    int32_t new_servo_out = SRV_Channels::get_output_scaled(SRV_Channel::k_tracker_pitch) + g.pidPitch2Srv.update_error(nav_status.angle_error_pitch);
+    float new_servo_out = SRV_Channels::get_output_scaled(SRV_Channel::k_tracker_pitch) + g.pidPitch2Srv.update_error(nav_status.angle_error_pitch, G_Dt);
 
     // position limit pitch servo
     if (new_servo_out <= pitch_min_cd) {
@@ -101,7 +108,7 @@ void Tracker::update_pitch_position_servo()
    update the pitch (elevation) servo. The aim is to drive the boards ahrs pitch to the
    requested pitch, so the board (and therefore the antenna) will be pointing at the target
  */
-void Tracker::update_pitch_onoff_servo(float pitch)
+void Tracker::update_pitch_onoff_servo(float pitch) const
 {
     int32_t pitch_min_cd = g.pitch_min*100;
     int32_t pitch_max_cd = g.pitch_max*100;
@@ -125,7 +132,7 @@ void Tracker::update_pitch_onoff_servo(float pitch)
 */
 void Tracker::update_pitch_cr_servo(float pitch)
 {
-    const float pitch_out = constrain_float(g.pidPitch2Srv.update_error(nav_status.angle_error_pitch), -(-g.pitch_min+g.pitch_max) * 100/2, (-g.pitch_min+g.pitch_max) * 100/2);
+    const float pitch_out = constrain_float(g.pidPitch2Srv.update_error(nav_status.angle_error_pitch, G_Dt), -(-g.pitch_min+g.pitch_max) * 100/2, (-g.pitch_min+g.pitch_max) * 100/2);
     SRV_Channels::set_output_scaled(SRV_Channel::k_tracker_pitch, pitch_out);
 }
 
@@ -134,6 +141,10 @@ void Tracker::update_pitch_cr_servo(float pitch)
  */
 void Tracker::update_yaw_servo(float yaw)
 {
+    // store the target/actual values for tuning because update_error() will reset them to zero
+    const AP_PIDInfo *pid_info = &g.pidYaw2Srv.get_pid_info();
+    const float target = pid_info->target, actual = pid_info->actual;
+
 	switch ((enum ServoType)g.servo_yaw_type.get()) {
     case SERVO_TYPE_ONOFF:
         update_yaw_onoff_servo(yaw);
@@ -148,6 +159,9 @@ void Tracker::update_yaw_servo(float yaw)
         update_yaw_position_servo();
         break;
     }
+
+    g.pidYaw2Srv.set_target_rate(target);
+    g.pidYaw2Srv.set_actual_rate(actual);
 }
 
 /**
@@ -166,7 +180,7 @@ void Tracker::update_yaw_position_servo()
     // (in fact, any alignment is permissible), and that the alignment may change (possibly rapidly) over time
     // (as when the antenna is mounted on a moving, turning vehicle)
     //
-    // With my antenna mount, large pwm output drives the antenna anticlockise, so need:
+    // With my antenna mount, large pwm output drives the antenna anticlockwise, so need:
     // param set RC1_REV -1
     // to reverse the servo. Yours may be different
     //
@@ -187,7 +201,7 @@ void Tracker::update_yaw_position_servo()
       right direction
      */
 
-    float servo_change = g.pidYaw2Srv.update_error(nav_status.angle_error_yaw);
+    float servo_change = g.pidYaw2Srv.update_error(nav_status.angle_error_yaw, G_Dt);
     servo_change = constrain_float(servo_change, -18000, 18000);
     float new_servo_out = constrain_float(SRV_Channels::get_output_scaled(SRV_Channel::k_tracker_yaw) + servo_change, -18000, 18000);
 
@@ -217,7 +231,7 @@ void Tracker::update_yaw_position_servo()
    yaw to the requested yaw, so the board (and therefore the antenna)
    will be pointing at the target
  */
-void Tracker::update_yaw_onoff_servo(float yaw)
+void Tracker::update_yaw_onoff_servo(float yaw) const
 {
     float acceptable_error = g.onoff_yaw_rate * g.onoff_yaw_mintime;
     if (fabsf(nav_status.angle_error_yaw * 0.01f) < acceptable_error) {
@@ -238,6 +252,6 @@ void Tracker::update_yaw_onoff_servo(float yaw)
  */
 void Tracker::update_yaw_cr_servo(float yaw)
 {
-    const float yaw_out = constrain_float(-g.pidYaw2Srv.update_error(nav_status.angle_error_yaw), -g.yaw_range * 100/2, g.yaw_range * 100/2);
+    const float yaw_out = constrain_float(-g.pidYaw2Srv.update_error(nav_status.angle_error_yaw, G_Dt), -g.yaw_range * 100/2, g.yaw_range * 100/2);
     SRV_Channels::set_output_scaled(SRV_Channel::k_tracker_yaw, yaw_out);
 }

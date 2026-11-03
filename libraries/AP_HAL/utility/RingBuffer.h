@@ -12,6 +12,11 @@
 class ByteBuffer {
 public:
     ByteBuffer(uint32_t size);
+    ByteBuffer(uint8_t* _buf, uint32_t _size) :
+    buf(_buf),
+    size(_size),
+    external_buf(true)
+    {}
     ~ByteBuffer(void);
 
     // number of bytes available to be read
@@ -47,6 +52,9 @@ public:
     // set size of ringbuffer, caller responsible for locking
     bool set_size(uint32_t size);
 
+    // set size of ringbuffer, reducing down if size can't be achieved
+    bool set_size_best(uint32_t size);
+    
     // advance the read pointer (discarding bytes)
     bool advance(uint32_t n);
 
@@ -92,6 +100,8 @@ private:
 
     std::atomic<uint32_t> head{0}; // where to read data
     std::atomic<uint32_t> tail{0}; // where to write data
+
+    bool external_buf;
 };
 
 /*
@@ -106,14 +116,28 @@ public:
         // gives one less byte than requested. We round up to a full
         // multiple of the object size so that we always get aligned
         // elements, which makes the readptr() method possible
-        buffer = new ByteBuffer(((_size+1) * sizeof(T)));
+        buffer = NEW_NOTHROW ByteBuffer(((_size+1) * sizeof(T)));
+        external_buf = false;
     }
+
+    ObjectBuffer(ByteBuffer *_buffer) :
+    buffer(_buffer),
+    external_buf(true)
+    {}
+
     ~ObjectBuffer(void) {
-        delete buffer;
+        if (!external_buf)
+            delete buffer;
     }
 
     // return size of ringbuffer
-    uint32_t get_size(void) const { return buffer->get_size() / sizeof(T); }
+    uint32_t get_size(void) const {
+        if (buffer == nullptr) {
+            return 0;
+        }
+        uint32_t size = buffer->get_size() / sizeof(T);
+        return size>0?size-1:0;
+    }
 
     // set size of ringbuffer, caller responsible for locking
     bool set_size(uint32_t size) { return buffer->set_size(((size+1) * sizeof(T))); }
@@ -223,7 +247,10 @@ public:
     // !!! Note ObjectBuffer_TS is a duplicate of this, update in both places !!!
     const T *readptr(uint32_t &n) {
         uint32_t avail_bytes = 0;
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wcast-align"
         const T *ret = (const T *)buffer->readptr(avail_bytes);
+        #pragma GCC diagnostic pop
         if (!ret || avail_bytes < sizeof(T)) {
             return nullptr;
         }
@@ -246,6 +273,7 @@ public:
 
 private:
     ByteBuffer *buffer = nullptr;
+    bool external_buf = true;
 };
 
 /*
@@ -260,16 +288,20 @@ public:
         // gives one less byte than requested. We round up to a full
         // multiple of the object size so that we always get aligned
         // elements, which makes the readptr() method possible
-        buffer = new ByteBuffer(((_size+1) * sizeof(T)));
+        buffer = NEW_NOTHROW ByteBuffer(((_size+1) * sizeof(T)));
     }
     ~ObjectBuffer_TS(void) {
         delete buffer;
     }
 
     // return size of ringbuffer
-    uint32_t get_size(void) const {
+    uint32_t get_size(void) {
         WITH_SEMAPHORE(sem);
-        return buffer->get_size() / sizeof(T);
+        if (buffer == nullptr) {
+            return 0;
+        }
+        uint32_t size = buffer->get_size() / sizeof(T);
+        return size>0?size-1:0;
     }
 
     // set size of ringbuffer, caller responsible for locking
@@ -398,7 +430,10 @@ public:
     const T *readptr(uint32_t &n) {
         WITH_SEMAPHORE(sem);
         uint32_t avail_bytes = 0;
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wcast-align"
         const T *ret = (const T *)buffer->readptr(avail_bytes);
+        #pragma GCC diagnostic pop
         if (!ret || avail_bytes < sizeof(T)) {
             return nullptr;
         }
@@ -437,7 +472,7 @@ public:
     ObjectArray(uint16_t size_) {
         _size = size_;
         _head = _count = 0;
-        _buffer = new T[_size];
+        _buffer = NEW_NOTHROW T[_size];
     }
     ~ObjectArray(void) {
         delete[] _buffer;

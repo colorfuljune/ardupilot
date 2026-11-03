@@ -1,5 +1,6 @@
 # Docker context ignore list
 .azure
+.cache
 .github
 .git
 .idea
@@ -26,4 +27,6 @@ mav.*
 
 # include the setup script and completion
 !Tools/environment_install/install-prereqs-ubuntu.sh
+!Tools/environment_install/install-prereqs-arch.sh
 !Tools/completion
+autotest_result_*_junit.xml

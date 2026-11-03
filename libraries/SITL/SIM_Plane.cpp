@@ -20,12 +20,31 @@
 #include "SIM_Plane.h"
 
 #include <stdio.h>
+#include <AP_Filesystem/AP_Filesystem_config.h>
+#include <AP_Filesystem/AP_Filesystem.h>
 
 using namespace SITL;
 
 Plane::Plane(const char *frame_str) :
     Aircraft(frame_str)
 {
+
+    const char *colon = strchr(frame_str, ':');
+    size_t slen = strlen(frame_str);
+    // The last 5 letters are ".json"
+    if (colon != nullptr && slen > 5 && strcmp(&frame_str[slen-5], ".json") == 0) {
+        load_coeffs(colon+1);
+    } else {
+        coefficient = default_coefficients;
+    }
+
+    // Chosen to approximately match a historical (simpler) battery model
+    constexpr float default_battery_resistance_ohm = 0.0145f;
+    battery.setup(sitl->batt_capacity_ah,
+                  default_battery_resistance_ohm,
+                  sitl->batt_voltage,
+                  ambient_outside_temperature_degC());
+
     mass = 2.0f;
 
     /*
@@ -34,10 +53,10 @@ Plane::Plane(const char *frame_str) :
     */
     thrust_scale = (mass * GRAVITY_MSS) / hover_throttle;
     frame_height = 0.1f;
-    num_motors = 1;
 
     ground_behavior = GROUND_BEHAVIOR_FWD_ONLY;
-    
+    lock_step_scheduled = true;
+
     if (strstr(frame_str, "-heavy")) {
         mass = 8;
     }
@@ -55,6 +74,8 @@ Plane::Plane(const char *frame_str) :
         vtail = true;
     } else if (strstr(frame_str, "-dspoilers")) {
         dspoilers = true;
+    } else if (strstr(frame_str, "-redundant")) {
+        redundant = true;
     }
     if (strstr(frame_str, "-elevrev")) {
         reverse_elevator_rudder = true;
@@ -79,6 +100,16 @@ Plane::Plane(const char *frame_str) :
         ground_behavior = GROUND_BEHAVIOR_TAILSITTER;
         thrust_scale *= 1.5;
     }
+    if (strstr(frame_str, "-steering")) {
+        have_steering = true;
+    }
+
+#if AP_FILESYSTEM_FILE_READING_ENABLED
+    if (strstr(frame_str, "-3d")) {
+        aerobatic = true;
+        thrust_scale *= 1.5;
+    }
+#endif
 
     if (strstr(frame_str, "-ice")) {
         ice_engine = true;
@@ -87,6 +118,117 @@ Plane::Plane(const char *frame_str) :
     if (strstr(frame_str, "-soaring")) {
         mass = 2.0;
         coefficient.c_drag_p = 0.05;
+    }
+}
+
+void Plane::load_coeffs(const char *model_json)
+{
+    char *fname = nullptr;
+    struct stat st;
+    if (AP::FS().stat(model_json, &st) == 0) {
+        fname = strdup(model_json);
+    } else {
+        IGNORE_RETURN(asprintf(&fname, "@ROMFS/models/%s", model_json));
+        if (fname == nullptr || AP::FS().stat(fname, &st) != 0) {
+            AP_HAL::panic("%s failed to load", model_json);
+        }
+    }
+    if (fname == nullptr) {
+        AP_HAL::panic("%s failed to load", model_json);
+    }
+    AP_JSON::value *obj = AP_JSON::load_json(fname);
+    if (obj == nullptr) {
+        AP_HAL::panic("%s failed to load", fname);
+    }
+
+    enum class VarType {
+        FLOAT,
+        VECTOR3F,
+    };
+
+    struct json_search {
+        const char *label;
+        void *ptr;
+        VarType t;
+    };
+    
+    json_search vars[] = {
+#define COFF_FLOAT(s) { #s, &coefficient.s, VarType::FLOAT }
+        COFF_FLOAT(s),
+        COFF_FLOAT(b),
+        COFF_FLOAT(c),
+        COFF_FLOAT(c_lift_0),
+        COFF_FLOAT(c_lift_deltae),
+        COFF_FLOAT(c_lift_a),
+        COFF_FLOAT(c_lift_q),
+        COFF_FLOAT(mcoeff),
+        COFF_FLOAT(oswald),
+        COFF_FLOAT(alpha_stall),
+        COFF_FLOAT(c_drag_q),
+        COFF_FLOAT(c_drag_deltae),
+        COFF_FLOAT(c_drag_p),
+        COFF_FLOAT(c_y_0),
+        COFF_FLOAT(c_y_b),
+        COFF_FLOAT(c_y_p),
+        COFF_FLOAT(c_y_r),
+        COFF_FLOAT(c_y_deltaa),
+        COFF_FLOAT(c_y_deltar),
+        COFF_FLOAT(c_l_0),
+        COFF_FLOAT(c_l_p),
+        COFF_FLOAT(c_l_b),
+        COFF_FLOAT(c_l_r),
+        COFF_FLOAT(c_l_deltaa),
+        COFF_FLOAT(c_l_deltar),
+        COFF_FLOAT(c_m_0),
+        COFF_FLOAT(c_m_a),
+        COFF_FLOAT(c_m_q),
+        COFF_FLOAT(c_m_deltae),
+        COFF_FLOAT(c_n_0),
+        COFF_FLOAT(c_n_b),
+        COFF_FLOAT(c_n_p),
+        COFF_FLOAT(c_n_r),
+        COFF_FLOAT(c_n_deltaa),
+        COFF_FLOAT(c_n_deltar),
+        COFF_FLOAT(deltaa_max),
+        COFF_FLOAT(deltae_max),
+        COFF_FLOAT(deltar_max),
+        { "CGOffset", &coefficient.CGOffset, VarType::VECTOR3F },
+    };
+
+    for (uint8_t i=0; i<ARRAY_SIZE(vars); i++) {
+        auto v = obj->get(vars[i].label);
+        if (v.is<AP_JSON::null>()) {
+            // use default value
+            continue;
+        }
+        if (vars[i].t == VarType::FLOAT) {
+            parse_float(v, vars[i].label, *((float *)vars[i].ptr));
+
+        } else if (vars[i].t == VarType::VECTOR3F) {
+            parse_vector3(v, vars[i].label, *(Vector3f *)vars[i].ptr);
+
+        }
+    }
+
+    delete obj;
+
+    ::printf("Loaded plane aero coefficients from %s\n", fname);
+    free(fname);
+}
+
+void Plane::parse_float(AP_JSON::value val, const char* label, float &param) {
+    if (!val.is<double>()) {
+        AP_HAL::panic("Bad json type for %s: %s", label, val.to_str().c_str());
+    }
+    param = val.get<double>();
+}
+
+void Plane::parse_vector3(AP_JSON::value val, const char* label, Vector3f &param) {
+    if (!val.is<AP_JSON::value::array>() || !val.contains(2) || val.contains(3)) {
+        AP_HAL::panic("Bad json type for %s: %s", label, val.to_str().c_str());
+    }
+    for (uint8_t j=0; j<3; j++) {
+        parse_float(val.get(j), label, param[j]);
     }
 }
 
@@ -140,7 +282,7 @@ Vector3f Plane::getTorque(float inputAileron, float inputElevator, float inputRu
 	//calculate aerodynamic torque
     float effective_airspeed = airspeed;
 
-    if (tailsitter) {
+    if (tailsitter || aerobatic) {
         /*
           tailsitters get airspeed from prop-wash
          */
@@ -194,7 +336,7 @@ Vector3f Plane::getTorque(float inputAileron, float inputElevator, float inputRu
 	}
 
 
-	// Add torque to to force misalignment with CG
+	// Add torque to force misalignment with CG
 	// r x F, where r is the distance from CoG to CoL
 	la +=  CGOffset.y * force.z - CGOffset.z * force.y;
 	ma += -CGOffset.x * force.z + CGOffset.z * force.x;
@@ -258,13 +400,12 @@ Vector3f Plane::getForce(float inputAileron, float inputElevator, float inputRud
     return Vector3f(ax, ay, az);
 }
 
-void Plane::calculate_forces(const struct sitl_input &input, Vector3f &rot_accel, Vector3f &body_accel)
+void Plane::calculate_forces(const struct sitl_input &input, Vector3f &rot_accel)
 {
     float aileron  = filtered_servo_angle(input, 0);
     float elevator = filtered_servo_angle(input, 1);
     float rudder   = filtered_servo_angle(input, 3);
     bool launch_triggered = input.servos[6] > 1700;
-    float throttle;
     if (reverse_elevator_rudder) {
         elevator = -elevator;
         rudder = -rudder;
@@ -297,26 +438,31 @@ void Plane::calculate_forces(const struct sitl_input &input, Vector3f &rot_accel
         aileron  = (elevon_right-elevon_left)/2;
         elevator = (elevon_left+elevon_right)/2;
         rudder = fabsf(dspoiler1_right - dspoiler2_right)/2 - fabsf(dspoiler1_left - dspoiler2_left)/2;
+    } else if (redundant) {
+        // channels 1/9 are left/right ailierons
+        // channels 2/10 are left/right elevators
+        // channels 4/12 are top/bottom rudders
+        aileron  = (filtered_servo_angle(input, 0) + filtered_servo_angle(input, 8)) / 2.0;
+        elevator = (filtered_servo_angle(input, 1) + filtered_servo_angle(input, 9)) / 2.0;
+        rudder   = (filtered_servo_angle(input, 3) + filtered_servo_angle(input, 11)) / 2.0;
     }
     //printf("Aileron: %.1f elevator: %.1f rudder: %.1f\n", aileron, elevator, rudder);
 
-    if (reverse_thrust) {
-        throttle = filtered_servo_angle(input, 2);
-    } else {
-        throttle = filtered_servo_range(input, 2);
-    }
-    
-    float thrust     = throttle;
+    float thrust = reverse_thrust ? filtered_servo_angle(input, 2) : filtered_servo_range(input, 2);
 
     if (ice_engine) {
         thrust = icengine.update(input);
+    } else {
+        if (battery_is_empty()) {
+            thrust = 0.0f;
+        }
     }
 
     // calculate angle of attack
     angle_of_attack = atan2f(velocity_air_bf.z, velocity_air_bf.x);
     beta = atan2f(velocity_air_bf.y,velocity_air_bf.x);
 
-    if (tailsitter) {
+    if (tailsitter || aerobatic) {
         /*
           tailsitters get 4x the control surfaces
          */
@@ -348,7 +494,8 @@ void Plane::calculate_forces(const struct sitl_input &input, Vector3f &rot_accel
     }
     
     // simulate engine RPM
-    rpm[0] = thrust * 7000;
+    motor_mask |= (1U<<2);
+    rpm[2] = thrust * 7000;
     
     // scale thrust to newtons
     thrust *= thrust_scale;
@@ -377,9 +524,21 @@ void Plane::update(const struct sitl_input &input)
 
     update_wind(input);
     
-    calculate_forces(input, rot_accel, accel_body);
-    
+    calculate_forces(input, rot_accel);
+    update_battery(input);
     update_dynamics(rot_accel);
+
+    /*
+      add in ground steering, this should be replaced with a proper
+      calculation of a nose wheel effect
+    */
+    if (have_steering && on_ground()) {
+        const float steering = filtered_servo_angle(input, 4);
+        const Vector3f velocity_bf = dcm.transposed() * velocity_ef;
+        const float steer_scale = radians(5);
+        gyro.z += steering * velocity_bf.x * steer_scale;
+    }
+
     update_external_payload(input);
 
     // update lat/lon/altitude
@@ -388,4 +547,14 @@ void Plane::update(const struct sitl_input &input)
 
     // update magnetic field
     update_mag_field_bf();
+}
+
+void Plane::update_battery(const struct sitl_input &input) {
+    battery.maybe_reset(sitl->batt_voltage, sitl->batt_capacity_ah);
+
+    float throttle = reverse_thrust ? filtered_servo_angle(input, 2) : filtered_servo_range(input, 2);
+    battery_current = 50.0f * sq(throttle);
+    battery.consume_energy(battery_current, AP_HAL::micros64());
+    battery_voltage = battery.get_voltage();
+    battery_temperature_degC = battery.get_temperature_degC();
 }

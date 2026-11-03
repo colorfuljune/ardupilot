@@ -1,6 +1,74 @@
 #include "Copter.h"
 
-#if MODE_RTL_ENABLED == ENABLED
+#if MODE_RTL_ENABLED
+
+// table of user settable parameters
+const AP_Param::GroupInfo ModeRTL::var_info[] = {
+
+    // @Param: ALT_M
+    // @DisplayName: RTL Altitude
+    // @Description: The minimum alt above home the vehicle will climb to before returning. If the vehicle is flying higher than this value it will return at its current altitude.
+    // @Units: m
+    // @Range: 0.30 3000
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("ALT_M", 1, ModeRTL, altitude_m, RTL_ALT_M_DEFAULT),
+
+    // @Param: ALT_FINAL_M
+    // @DisplayName: RTL Final Altitude
+    // @Description: Altitude the vehicle will move to as the final stage of Returning to Launch or after completing a mission. Set to zero to land.
+    // @Units: m
+    // @Range: 0 10
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("ALT_FINAL_M", 2, ModeRTL, alt_final_m, RTL_ALT_FINAL_M_DEFAULT),
+
+    // @Param: CLIMB_MIN_M
+    // @DisplayName: RTL minimum climb
+    // @Description: The vehicle will climb this many meters during the initial climb portion of the RTL
+    // @Units: m
+    // @Range: 0 30
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("CLIMB_MIN_M", 3, ModeRTL, climb_min_m, RTL_CLIMB_MIN_M_DEFAULT),
+
+    // @Param: SPEED_MS
+    // @DisplayName: RTL speed
+    // @Description: The speed in m/s which the aircraft will attempt to maintain horizontally while flying home. If this is set to zero, WP_SPD will be used instead.
+    // @Units: m/s
+    // @Range: 0 20
+    // @Increment: 0.5
+    // @User: Standard
+    AP_GROUPINFO("SPEED_MS", 4, ModeRTL, speed_ms, 0),
+
+    AP_GROUPEND
+};
+
+// constructor
+ModeRTL::ModeRTL() : Mode()
+{
+    // load parameter defaults
+    AP_Param::setup_object_defaults(this, var_info);
+}
+
+// convert parameters
+void ModeRTL::convert_params()
+{
+    // PARAMETER_CONVERSION - Added: Jan-2026 for ArduPilot-4.7
+
+    // return immediately if parameter conversion has already been performed
+    if (altitude_m.configured() || speed_ms.configured() || alt_final_m.configured() || climb_min_m.configured()) {
+        return;
+    }
+
+    static const AP_Param::ConversionInfo conversion_info[] = {
+        { Parameters::k_param_rtl_altitude_cm, 0, AP_PARAM_INT32, "RTL_ALT_M" },        // RTL_ALT moved to RTL_ALT_M
+        { Parameters::k_param_rtl_speed_cms, 0, AP_PARAM_INT16, "RTL_SPEED_MS" },       // RTL_SPEED moved to RTL_SPEED_MS
+        { Parameters::k_param_rtl_alt_final_cm, 0, AP_PARAM_INT16, "RTL_ALT_FINAL_M" }, // RTL_ALT_FINAL moved to RTL_ALT_FINAL_M
+        { Parameters::k_param_rtl_climb_min_cm, 0, AP_PARAM_INT16, "RTL_CLIMB_MIN_M" }, // RTL_CLIMB_MIN moved to RTL_CLIMB_MIN_M
+    };
+    AP_Param::convert_old_parameters_scaled(conversion_info, ARRAY_SIZE(conversion_info), 0.01, 0);
+}
 
 /*
  * Init and run calls for RTL flight mode
@@ -9,7 +77,7 @@
  * and the lower implementation of the waypoint or landing controllers within those states
  */
 
-// rtl_init - initialise rtl controller
+// init - initialise rtl controller
 bool ModeRTL::init(bool ignore_checks)
 {
     if (!ignore_checks) {
@@ -18,19 +86,32 @@ bool ModeRTL::init(bool ignore_checks)
         }
     }
     // initialise waypoint and spline controller
-    wp_nav->wp_and_spline_init();
-    _state = RTL_Starting;
+    wp_nav->wp_and_spline_init_m(speed_ms.get());
+    _state = SubMode::STARTING;
     _state_complete = true; // see run() method below
     terrain_following_allowed = !copter.failsafe.terrain;
+    // reset flag indicating if pilot has applied roll or pitch inputs during landing
+    copter.ap.land_repo_active = false;
+
+    // this will be set true if prec land is later active
+    copter.ap.prec_land_active = false;
+
+#if AC_PRECLAND_ENABLED
+    // initialise precland state machine
+    copter.precland_statemachine.init();
+#endif
+
     return true;
 }
 
 // re-start RTL with terrain following disabled
 void ModeRTL::restart_without_terrain()
 {
-    AP::logger().Write_Error(LogErrorSubsystem::NAVIGATION, LogErrorCode::RESTARTED_RTL);
+#if HAL_LOGGING_ENABLED
+    LOGGER_WRITE_ERROR(LogErrorSubsystem::NAVIGATION, LogErrorCode::RESTARTED_RTL);
+#endif
     terrain_following_allowed = false;
-    _state = RTL_Starting;
+    _state = SubMode::STARTING;
     _state_complete = true;
     gcs().send_text(MAV_SEVERITY_CRITICAL,"Restarting RTL - Terrain data missing");
 }
@@ -38,13 +119,15 @@ void ModeRTL::restart_without_terrain()
 ModeRTL::RTLAltType ModeRTL::get_alt_type() const
 {
     // sanity check parameter
-    if (g.rtl_alt_type < 0 || g.rtl_alt_type > (int)RTLAltType::RTL_ALTTYPE_TERRAIN) {
-        return RTLAltType::RTL_ALTTYPE_RELATIVE;
+    switch ((ModeRTL::RTLAltType)g.rtl_alt_type) {
+    case RTLAltType::RELATIVE ... RTLAltType::TERRAIN:
+        return g.rtl_alt_type;
     }
-    return (RTLAltType)g.rtl_alt_type.get();
+    // user has an invalid value
+    return RTLAltType::RELATIVE;
 }
 
-// rtl_run - runs the return-to-launch controller
+// run - runs the return-to-launch controller
 // should be called at 100hz or more
 void ModeRTL::run(bool disarm_on_land)
 {
@@ -52,123 +135,134 @@ void ModeRTL::run(bool disarm_on_land)
         return;
     }
 
-    // check if we need to move to next state
+    // advance the state machine at most one stage per loop
     if (_state_complete) {
-        switch (_state) {
-        case RTL_Starting:
-            build_path();
-            climb_start();
-            break;
-        case RTL_InitialClimb:
-            return_start();
-            break;
-        case RTL_ReturnHome:
-            loiterathome_start();
-            break;
-        case RTL_LoiterAtHome:
-            if (rtl_path.land || copter.failsafe.radio) {
-                land_start();
-            }else{
-                descent_start();
-            }
-            break;
-        case RTL_FinalDescent:
-            // do nothing
-            break;
-        case RTL_Land:
-            // do nothing - rtl_land_run will take care of disarming motors
-            break;
-        }
+        advance_state();
     }
 
-    // call the correct run function
+    // run the controller for the current stage
     switch (_state) {
 
-    case RTL_Starting:
-        // should not be reached:
-        _state = RTL_InitialClimb;
-        FALLTHROUGH;
+    case SubMode::STARTING:
+        // reached only after an in-cycle restart_without_terrain(); hold on the
+        // current target this loop and let advance_state() rebuild the path next loop
+        climb_return_run();
+        _state_complete = true;
+        break;
 
-    case RTL_InitialClimb:
+    case SubMode::INITIAL_CLIMB:
+    case SubMode::FLY_TO_RETURN_POINT:
         climb_return_run();
         break;
 
-    case RTL_ReturnHome:
-        climb_return_run();
+    case SubMode::HOLD_AT_RETURN_POINT:
+        hold_at_return_point_run();
         break;
 
-    case RTL_LoiterAtHome:
-        loiterathome_run();
-        break;
-
-    case RTL_FinalDescent:
+    case SubMode::FINAL_DESCENT:
         descent_run();
         break;
 
-    case RTL_Land:
+    case SubMode::LAND:
         land_run(disarm_on_land);
         break;
     }
 }
 
-// rtl_climb_start - initialise climb to RTL altitude
+// advance_state - move to the next stage when the current one is complete
+void ModeRTL::advance_state()
+{
+    switch (_state) {
+    case SubMode::STARTING:
+        build_path();
+        set_submode(SubMode::INITIAL_CLIMB);
+        break;
+    case SubMode::INITIAL_CLIMB:
+        set_submode(SubMode::FLY_TO_RETURN_POINT);
+        break;
+    case SubMode::FLY_TO_RETURN_POINT:
+        set_submode(SubMode::HOLD_AT_RETURN_POINT);
+        break;
+    case SubMode::HOLD_AT_RETURN_POINT:
+        set_submode((rtl_path.land || copter.failsafe.radio) ? SubMode::LAND : SubMode::FINAL_DESCENT);
+        break;
+    case SubMode::FINAL_DESCENT:
+    case SubMode::LAND:
+        // terminal stages
+        break;
+    }
+}
+
+// set_submode - performs all normal stage changes; sets _state, clears _state_complete and runs the stage's entry init
+void ModeRTL::set_submode(SubMode submode)
+{
+    _state = submode;
+    _state_complete = false;
+    _stage_start_ms = millis();
+
+    switch (submode) {
+    case SubMode::STARTING:
+        // not used: init() and restart_without_terrain() enter STARTING directly with
+        // _state_complete set, and advance_state() then builds the path
+        break;
+    case SubMode::INITIAL_CLIMB:
+        climb_start();
+        break;
+    case SubMode::FLY_TO_RETURN_POINT:
+        if (!return_start()) {
+            // terrain data missing: rebuild the path with terrain following off
+            restart_without_terrain();
+        }
+        break;
+    case SubMode::HOLD_AT_RETURN_POINT:
+        hold_at_return_point_start();
+        break;
+    case SubMode::FINAL_DESCENT:
+        descent_start();
+        break;
+    case SubMode::LAND:
+        land_start();
+        break;
+    }
+}
+
+// climb_start - initialise climb to RTL altitude
 void ModeRTL::climb_start()
 {
-    _state = RTL_InitialClimb;
-    _state_complete = false;
-
-    // RTL_SPEED == 0 means use WPNAV_SPEED
-    if (g.rtl_speed_cms != 0) {
-        wp_nav->set_speed_xy(g.rtl_speed_cms);
-    }
-
     // set the destination
-    if (!wp_nav->set_wp_destination(rtl_path.climb_target)) {
-        // this should not happen because rtl_build_path will have checked terrain data was available
+    if (!wp_nav->set_wp_destination_loc(rtl_path.climb_target) || !wp_nav->set_wp_destination_next_loc(rtl_path.return_target)) {
+        // this should not happen because build_path will have checked terrain data was available
         gcs().send_text(MAV_SEVERITY_CRITICAL,"RTL: unexpected error setting climb target");
-        AP::logger().Write_Error(LogErrorSubsystem::NAVIGATION, LogErrorCode::FAILED_TO_SET_DESTINATION);
+        LOGGER_WRITE_ERROR(LogErrorSubsystem::NAVIGATION, LogErrorCode::FAILED_TO_SET_DESTINATION);
         copter.set_mode(Mode::Number::LAND, ModeReason::TERRAIN_FAILSAFE);
         return;
     }
-    wp_nav->set_fast_waypoint(true);
 
     // hold current yaw during initial climb
-    auto_yaw.set_mode(AUTO_YAW_HOLD);
+    auto_yaw.set_mode(AutoYaw::Mode::HOLD);
 }
 
-// rtl_return_start - initialise return to home
-void ModeRTL::return_start()
+// return_start - initialise the return to the return point (home or nearest rally point)
+//   returns false if the destination could not be set (missing terrain data)
+bool ModeRTL::return_start()
 {
-    _state = RTL_ReturnHome;
-    _state_complete = false;
+    // failure to set the destination must be caused by missing terrain data
+    const bool destination_set = wp_nav->set_wp_destination_loc(rtl_path.return_target);
 
-    if (!wp_nav->set_wp_destination(rtl_path.return_target)) {
-        // failure must be caused by missing terrain data, restart RTL
-        restart_without_terrain();
-    }
-
-    // initialise yaw to point home (maybe)
+    // initialise yaw to point at the return point (maybe)
     auto_yaw.set_mode_to_default(true);
+
+    return destination_set;
 }
 
-// rtl_climb_return_run - implements the initial climb, return home and descent portions of RTL which all rely on the wp controller
-//      called by rtl_run at 100hz or more
-void ModeRTL::climb_return_run()
+// run_wp_controllers - run the wp_nav horizontal, vertical and attitude controllers shared by
+//   the climb, return and hold stages.  Returns false when disarmed/landed (caller returns).
+bool ModeRTL::run_wp_controllers()
 {
     // if not armed set throttle to zero and exit immediately
     if (is_disarmed_or_landed()) {
-        make_safe_spool_down();
-        return;
-    }
-
-    // process pilot's yaw input
-    float target_yaw_rate = 0;
-    if (!copter.failsafe.radio) {
-        // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(channel_yaw->get_control_in());
-        if (!is_zero(target_yaw_rate)) {
-            auto_yaw.set_mode(AUTO_YAW_HOLD);
-        }
+        make_safe_ground_handling();
+        return false;
     }
 
     // set motors to full range
@@ -177,201 +271,178 @@ void ModeRTL::climb_return_run()
     // run waypoint controller
     copter.failsafe_terrain_set_status(wp_nav->update_wpnav());
 
-    // call z-axis position controller (wpnav should have already updated it's alt target)
-    pos_control->update_z_controller();
+    // WP_Nav has set the vertical position control targets
+    // run the vertical position controller and set output throttle
+    pos_control->D_update_controller();
 
-    // call attitude controller
-    if (auto_yaw.mode() == AUTO_YAW_HOLD) {
-        // roll & pitch from waypoint controller, yaw rate from pilot
-        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(wp_nav->get_roll(), wp_nav->get_pitch(), target_yaw_rate);
-    }else{
-        // roll, pitch from waypoint controller, yaw heading from auto_heading()
-        attitude_control->input_euler_angle_roll_pitch_yaw(wp_nav->get_roll(), wp_nav->get_pitch(), auto_yaw.yaw(),true);
+    // call attitude controller with auto yaw
+    attitude_control->input_thrust_vector_heading(pos_control->get_thrust_vector(), auto_yaw.get_heading());
+
+    return true;
+}
+
+// climb_return_run - runs the initial climb and return portions of RTL, both of which rely on the wp controller
+//      called by rtl_run at 100hz or more
+void ModeRTL::climb_return_run()
+{
+    if (!run_wp_controllers()) {
+        return;
     }
 
     // check if we've completed this stage of RTL
     _state_complete = wp_nav->reached_wp_destination();
 }
 
-// rtl_loiterathome_start - initialise return to home
-void ModeRTL::loiterathome_start()
+// hold_at_return_point_start - initialise the hold over the return point (home or nearest rally point)
+void ModeRTL::hold_at_return_point_start()
 {
-    _state = RTL_LoiterAtHome;
-    _state_complete = false;
-    _loiter_start_time = millis();
-
     // yaw back to initial take-off heading yaw unless pilot has already overridden yaw
-    if(auto_yaw.default_mode(true) != AUTO_YAW_HOLD) {
-        auto_yaw.set_mode(AUTO_YAW_RESETTOARMEDYAW);
+    if (auto_yaw.default_mode(true) != AutoYaw::Mode::HOLD) {
+        auto_yaw.set_mode(AutoYaw::Mode::RESET_TO_ARMED_YAW);
     } else {
-        auto_yaw.set_mode(AUTO_YAW_HOLD);
+        auto_yaw.set_mode(AutoYaw::Mode::HOLD);
     }
 }
 
-// rtl_climb_return_descent_run - implements the initial climb, return home and descent portions of RTL which all rely on the wp controller
+// hold_at_return_point_run - holds over the return point until RTL_LOIT_TIME elapses (and the armed heading is reached, if realigning yaw)
 //      called by rtl_run at 100hz or more
-void ModeRTL::loiterathome_run()
+void ModeRTL::hold_at_return_point_run()
 {
-    // if not armed set throttle to zero and exit immediately
-    if (is_disarmed_or_landed()) {
-        make_safe_spool_down();
+    if (!run_wp_controllers()) {
         return;
     }
 
-    // process pilot's yaw input
-    float target_yaw_rate = 0;
-    if (!copter.failsafe.radio) {
-        // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(channel_yaw->get_control_in());
-        if (!is_zero(target_yaw_rate)) {
-            auto_yaw.set_mode(AUTO_YAW_HOLD);
-        }
-    }
-
-    // set motors to full range
-    motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
-
-    // run waypoint controller
-    copter.failsafe_terrain_set_status(wp_nav->update_wpnav());
-
-    // call z-axis position controller (wpnav should have already updated it's alt target)
-    pos_control->update_z_controller();
-
-    // call attitude controller
-    if (auto_yaw.mode() == AUTO_YAW_HOLD) {
-        // roll & pitch from waypoint controller, yaw rate from pilot
-        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(wp_nav->get_roll(), wp_nav->get_pitch(), target_yaw_rate);
-    }else{
-        // roll, pitch from waypoint controller, yaw heading from auto_heading()
-        attitude_control->input_euler_angle_roll_pitch_yaw(wp_nav->get_roll(), wp_nav->get_pitch(), auto_yaw.yaw(),true);
-    }
-
     // check if we've completed this stage of RTL
-    if ((millis() - _loiter_start_time) >= (uint32_t)g.rtl_loiter_time.get()) {
-        if (auto_yaw.mode() == AUTO_YAW_RESETTOARMEDYAW) {
+    const uint32_t hold_elapsed_ms = millis() - _stage_start_ms;
+    if (hold_elapsed_ms >= g.rtl_loiter_time) {
+        if (auto_yaw.mode() == AutoYaw::Mode::RESET_TO_ARMED_YAW) {
             // check if heading is within 2 degrees of heading when vehicle was armed
-            if (abs(wrap_180_cd(ahrs.yaw_sensor-copter.initial_armed_bearing)) <= 200) {
+            // todo: Use the target heading instead of the actual heading to allow landing even if yaw control is lost.
+            if (fabsf(wrap_PI(ahrs.get_yaw_rad() - copter.initial_armed_bearing_rad)) <= radians(2.0)) {
                 _state_complete = true;
             }
         } else {
-            // we have loitered long enough
+            // we have held long enough
             _state_complete = true;
         }
     }
 }
 
-// rtl_descent_start - initialise descent to final alt
+// descent_start - initialise descent to final alt
 void ModeRTL::descent_start()
 {
-    _state = RTL_FinalDescent;
-    _state_complete = false;
-
-    // Set wp navigation target to above home
-    loiter_nav->init_target(wp_nav->get_wp_destination());
-
     // initialise altitude target to stopping point
-    pos_control->set_target_to_stopping_point_z();
+    pos_control->D_init_controller_stopping_point();
 
     // initialise yaw
-    auto_yaw.set_mode(AUTO_YAW_HOLD);
+    auto_yaw.set_mode(AutoYaw::Mode::HOLD);
 
+#if AP_LANDINGGEAR_ENABLED
     // optionally deploy landing gear
     copter.landinggear.deploy_for_landing();
+#endif
 }
 
-// rtl_descent_run - implements the final descent to the RTL_ALT
+// descent_run - implements the final descent to the RTL_ALT_M
 //      called by rtl_run at 100hz or more
 void ModeRTL::descent_run()
 {
-    float target_roll = 0.0f;
-    float target_pitch = 0.0f;
-    float target_yaw_rate = 0.0f;
+    Vector2f vel_correction_ms;
 
     // if not armed set throttle to zero and exit immediately
     if (is_disarmed_or_landed()) {
-        make_safe_spool_down();
+        make_safe_ground_handling();
         return;
     }
 
     // process pilot's input
-    if (!copter.failsafe.radio) {
+    if (rc().has_valid_input()) {
         if ((g.throttle_behavior & THR_BEHAVE_HIGH_THROTTLE_CANCELS_LAND) != 0 && copter.rc_throttle_control_in_filter.get() > LAND_CANCEL_TRIGGER_THR){
-            AP::logger().Write_Event(LogEvent::LAND_CANCELLED_BY_PILOT);
+            LOGGER_WRITE_EVENT(LogEvent::LAND_CANCELLED_BY_PILOT);
             // exit land if throttle is high
             if (!copter.set_mode(Mode::Number::LOITER, ModeReason::THROTTLE_LAND_ESCAPE)) {
+#if MODE_ALTHOLD_ENABLED
                 copter.set_mode(Mode::Number::ALT_HOLD, ModeReason::THROTTLE_LAND_ESCAPE);
+#endif
             }
         }
 
         if (g.land_repositioning) {
-            // apply SIMPLE mode transform to pilot inputs
-            update_simple_mode();
-
-            // convert pilot input to lean angles
-            get_pilot_desired_lean_angles(target_roll, target_pitch, loiter_nav->get_angle_max_cd(), attitude_control->get_althold_lean_angle_max());
+            // convert pilot input to reposition velocity
+            vel_correction_ms = get_pilot_desired_velocity(wp_nav->get_wp_acceleration_mss() * 0.5);
 
             // record if pilot has overridden roll or pitch
-            if (!is_zero(target_roll) || !is_zero(target_pitch)) {
+            if (!vel_correction_ms.is_zero()) {
                 if (!copter.ap.land_repo_active) {
-                    AP::logger().Write_Event(LogEvent::LAND_REPO_ACTIVE);
+                    LOGGER_WRITE_EVENT(LogEvent::LAND_REPO_ACTIVE);
                 }
                 copter.ap.land_repo_active = true;
             }
         }
-
-        // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(channel_yaw->get_control_in());
     }
 
     // set motors to full range
     motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
-    // process roll, pitch inputs
-    loiter_nav->set_pilot_desired_acceleration(target_roll, target_pitch, G_Dt);
+    Vector2f accel;
+    pos_control->input_vel_accel_NE_m(vel_correction_ms, accel);
+    pos_control->NE_update_controller();
 
-    // run loiter controller
-    loiter_nav->update();
-
-    // call z-axis position controller
-    pos_control->set_alt_target_with_slew(rtl_path.descent_target.alt, G_Dt);
-    pos_control->update_z_controller();
+    // WP_Nav has set the vertical position control targets
+    // run the vertical position controller and set output throttle
+    pos_control->D_set_alt_target_with_slew_m(rtl_path.descent_target.alt * 0.01);
+    pos_control->D_update_controller();
 
     // roll & pitch from waypoint controller, yaw rate from pilot
-    attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(loiter_nav->get_roll(), loiter_nav->get_pitch(), target_yaw_rate);
+    attitude_control->input_thrust_vector_heading(pos_control->get_thrust_vector(), auto_yaw.get_heading());
 
     // check if we've reached within 20cm of final altitude
-    _state_complete = labs(rtl_path.descent_target.alt - copter.current_loc.alt) < 20;
+    _state_complete = fabsf(rtl_path.descent_target.alt * 0.01 - pos_control->get_pos_estimate_U_m()) < 0.2;
 }
 
-// rtl_loiterathome_start - initialise controllers to loiter over home
+// land_start - initialise controllers to hold over the return point
 void ModeRTL::land_start()
 {
-    _state = RTL_Land;
-    _state_complete = false;
+    // set horizontal speed and acceleration limits
+    pos_control->NE_set_max_speed_accel_m(wp_nav->get_default_speed_NE_ms(), wp_nav->get_wp_acceleration_mss());
+    pos_control->NE_set_correction_speed_accel_m(wp_nav->get_default_speed_NE_ms(), wp_nav->get_wp_acceleration_mss());
 
-    // Set wp navigation target to above home
-    loiter_nav->init_target(wp_nav->get_wp_destination());
+    // initialise the horizontal position controller
+    if (!pos_control->NE_is_active()) {
+        pos_control->NE_init_controller();
+    }
 
-    // initialise position and desired velocity
-    if (!pos_control->is_active_z()) {
-        pos_control->set_alt_target_to_current_alt();
-        pos_control->set_desired_velocity_z(inertial_nav.get_velocity_z());
+    // initialise the vertical position controller
+    if (!pos_control->D_is_active()) {
+        pos_control->D_init_controller();
     }
 
     // initialise yaw
-    auto_yaw.set_mode(AUTO_YAW_HOLD);
+    auto_yaw.set_mode(AutoYaw::Mode::HOLD);
 
+#if AP_LANDINGGEAR_ENABLED
     // optionally deploy landing gear
     copter.landinggear.deploy_for_landing();
+#endif
 }
 
 bool ModeRTL::is_landing() const
 {
-    return _state == RTL_Land;
+    return _state == SubMode::LAND;
 }
 
-// rtl_returnhome_run - return home
-//      called by rtl_run at 100hz or more
+// true once RTL has completed its final stage: the final descent has reached RTL_ALT_FINAL,
+// or (when landing) the vehicle has touched down and spooled to ground idle.
+// Used by ModeAuto::verify_RTL.
+bool ModeRTL::is_complete() const
+{
+    return _state_complete &&
+           ((_state == SubMode::FINAL_DESCENT) ||
+            (_state == SubMode::LAND && motors->get_spool_state() == AP_Motors::SpoolState::GROUND_IDLE));
+}
+
+// land_run - run the landing controllers to put the aircraft on the ground
+// called by rtl_run at 100hz or more
 void ModeRTL::land_run(bool disarm_on_land)
 {
     // check if we've completed this stage of RTL
@@ -384,26 +455,21 @@ void ModeRTL::land_run(bool disarm_on_land)
 
     // if not armed set throttle to zero and exit immediately
     if (is_disarmed_or_landed()) {
-        make_safe_spool_down();
-        loiter_nav->clear_pilot_desired_acceleration();
-        loiter_nav->init_target();
+        make_safe_ground_handling();
         return;
     }
 
     // set motors to full range
     motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
-    land_run_horizontal_control();
-    land_run_vertical_control();
+    // run normal landing or precision landing (if enabled)
+    land_run_normal_or_precland();
 }
 
 void ModeRTL::build_path()
 {
     // origin point is our stopping point
-    Vector3f stopping_point;
-    pos_control->get_stopping_point_xy(stopping_point);
-    pos_control->get_stopping_point_z(stopping_point);
-    rtl_path.origin_point = Location(stopping_point);
+    rtl_path.origin_point = get_stopping_point();
     rtl_path.origin_point.change_alt_frame(Location::AltFrame::ABOVE_HOME);
 
     // compute return target
@@ -412,35 +478,42 @@ void ModeRTL::build_path()
     // climb target is above our origin point at the return altitude
     rtl_path.climb_target = Location(rtl_path.origin_point.lat, rtl_path.origin_point.lng, rtl_path.return_target.alt, rtl_path.return_target.get_alt_frame());
 
-    // descent target is below return target at rtl_alt_final
-    rtl_path.descent_target = Location(rtl_path.return_target.lat, rtl_path.return_target.lng, g.rtl_alt_final, Location::AltFrame::ABOVE_HOME);
+    // descent target is below return target at rtl_alt_final_m
+    rtl_path.descent_target = Location(rtl_path.return_target.lat, rtl_path.return_target.lng, alt_final_m.get() * 100, Location::AltFrame::ABOVE_HOME);
+
+    // Target altitude is passed directly to the position controller so must be relative to origin
+    rtl_path.descent_target.change_alt_frame(Location::AltFrame::ABOVE_ORIGIN);
 
     // set land flag
-    rtl_path.land = g.rtl_alt_final <= 0;
+    rtl_path.land = alt_final_m.get() <= 0;
 }
 
 // compute the return target - home or rally point
 //   return target's altitude is updated to a higher altitude that the vehicle can safely return at (frame may also be set)
 void ModeRTL::compute_return_target()
 {
-    // set return target to nearest rally point or home position (Note: alt is absolute)
-#if AC_RALLY == ENABLED
+    // set return target to nearest rally point or home position
+#if HAL_RALLY_ENABLED
     rtl_path.return_target = copter.rally.calc_best_rally_or_home_location(copter.current_loc, ahrs.get_home().alt);
+    rtl_path.return_target.change_alt_frame(Location::AltFrame::ABSOLUTE);
 #else
     rtl_path.return_target = ahrs.get_home();
 #endif
 
-    // curr_alt is current altitude above home or above terrain depending upon use_terrain
-    int32_t curr_alt = copter.current_loc.alt;
+    // get position controller Z-axis offset in cm above EKF origin
+    float pos_offset_u_m = pos_control->get_pos_offset_U_m();
+
+    // curr_alt_m is current altitude, with any offset removed, above home or above terrain depending upon use_terrain
+    float curr_alt_m = copter.current_loc.alt * 0.01 - pos_offset_u_m;
 
     // determine altitude type of return journey (alt-above-home, alt-above-terrain using range finder or alt-above-terrain using terrain database)
     ReturnTargetAltType alt_type = ReturnTargetAltType::RELATIVE;
-    if (terrain_following_allowed && (get_alt_type() == RTLAltType::RTL_ALTTYPE_TERRAIN)) {
-        // convert RTL_ALT_TYPE and WPNAV_RFNG_USE parameters to ReturnTargetAltType
+    if (terrain_following_allowed && (get_alt_type() == RTLAltType::TERRAIN)) {
+        // convert RTL_ALT_TYPE and WP_RFNG_USE parameters to ReturnTargetAltType
         switch (wp_nav->get_terrain_source()) {
         case AC_WPNav::TerrainSource::TERRAIN_UNAVAILABLE:
             alt_type = ReturnTargetAltType::RELATIVE;
-            AP::logger().Write_Error(LogErrorSubsystem::NAVIGATION, LogErrorCode::RTL_MISSING_RNGFND);
+            LOGGER_WRITE_ERROR(LogErrorSubsystem::NAVIGATION, LogErrorCode::RTL_MISSING_RNGFND);
             gcs().send_text(MAV_SEVERITY_CRITICAL, "RTL: no terrain data, using alt-above-home");
             break;
         case AC_WPNav::TerrainSource::TERRAIN_FROM_RANGEFINDER:
@@ -452,32 +525,35 @@ void ModeRTL::compute_return_target()
         }
     }
 
-    // set curr_alt and return_target.alt from range finder
+    // set curr_alt_m and return_target.alt from range finder
     if (alt_type == ReturnTargetAltType::RANGEFINDER) {
-        if (copter.get_rangefinder_height_interpolated_cm(curr_alt)) {
+        if (copter.get_rangefinder_height_interpolated_m(curr_alt_m)) {
+            // subtract vertical offset from altitude.
+            curr_alt_m -= pos_offset_u_m;
             // set return_target.alt
-            rtl_path.return_target.set_alt_cm(MAX(curr_alt + MAX(0, g.rtl_climb_min), MAX(g.rtl_altitude, RTL_ALT_MIN)), Location::AltFrame::ABOVE_TERRAIN);
+            rtl_path.return_target.set_alt_m(MAX(curr_alt_m + MAX(0.0f, climb_min_m.get()), MAX(altitude_m.get(), RTL_ALT_MIN_M)), Location::AltFrame::ABOVE_TERRAIN);
         } else {
             // fallback to relative alt and warn user
             alt_type = ReturnTargetAltType::RELATIVE;
             gcs().send_text(MAV_SEVERITY_CRITICAL, "RTL: rangefinder unhealthy, using alt-above-home");
-            AP::logger().Write_Error(LogErrorSubsystem::NAVIGATION, LogErrorCode::RTL_MISSING_RNGFND);
+            LOGGER_WRITE_ERROR(LogErrorSubsystem::NAVIGATION, LogErrorCode::RTL_MISSING_RNGFND);
         }
     }
 
-    // set curr_alt and return_target.alt from terrain database
+    // set curr_alt_m and return_target.alt from terrain database
     if (alt_type == ReturnTargetAltType::TERRAINDATABASE) {
-        // set curr_alt to current altitude above terrain
+        // set curr_alt_m to current altitude above terrain
         // convert return_target.alt from an abs (above MSL) to altitude above terrain
         //   Note: the return_target may be a rally point with the alt set above the terrain alt (like the top of a building)
-        int32_t curr_terr_alt;
-        if (copter.current_loc.get_alt_cm(Location::AltFrame::ABOVE_TERRAIN, curr_terr_alt) &&
+        float curr_terr_alt_m;
+        if (copter.current_loc.get_alt_m(Location::AltFrame::ABOVE_TERRAIN, curr_terr_alt_m) &&
             rtl_path.return_target.change_alt_frame(Location::AltFrame::ABOVE_TERRAIN)) {
-            curr_alt = curr_terr_alt;
+            // subtract vertical offset from altitude.
+            curr_alt_m = curr_terr_alt_m - pos_offset_u_m;
         } else {
             // fallback to relative alt and warn user
             alt_type = ReturnTargetAltType::RELATIVE;
-            AP::logger().Write_Error(LogErrorSubsystem::TERRAIN, LogErrorCode::MISSING_TERRAIN_DATA);
+            LOGGER_WRITE_ERROR(LogErrorSubsystem::TERRAIN, LogErrorCode::MISSING_TERRAIN_DATA);
             gcs().send_text(MAV_SEVERITY_CRITICAL, "RTL: no terrain data, using alt-above-home");
         }
     }
@@ -486,7 +562,7 @@ void ModeRTL::compute_return_target()
     if (alt_type == ReturnTargetAltType::RELATIVE) {
         if (!rtl_path.return_target.change_alt_frame(Location::AltFrame::ABOVE_HOME)) {
             // this should never happen but just in case
-            rtl_path.return_target.set_alt_cm(0, Location::AltFrame::ABOVE_HOME);
+            rtl_path.return_target.set_alt_m(0, Location::AltFrame::ABOVE_HOME);
             gcs().send_text(MAV_SEVERITY_WARNING, "RTL: unexpected error calculating target alt");
         }
     }
@@ -494,55 +570,55 @@ void ModeRTL::compute_return_target()
     // set new target altitude to return target altitude
     // Note: this is alt-above-home or terrain-alt depending upon rtl_alt_type
     // Note: ignore negative altitudes which could happen if user enters negative altitude for rally point or terrain is higher at rally point compared to home
-    int32_t target_alt = MAX(rtl_path.return_target.alt, 0);
+    float target_alt_m = MAX(rtl_path.return_target.alt, 0) * 0.01;
 
     // increase target to maximum of current altitude + climb_min and rtl altitude
-    target_alt = MAX(target_alt, curr_alt + MAX(0, g.rtl_climb_min));
-    target_alt = MAX(target_alt, MAX(g.rtl_altitude, RTL_ALT_MIN));
+    const float min_rtl_alt_m = MAX(RTL_ALT_MIN_M, curr_alt_m + MAX(0.0f, climb_min_m.get()));
+    target_alt_m = MAX(target_alt_m, MAX(altitude_m.get(), min_rtl_alt_m));
 
     // reduce climb if close to return target
-    float rtl_return_dist_cm = rtl_path.return_target.get_distance(rtl_path.origin_point) * 100.0f;
+    float rtl_return_dist_m = rtl_path.return_target.get_distance(rtl_path.origin_point);
     // don't allow really shallow slopes
     if (g.rtl_cone_slope >= RTL_MIN_CONE_SLOPE) {
-        target_alt = MAX(curr_alt, MIN(target_alt, MAX(rtl_return_dist_cm*g.rtl_cone_slope, curr_alt+RTL_ABS_MIN_CLIMB)));
+        target_alt_m = MIN(target_alt_m, MAX(rtl_return_dist_m * g.rtl_cone_slope, min_rtl_alt_m));
     }
 
-    // set returned target alt to new target_alt (don't change altitude type)
-    rtl_path.return_target.set_alt_cm(target_alt, (alt_type == ReturnTargetAltType::RELATIVE) ? Location::AltFrame::ABOVE_HOME : Location::AltFrame::ABOVE_TERRAIN);
+    // set returned target alt to new target_alt_m (don't change altitude type)
+    rtl_path.return_target.set_alt_m(target_alt_m, (alt_type == ReturnTargetAltType::RELATIVE) ? Location::AltFrame::ABOVE_HOME : Location::AltFrame::ABOVE_TERRAIN);
 
-#if AC_FENCE == ENABLED
+#if AP_FENCE_ENABLED
     // ensure not above fence altitude if alt fence is enabled
     // Note: because the rtl_path.climb_target's altitude is simply copied from the return_target's altitude,
     //       if terrain altitudes are being used, the code below which reduces the return_target's altitude can lead to
     //       the vehicle not climbing at all as RTL begins.  This can be overly conservative and it might be better
     //       to apply the fence alt limit independently on the origin_point and return_target
     if ((copter.fence.get_enabled_fences() & AC_FENCE_TYPE_ALT_MAX) != 0) {
-        // get return target as alt-above-home so it can be compared to fence's alt
-        if (rtl_path.return_target.get_alt_cm(Location::AltFrame::ABOVE_HOME, target_alt)) {
-            float fence_alt = copter.fence.get_safe_alt_max()*100.0f;
-            if (target_alt > fence_alt) {
+        // get return target in max alt frame so it can be compared to fence's alt
+        if (rtl_path.return_target.get_alt_m(copter.fence.get_alt_max_frame(), target_alt_m)) {
+            float fence_alt_m = copter.fence.get_safe_alt_max_m();
+            if (target_alt_m > fence_alt_m) {
                 // reduce target alt to the fence alt
-                rtl_path.return_target.alt -= (target_alt - fence_alt);
+                rtl_path.return_target.alt -= (target_alt_m - fence_alt_m) * 100.0;
             }
         }
     }
 #endif
 
     // ensure we do not descend
-    rtl_path.return_target.alt = MAX(rtl_path.return_target.alt, curr_alt);
+    rtl_path.return_target.alt = MAX(rtl_path.return_target.alt, curr_alt_m * 100.0);
 }
 
-bool ModeRTL::get_wp(Location& destination)
+bool ModeRTL::get_wp(Location& destination) const
 {
     // provide target in states which use wp_nav
     switch (_state) {
-    case RTL_Starting:
-    case RTL_InitialClimb:
-    case RTL_ReturnHome:
-    case RTL_LoiterAtHome:
-    case RTL_FinalDescent:
+    case SubMode::STARTING:
+    case SubMode::INITIAL_CLIMB:
+    case SubMode::FLY_TO_RETURN_POINT:
+    case SubMode::HOLD_AT_RETURN_POINT:
+    case SubMode::FINAL_DESCENT:
         return wp_nav->get_oa_wp_destination(destination);
-    case RTL_Land:
+    case SubMode::LAND:
         return false;
     }
 
@@ -550,14 +626,47 @@ bool ModeRTL::get_wp(Location& destination)
     return false;
 }
 
-uint32_t ModeRTL::wp_distance() const
+float ModeRTL::wp_distance_m() const
 {
-    return wp_nav->get_wp_distance_to_destination();
+    return wp_nav->get_wp_distance_to_destination_m();
 }
 
-int32_t ModeRTL::wp_bearing() const
+float ModeRTL::wp_bearing_deg() const
 {
-    return wp_nav->get_wp_bearing_to_destination();
+    return degrees(wp_nav->get_wp_bearing_to_destination_rad());
+}
+
+// returns true if pilot's yaw input should be used to adjust vehicle's heading
+bool ModeRTL::use_pilot_yaw(void) const
+{
+    // use land mode setting during descent
+    if (_state == SubMode::FINAL_DESCENT || _state == SubMode::LAND) {
+        return copter.mode_land.use_pilot_yaw();
+    }
+    return !option_is_enabled(Option::IgnorePilotYaw);
+}
+
+bool ModeRTL::set_speed_NE_ms(float speed_ne_ms)
+{
+    copter.wp_nav->set_speed_NE_ms(speed_ne_ms);
+    return true;
+}
+
+bool ModeRTL::set_speed_up_ms(float speed_up_ms)
+{
+    copter.wp_nav->set_speed_up_ms(speed_up_ms);
+    return true;
+}
+
+bool ModeRTL::set_speed_down_ms(float speed_down_ms)
+{
+    copter.wp_nav->set_speed_down_ms(speed_down_ms);
+    return true;
+}
+
+bool ModeRTL::option_is_enabled(Option option) const
+{
+    return ((copter.g2.rtl_options & (uint32_t)option) != 0);
 }
 
 #endif

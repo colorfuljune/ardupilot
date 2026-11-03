@@ -3,10 +3,15 @@
 //
 
 #include <AP_AHRS/AP_AHRS.h>
+#include <AP_Airspeed/AP_Airspeed.h>
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Module/AP_Module.h>
 #include <AP_GPS/AP_GPS.h>
 #include <AP_Baro/AP_Baro.h>
+#include <AP_ExternalAHRS/AP_ExternalAHRS.h>
+#include <GCS_MAVLink/GCS_Dummy.h>
+
+GCS_Dummy _gcs;
 
 void setup();
 void loop();
@@ -15,12 +20,18 @@ const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 
 // sensor declaration
 static AP_InertialSensor ins;
+#if AP_EXTERNAL_AHRS_ENABLED
+ static AP_ExternalAHRS eAHRS;
+#endif // AP_EXTERNAL_AHRS_ENABLED
 static AP_GPS gps;
 static AP_Baro baro;
+#if AP_AIRSPEED_ENABLED
+static AP_Airspeed airspeed;
+#endif
 static AP_SerialManager serial_manager;
 
 // choose which AHRS system to use
-static AP_AHRS_DCM ahrs{};
+static AP_AHRS ahrs{};
 
 void setup(void)
 {
@@ -29,7 +40,7 @@ void setup(void)
     baro.init();
     ahrs.init();
 
-    gps.init(serial_manager);
+    gps.init();
 }
 
 void loop(void)

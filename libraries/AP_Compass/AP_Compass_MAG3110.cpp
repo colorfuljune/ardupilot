@@ -12,13 +12,15 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include "AP_Compass_MAG3110.h"
+
+#if AP_COMPASS_MAG3110_ENABLED
+
 #include <utility>
 
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Math/AP_Math.h>
 #include <stdio.h>
-
-#include "AP_Compass_MAG3110.h"
 
 extern const AP_HAL::HAL &hal;
 
@@ -91,7 +93,7 @@ AP_Compass_Backend *AP_Compass_MAG3110::probe(AP_HAL::OwnPtr<AP_HAL::Device> dev
     if (!dev) {
         return nullptr;
     }
-    AP_Compass_MAG3110 *sensor = new AP_Compass_MAG3110(std::move(dev));
+    AP_Compass_MAG3110 *sensor = NEW_NOTHROW AP_Compass_MAG3110(std::move(dev));
     if (!sensor || !sensor->init(rotation)) {
         delete sensor;
         return nullptr;
@@ -117,14 +119,13 @@ bool AP_Compass_MAG3110::init(enum Rotation rotation)
     
     /* register the compass instance in the frontend */
     _dev->set_device_type(DEVTYPE_MAG3110);
-    if (!register_compass(_dev->get_bus_id(), _compass_instance)) {
+    if (!register_compass(_dev->get_bus_id())) {
         return false;
     }
-    set_dev_id(_compass_instance, _dev->get_bus_id());
 
-    set_rotation(_compass_instance, rotation);
+    set_rotation(rotation);
 
-    set_external(_compass_instance, true);
+    set_external(true);
 
     // read at 75Hz
     _dev->register_periodic_callback(13333, FUNCTOR_BIND_MEMBER(&AP_Compass_MAG3110::_update, void)); 
@@ -206,7 +207,7 @@ void AP_Compass_MAG3110::_update()
 
     Vector3f raw_field = Vector3f((float)_mag_x, (float)_mag_y, (float)_mag_z) * MAG_SCALE;
 
-    accumulate_sample(raw_field, _compass_instance);
+    accumulate_sample(raw_field);
 }
 
 
@@ -217,5 +218,7 @@ void AP_Compass_MAG3110::read()
         return;
     }
 
-    drain_accumulated_samples(_compass_instance);
+    drain_accumulated_samples();
 }
+
+#endif  // AP_COMPASS_MAG3110_ENABLED

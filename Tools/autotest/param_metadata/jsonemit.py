@@ -1,20 +1,29 @@
-#!/usr/bin/env python
+# flake8: noqa
 
 import json
 import copy
 from emit import Emit
 
 
-# Emit APM documentation in JSON format
+# Emit ArduPilot documentation in JSON format
 class JSONEmit(Emit):
-    def __init__(self):
-        Emit.__init__(self)
-        json_fname = 'apm.pdef.json'
-        self.f = open(json_fname, mode='w')
+    def output_fname(self):
+        return 'apm.pdef.json'
+
+    def __init__(self, *args, **kwargs):
+        Emit.__init__(self, *args, **kwargs)
+        self.f = open(self.output_fname(), mode='w')
         self.content = {"json": {"version": 0}}
-        self.name = ''
+        self.firmware_content = {}
 
     def close(self):
+        # Include optional firmware metadata if provided
+        if self.git_sha is not None:
+            self.firmware_content['git_sha'] = self.git_sha
+        if self.git_tag is not None:
+            self.firmware_content['git_tag'] = self.git_tag
+        if self.firmware_content:
+            self.content['json']['firmware'] = self.firmware_content
         json.dump(self.content, self.f, indent=2, sort_keys=True)
         self.f.close()
 
@@ -33,13 +42,14 @@ class JSONEmit(Emit):
         # Copy content to avoid any modification
         g = copy.deepcopy(g)
 
-        # Get vehicle name
-        if 'truename' in g.__dict__:
-            self.name = g.__dict__['truename']
-            self.content[self.name] = {}
+        # Make new dict if one does not already exist
+        if g.name not in self.content:
+            self.content[g.name] = {}
 
         # Check all params available
         for param in g.params:
+            if not self.should_emit_param(param):
+                continue
             param_json = {}
 
             # Get display name
@@ -61,9 +71,19 @@ class JSONEmit(Emit):
             if ':' in name:
                 name = name.split(':')[1]
 
-            # Remove real_path key
-            if 'real_path' in param.__dict__:
-                param.__dict__.pop('real_path')
+            # Remove various unwanted keys
+            for key in list(param.__dict__.keys()):
+                if not self.should_emit_field(param, key):
+                    param.__dict__.pop(key)
+            for key in 'real_path', 'SortValues', '__field_text':
+                try:
+                    param.__dict__.pop(key)
+                except KeyError:
+                    pass
+
+            # Remove __field_text key
+            if '__field_text' in param.__dict__:
+                param.__dict__.pop('__field_text')
 
             # Get range section if available
             range_json = {}
@@ -100,4 +120,4 @@ class JSONEmit(Emit):
 
         # Update main content with actual content
         for key in content:
-            self.content[self.name][key] = content[key]
+            self.content[g.name][key] = content[key]

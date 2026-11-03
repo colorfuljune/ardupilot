@@ -9,11 +9,19 @@
  * LOCATION
  */
 
-// return horizontal distance in centimeters between two positions
-float        get_horizontal_distance_cm(const Vector3f &origin, const Vector3f &destination);
+// Computes straight-line distance in the horizontal plane between two positions.
+// Input units (e.g., meters, centimeters) must match; no unit conversion is performed.
+template <typename T>
+float get_horizontal_distance(const Vector2<T> &origin, const Vector2<T> &destination)
+{
+    return (destination - origin).length();
+}
+
+// return bearing in radians between two positions
+float        get_bearing_rad(const Vector2f &origin, const Vector2f &destination);
 
 // return bearing in centi-degrees between two positions
-float        get_bearing_cd(const Vector3f &origin, const Vector3f &destination);
+float        get_bearing_cd(const Vector2f &origin, const Vector2f &destination);
 
 // Converts from WGS84 geodetic coordinates (lat, lon, height)
 // into WGS84 Earth Centered, Earth Fixed (ECEF) coordinates

@@ -3,430 +3,808 @@
 #include <AP_Common/AP_Common.h>
 #include <AP_Param/AP_Param.h>
 #include <AP_Math/AP_Math.h>
-#include <AC_PID/AC_P.h>               // P library
-#include <AC_PID/AC_PID.h>             // PID library
-#include <AC_PID/AC_PI_2D.h>           // PI library (2-axis)
-#include <AC_PID/AC_PID_2D.h>          // PID library (2-axis)
-#include <AP_InertialNav/AP_InertialNav.h>     // Inertial Navigation library
-#include "AC_AttitudeControl.h" // Attitude control library
-#include <AP_Motors/AP_Motors.h>          // motors library
-#include <AP_Vehicle/AP_Vehicle.h>         // common vehicle parameters
+#include <AC_PID/AC_P.h>            // P library
+#include <AC_PID/AC_PID.h>          // PID library
+#include <AC_PID/AC_P_1D.h>         // P library (1-axis)
+#include <AC_PID/AC_P_2D.h>         // P library (2-axis)
+#include <AC_PID/AC_PI_2D.h>        // PI library (2-axis)
+#include <AC_PID/AC_PID_Basic.h>    // PID library (1-axis)
+#include <AC_PID/AC_PID_2D.h>       // PID library (2-axis)
+#include <AP_Scripting/AP_Scripting_config.h>
+#include "AC_AttitudeControl.h"     // Attitude control library
 
+#include <AP_Logger/LogStructure.h>
 
 // position controller default definitions
-#define POSCONTROL_ACCELERATION_MIN             50.0f   // minimum horizontal acceleration in cm/s/s - used for sanity checking acceleration in leash length calculation
-#define POSCONTROL_ACCEL_XY                     100.0f  // default horizontal acceleration in cm/s/s.  This is overwritten by waypoint and loiter controllers
-#define POSCONTROL_ACCEL_XY_MAX                 980.0f  // max horizontal acceleration in cm/s/s that the position velocity controller will ask from the lower accel controller
-#define POSCONTROL_STOPPING_DIST_UP_MAX         300.0f  // max stopping distance (in cm) vertically while climbing
-#define POSCONTROL_STOPPING_DIST_DOWN_MAX       200.0f  // max stopping distance (in cm) vertically while descending
+#define POSCONTROL_ACCEL_NE_MSS                 1.0f    // default horizontal acceleration in m/s². This is overwritten by waypoint and loiter controllers
+#define POSCONTROL_JERK_NE_MSSS                 5.0f    // default horizontal jerk m/s³
 
-#define POSCONTROL_SPEED                        500.0f  // default horizontal speed in cm/s
-#define POSCONTROL_SPEED_DOWN                  -150.0f  // default descent rate in cm/s
-#define POSCONTROL_SPEED_UP                     250.0f  // default climb rate in cm/s
+#define POSCONTROL_STOPPING_DIST_UP_MAX_M       3.0f    // max stopping distance (in m) vertically while climbing
+#define POSCONTROL_STOPPING_DIST_DOWN_MAX_M     2.0f    // max stopping distance (in m) vertically while descending
 
-#define POSCONTROL_ACCEL_Z                      250.0f  // default vertical acceleration in cm/s/s.
+#define POSCONTROL_SPEED_MS                     5.0f    // default horizontal speed in m/s
+#define POSCONTROL_SPEED_DOWN_MS                1.5f    // default descent rate in m/s
+#define POSCONTROL_SPEED_UP_MS                  2.5f    // default climb rate in m/s
 
-#define POSCONTROL_LEASH_LENGTH_MIN             100.0f  // minimum leash lengths in cm
+#define POSCONTROL_ACCEL_D_MSS                  2.5f    // default vertical acceleration in m/s²
+#define POSCONTROL_JERK_D_MSSS                  5.0f    // default vertical jerk m/s³
 
-#define POSCONTROL_DT_50HZ                      0.02f   // time difference in seconds for 50hz update rate
-#define POSCONTROL_DT_400HZ                     0.0025f // time difference in seconds for 400hz update rate
+#define POSCONTROL_THROTTLE_CUTOFF_FREQ_HZ      2.0f    // low-pass filter on acceleration error (unit: Hz)
 
-#define POSCONTROL_ACTIVE_TIMEOUT_US            200000  // position controller is considered active if it has been called within the past 0.2 seconds
+#define POSCONTROL_OVERSPEED_GAIN_U             2.0f    // gain controlling rate at which z-axis speed is brought back within SPEED_UP and SPEED_DOWN range
 
-#define POSCONTROL_VEL_ERROR_CUTOFF_FREQ        4.0f    // low-pass filter on velocity error (unit: hz)
-#define POSCONTROL_THROTTLE_CUTOFF_FREQ         2.0f    // low-pass filter on accel error (unit: hz)
-#define POSCONTROL_ACCEL_FILTER_HZ              2.0f    // low-pass filter on acceleration (unit: hz)
-#define POSCONTROL_JERK_RATIO                   1.0f    // Defines the time it takes to reach the requested acceleration
-
-#define POSCONTROL_OVERSPEED_GAIN_Z             2.0f    // gain controlling rate at which z-axis speed is brought back within SPEED_UP and SPEED_DOWN range
+#define POSCONTROL_RELAX_TC                     0.16f   // This is used to decay the I term to 5% in half a second
 
 class AC_PosControl
 {
 public:
 
     /// Constructor
-    AC_PosControl(AP_AHRS_View& ahrs, const AP_InertialNav& inav,
-                  const AP_Motors& motors, AC_AttitudeControl& attitude_control);
+    AC_PosControl(AP_AHRS_View& ahrs, const class AP_Motors& motors, AC_AttitudeControl& attitude_control);
+
+    // do not allow copying
+    CLASS_NO_COPY(AC_PosControl);
+
+    // Sets the timestep between controller updates (seconds).
+    // This should match the IMU sample time used by the controller.
+    void set_dt_s(float dt) { _dt_s = dt; }
+
+    // Returns the timestep used in the controller update (seconds).
+    float get_dt_s() const { return _dt_s; }
+
+    // Updates internal NED position and velocity estimates from AHRS.
+    // Falls back to vertical-only data if horizontal velocity or position is invalid or vibration forces it.
+    // When high_vibes is true, forces use of vertical fallback for velocity.
+    void update_estimates(bool high_vibes = false);
+
+    // Returns the jerk limit for horizontal path shaping in m/s³.
+    // Used to constrain acceleration changes in trajectory generation.
+    float get_shaping_jerk_NE_msss() const { return _shaping_jerk_ne_msss; }
+
 
     ///
-    /// initialisation functions
+    /// 3D position shaper
     ///
 
-    /// set_dt - sets time delta in seconds for all controllers (i.e. 100hz = 0.01, 400hz = 0.0025)
-    ///     updates z axis accel controller's D term filter
-    void set_dt(float delta_sec);
-    float get_dt() const { return _dt; }
+    // Sets a new NED position target in meters and computes a jerk-limited trajectory.
+    // Updates internal acceleration commands using a smooth kinematic path constrained
+    // by configured acceleration and jerk limits. 
+    // The path can be offset vertically to follow the terrain by providing the current 
+    // terrain level in the NED frame and the terrain margin. Terrain margin is used to
+    // constrain horizontal velocity to avoid vertical buffer violation.
+    void input_pos_NED_m(const Vector3p& pos_ned_m, float pos_terrain_target_d_m, float terrain_margin_m);
+
+    // Returns a scaling factor for horizontal velocity in m/s to ensure
+    // the vertical controller maintains a safe distance above terrain.
+    float terrain_scaler_D_m(float pos_terrain_d_m, float terrain_margin_m) const;
 
     ///
-    /// z position controller
+    /// Lateral position controller
     ///
 
-    /// set_max_speed_z - sets maximum climb and descent rates
-    ///     speed_down can be positive or negative but will always be interpreted as a descent speed
-    ///     leash length will be recalculated
-    void set_max_speed_z(float speed_down, float speed_up);
+    // Sets maximum horizontal speed (cm/s) and acceleration (cm/s²) for NE-axis shaping.
+    // Can be called anytime; transitions are handled smoothly.
+    // All arguments should be positive.
+    // See NE_set_max_speed_accel_m() for full details.
+    void NE_set_max_speed_accel_cm(float speed_cms, float accel_cmss);
 
-    /// get_max_speed_up - accessor for current maximum up speed in cm/s
-    float get_max_speed_up() const { return _speed_up_cms; }
+    // Sets maximum horizontal speed (m/s) and acceleration (m/s²) for NE-axis shaping.
+    // These values constrain the kinematic trajectory used by the lateral controller.
+    // All arguments should be positive.
+    void NE_set_max_speed_accel_m(float speed_ms, float accel_mss);
 
-    /// get_max_speed_down - accessors for current maximum down speed in cm/s.  Will be a negative number
-    float get_max_speed_down() const { return _speed_down_cms; }
+    // Sets horizontal correction limits for velocity (cm/s) and acceleration (cm/s²).
+    // Should be called only during initialization to avoid control discontinuities.
+    // All arguments should be positive.
+    // See NE_set_correction_speed_accel_m() for full details.
+    void NE_set_correction_speed_accel_cm(float speed_cms, float accel_cmss);
 
-    /// get_vel_target_z - returns current vertical speed in cm/s
-    float get_vel_target_z() const { return _vel_target.z; }
+    // Sets horizontal correction limits for velocity (m/s) and acceleration (m/s²).
+    // These values constrain the PID correction path, not the desired trajectory.
+    // All arguments should be positive.
+    void NE_set_correction_speed_accel_m(float speed_ms, float accel_mss);
 
-    /// set_max_accel_z - set the maximum vertical acceleration in cm/s/s
-    ///     leash length will be recalculated
-    void set_max_accel_z(float accel_cmss);
+    // Returns maximum horizontal speed in cm/s.
+    // See NE_get_max_speed_ms() for full details.
+    float NE_get_max_speed_cms() const { return NE_get_max_speed_ms() * 100.0; }
 
-    /// get_max_accel_z - returns current maximum vertical acceleration in cm/s/s
-    float get_max_accel_z() const { return _accel_z_cms; }
+    // Returns maximum horizontal speed in m/s used for shaping the trajectory.
+    float NE_get_max_speed_ms() const { return _vel_max_ne_ms; }
 
-    /// calc_leash_length - calculates the vertical leash lengths from maximum speed, acceleration
-    ///     called by update_z_controller if z-axis speed or accelerations are changed
-    void calc_leash_length_z();
+    // Returns maximum horizontal acceleration in m/s² used for trajectory shaping.
+    float NE_get_max_accel_mss() const { return _accel_max_ne_mss; }
 
-    /// set_alt_target - set altitude target in cm above home
-    void set_alt_target(float alt_cm) { _pos_target.z = alt_cm; }
+    // Sets maximum allowed horizontal position error in meters.
+    // Used to constrain the output of the horizontal position P controller.
+    void NE_set_pos_error_max_m(float error_max_m) { _p_pos_ne_m.set_error_max(error_max_m); }
 
-    /// set_alt_target_with_slew - adjusts target towards a final altitude target
-    ///     should be called continuously (with dt set to be the expected time between calls)
-    ///     actual position target will be moved no faster than the speed_down and speed_up
-    ///     target will also be stopped if the motors hit their limits or leash length is exceeded
-    void set_alt_target_with_slew(float alt_cm, float dt);
+    // Returns maximum allowed horizontal position error in meters.
+    float NE_get_pos_error_max_m() const { return _p_pos_ne_m.get_error_max(); }
 
-    /// set_alt_target_from_climb_rate - adjusts target up or down using a climb rate in cm/s
-    ///     should be called continuously (with dt set to be the expected time between calls)
-    ///     actual position target will be moved no faster than the speed_down and speed_up
-    ///     target will also be stopped if the motors hit their limits or leash length is exceeded
-    ///     set force_descend to true during landing to allow target to move low enough to slow the motors
-    virtual void set_alt_target_from_climb_rate(float climb_rate_cms, float dt, bool force_descend);
+    // Initializes NE controller to a stationary stopping point with zero velocity and acceleration.
+    // Use when the expected trajectory begins at rest but the starting position is unspecified.
+    // The starting position can be retrieved with get_pos_target_NED_m().
+    void NE_init_controller_stopping_point();
 
-    /// set_alt_target_from_climb_rate_ff - adjusts target up or down using a climb rate in cm/s using feed-forward
-    ///     should be called continuously (with dt set to be the expected time between calls)
-    ///     actual position target will be moved no faster than the speed_down and speed_up
-    ///     target will also be stopped if the motors hit their limits or leash length is exceeded
-    ///     set force_descend to true during landing to allow target to move low enough to slow the motors
-    virtual void set_alt_target_from_climb_rate_ff(float climb_rate_cms, float dt, bool force_descend);
+    // Smoothly decays NE acceleration over time to zero while maintaining current velocity and position.
+    // Reduces output acceleration by ~95% over 0.5 seconds to avoid abrupt transitions.
+    void NE_relax_velocity_controller();
 
-    /// add_takeoff_climb_rate - adjusts alt target up or down using a climb rate in cm/s
-    ///     should be called continuously (with dt set to be the expected time between calls)
-    ///     almost no checks are performed on the input
-    void add_takeoff_climb_rate(float climb_rate_cms, float dt);
+    // Softens NE controller for landing by reducing position error and suppressing I-term windup.
+    // Used to make descent behavior more stable near ground contact.
+    void NE_soften_for_landing();
 
-    /// set_alt_target_to_current_alt - set altitude target to current altitude
-    void set_alt_target_to_current_alt() { _pos_target.z = _inav.get_altitude(); }
+    // Fully initializes the NE controller with current position, velocity, acceleration, and attitude.
+    // Intended for normal startup when the full state is known.
+    // Private function shared by other NE initializers.
+    void NE_init_controller();
 
-    /// shift altitude target (positive means move altitude up)
-    void shift_alt_target(float z_cm);
+    // Sets the desired NE-plane acceleration in m/s² using jerk-limited shaping.
+    // Smoothly transitions to the specified acceleration from current kinematic state.
+    // Constraints: max acceleration and jerk set via NE_set_max_speed_accel_m().
+    void input_accel_NE_m(const Vector2f& accel_ne_msss);
 
-    /// relax_alt_hold_controllers - set all desired and targets to measured
-    void relax_alt_hold_controllers(float throttle_setting);
+    // Sets desired NE-plane velocity and acceleration (cm/s, cm/s²) using jerk-limited shaping.
+    // See input_vel_accel_NE_m() for full details.
+    void input_vel_accel_NE_cm(Vector2f& vel_ne_cms, const Vector2f& accel_ne_cmss, bool limit_output = true);
 
-    /// get_alt_target - get desired altitude (in cm above home) from loiter or wp controller which should be fed into throttle controller
-    float get_alt_target() const { return _pos_target.z; }
+    // Sets desired NE-plane velocity and acceleration (m/s, m/s²) using jerk-limited shaping.
+    // Calculates target acceleration using current kinematics constrained by acceleration and jerk limits.
+    // If `limit_output` is true, applies limits to total command (desired + correction).
+    void input_vel_accel_NE_m(Vector2f& vel_ne_ms, const Vector2f& accel_ne_mss, bool limit_output = true);
 
-    /// get_alt_error - returns altitude error in cm
-    float get_alt_error() const;
+    // Sets desired NE position, velocity, and acceleration (cm, cm/s, cm/s²) with jerk-limited shaping.
+    // See input_pos_vel_accel_NE_m() for full details.
+    void input_pos_vel_accel_NE_cm(Vector2p& pos_ne_cm, Vector2f& vel_ne_cms, const Vector2f& accel_ne_cmss, bool limit_output = true);
 
-    /// get_vel_z_error_ratio - returns the proportion of error relative to the maximum request
-    float get_vel_z_control_ratio() const { return constrain_float(_vel_z_control_ratio, 0.0f, 1.0f); }
-    
-    // returns horizontal error in cm
-    float get_horizontal_error() const;
+    // Sets desired NE position, velocity, and acceleration (m, m/s, m/s²) with jerk-limited shaping.
+    // Calculates acceleration trajectory based on current kinematics and constraints.
+    // If `limit_output` is true, limits apply to full command (desired + correction).
+    void input_pos_vel_accel_NE_m(Vector2p& pos_ne_m, Vector2f& vel_ne_ms, const Vector2f& accel_ne_mss, bool limit_output = true);
 
-    /// set_target_to_stopping_point_z - sets altitude target to reasonable stopping altitude in cm above home
-    void set_target_to_stopping_point_z();
+    // Returns true if the NE position controller has run in the last 5 control loop cycles.
+    bool NE_is_active() const;
 
-    /// get_stopping_point_z - calculates stopping point based on current position, velocity, vehicle acceleration
-    void get_stopping_point_z(Vector3f& stopping_point) const;
+    // Disables NE position correction by setting the target position to the current position.
+    // Useful to freeze positional control without disrupting velocity control.
+    void NE_stop_pos_stabilisation();
 
-    /// init_takeoff - initialises target altitude if we are taking off
-    void init_takeoff();
+    // Disables NE position and velocity correction by setting target values to current state.
+    // Useful to prevent further corrections and freeze motion stabilization in NE axes.
+    void NE_stop_vel_stabilisation();
 
-    // is_active - returns true if the z-axis position controller has been run very recently
-    bool is_active_z() const;
+    // Applies a scalar multiplier to the NE control loop.
+    // Set to 0 to disable lateral control; 1 for full authority.
+    void NE_set_control_scale_factor(float ne_control_scale_factor) {
+        _ne_control_scale_factor = ne_control_scale_factor;
+    }
 
-    /// update_z_controller - fly to altitude in cm above home
-    void update_z_controller();
-
-    // get_leash_down_z, get_leash_up_z - returns vertical leash lengths in cm
-    float get_leash_down_z() const { return _leash_down_z; }
-    float get_leash_up_z() const { return _leash_up_z; }
-
-    /// freeze_ff_z - used to stop the feed forward being calculated during a known discontinuity
-    void freeze_ff_z() { _flags.freeze_ff_z = true; }
+    // Runs the NE-axis position controller, computing output acceleration from position and velocity errors.
+    // Uses P and PID controllers to generate corrections which are added to feedforward velocity/acceleration.
+    // Requires all desired targets to be pre-set using the input_* or set_* methods.
+    void NE_update_controller();
 
     ///
-    /// xy position controller
+    /// Vertical position controller
     ///
 
-    /// get_lean_angle_max_cd - returns the maximum lean angle the autopilot may request
-    float get_lean_angle_max_cd() const;
+    // Sets maximum climb/descent rate (cm/s) and vertical acceleration (cm/s²) for the U-axis.
+    // Descent rate may be positive or negative and is always interpreted as a descent.
+    // See D_set_max_speed_accel_m() for full details.
+    // All values must be positive.
+    void D_set_max_speed_accel_cm(float decent_speed_max_cms, float climb_speed_max_cms, float accel_max_u_cmss);
 
-    /// init_xy_controller - initialise the xy controller
-    ///     sets target roll angle, pitch angle and I terms based on vehicle current lean angles
-    ///     should be called once whenever significant changes to the position target are made
-    ///     this does not update the xy target
-    void init_xy_controller();
+    // Sets maximum climb/descent rate (m/s) and vertical acceleration (m/s²) for the U-axis.
+    // These values are used for jerk-limited kinematic shaping of the vertical trajectory.
+    // All values must be positive.
+    void D_set_max_speed_accel_m(float decent_speed_max_ms, float climb_speed_max_ms, float accel_max_d_mss);
 
-    /// standby_xyz_reset - resets I terms and removes position error
-    ///     This function will let Loiter and Alt Hold continue to operate
-    ///     in the event that the flight controller is in control of the
-    ///     aircraft when in standby.
-    void standby_xyz_reset();
+    // Sets vertical correction velocity and acceleration limits (cm/s, cm/s²).
+    // Should only be called during initialization to avoid discontinuities.
+    // See D_set_correction_speed_accel_m() for full details.
+    // All values must be positive.
+    void D_set_correction_speed_accel_cm(float decent_speed_max_cms, float climb_speed_max_cms, float accel_max_u_cmss);
 
-    /// set_max_accel_xy - set the maximum horizontal acceleration in cm/s/s
-    ///     leash length will be recalculated
-    void set_max_accel_xy(float accel_cmss);
-    float get_max_accel_xy() const { return _accel_cms; }
+    // Sets vertical correction velocity and acceleration limits (m/s, m/s²).
+    // These values constrain the correction output of the PID controller.
+    // All values must be positive.
+    void D_set_correction_speed_accel_m(float decent_speed_max_ms, float climb_speed_max_ms, float accel_max_d_mss);
 
-    /// set_max_speed_xy - set the maximum horizontal speed maximum in cm/s
-    ///     leash length will be recalculated
-    void set_max_speed_xy(float speed_cms);
-    float get_max_speed_xy() const { return _speed_cms; }
+    // Returns maximum vertical acceleration in m/s² used for shaping the climb/descent trajectory.
+    float D_get_max_accel_mss() const { return _accel_max_d_mss; }
 
-    /// set_limit_accel_xy - mark that accel has been limited
-    ///     this prevents integrator buildup
-    void set_limit_accel_xy(void) { _limit.accel_xy = true; }
+    // Returns maximum allowed positive (upward) position error in meters.
+    float get_pos_error_up_m() const { return _p_pos_d_m.get_error_min(); }
 
-    /// calc_leash_length - calculates the horizontal leash length given a maximum speed, acceleration
-    ///     should be called whenever the speed, acceleration or position kP is modified
-    void calc_leash_length_xy();
+    // Returns maximum allowed negative (downward) position error in meters.
+    float get_pos_error_down_m() const { return _p_pos_d_m.get_error_max(); }
 
-    /// set the horizontal leash length
-    void set_leash_length_xy(float leash) { _leash = leash; _flags.recalc_leash_xy = false; }
+    // Returns maximum climb rate in cm/s.
+    // See get_max_speed_up_ms() for full details.
+    float get_max_speed_up_cms() const { return get_max_speed_up_ms() * 100.0; }
 
-    /// get_pos_target - get target as position vector (from home in cm)
-    const Vector3f& get_pos_target() const { return _pos_target; }
+    // Returns maximum climb rate in m/s used for shaping the vertical trajectory.
+    float get_max_speed_up_ms() const { return _vel_max_up_ms; }
 
-    /// set_pos_target in cm from home
-    void set_pos_target(const Vector3f& position);
+    /// Returns maximum descent rate in m/s (zero or positive).
+    float get_max_speed_down_ms() const { return _vel_max_down_ms; }
 
-    /// set_xy_target in cm from home
-    void set_xy_target(float x, float y);
+    // Initializes U-axis controller to current position, velocity, and acceleration, disallowing descent.
+    // Used for takeoff or hold scenarios where downward motion is prohibited.
+    void D_init_controller_no_descent();
 
-    /// shift position target target in x, y axis
-    void shift_pos_xy_target(float x_cm, float y_cm);
+    // Initializes U-axis controller to a stationary stopping point with zero velocity and acceleration.
+    // Used when the trajectory starts at rest but the initial altitude is unspecified.
+    // The resulting position target can be retrieved with get_pos_target_NED_m().
+    void D_init_controller_stopping_point();
 
-    /// get_desired_velocity - returns xy desired velocity (i.e. feed forward) in cm/s in lat and lon direction
-    const Vector3f& get_desired_velocity() { return _vel_desired; }
+    // Smoothly decays U-axis acceleration to zero over time while maintaining current vertical velocity.
+    // Reduces requested acceleration by ~95% every 0.5 seconds to avoid abrupt transitions.
+    // `throttle_setting` is used to determine whether to preserve positive acceleration in low-thrust cases.
+    void D_relax_controller(float throttle_setting);
 
-    /// set_desired_velocity_z - sets desired velocity in cm/s in z axis
-    void set_desired_velocity_z(float vel_z_cms) {_vel_desired.z = vel_z_cms;}
+    // Fully initializes the U-axis controller with current position, velocity, acceleration, and attitude.
+    // Used during standard controller activation when full state is known.
+    // Private function shared by other vertical initializers.
+    void D_init_controller();
 
-    // clear desired velocity feed-forward in z axis
-    void clear_desired_velocity_ff_z() { _flags.use_desvel_ff_z = false; }
+    // Sets the desired vertical acceleration in m/s² using jerk-limited shaping.
+    // Smoothly transitions to the target acceleration from current kinematic state.
+    // Constraints: max acceleration and jerk set via D_set_max_speed_accel_m().
+    void input_accel_D_m(float accel_d_mss);
 
-    // set desired acceleration in cm/s in xy axis
-    void set_desired_accel_xy(float accel_lat_cms, float accel_lon_cms) { _accel_desired.x = accel_lat_cms; _accel_desired.y = accel_lon_cms; }
+    // Sets desired vertical velocity and acceleration (m/s, m/s²) using jerk-limited shaping.
+    // Calculates required acceleration using current vertical kinematics.
+    // If `limit_output` is true, limits apply to the combined (desired + correction) command.
+    void input_vel_accel_D_m(float &vel_d_ms, float accel_d_mss, bool limit_output = true);
 
-    /// set_desired_velocity_xy - sets desired velocity in cm/s in lat and lon directions
-    ///     when update_xy_controller is next called the position target is moved based on the desired velocity and
-    ///     the desired velocities are fed forward into the rate_to_accel step
-    void set_desired_velocity_xy(float vel_lat_cms, float vel_lon_cms) {_vel_desired.x = vel_lat_cms; _vel_desired.y = vel_lon_cms; }
+    // Generates a vertical trajectory using the given climb rate in cm/s and jerk-limited shaping.
+    // Adjusts the internal target altitude based on integrated climb rate.
+    // See D_set_pos_target_from_climb_rate_ms() for full details.
+    void D_set_pos_target_from_climb_rate_cms(float climb_rate_cms);
 
-    /// set_desired_velocity - sets desired velocity in cm/s in all 3 axis
-    ///     when update_vel_controller_xyz is next called the position target is moved based on the desired velocity
-    void set_desired_velocity(const Vector3f &des_vel) { _vel_desired = des_vel; }
+    // Generates a vertical trajectory using the given climb rate in m/s and jerk-limited shaping.
+    // Target altitude is updated over time by integrating the climb rate.
+    void D_set_pos_target_from_climb_rate_ms(float climb_rate_ms, bool ignore_descent_limit = false);
 
-    // overrides the velocity process variable for one timestep
-    void override_vehicle_velocity_xy(const Vector2f& vel_xy) { _vehicle_horiz_vel = vel_xy; _flags.vehicle_horiz_vel_override = true; }
+    // Sets vertical position, velocity, and acceleration in cm using jerk-limited shaping.
+    // See input_pos_vel_accel_D_m() for full details.
+    void input_pos_vel_accel_U_cm(float &pos_u_cm, float &vel_u_cms, float accel_u_cmss, bool limit_output = true);
 
-    // relax velocity controller by clearing velocity error and setting velocity target to current velocity
-    void relax_velocity_controller_xy();
+    // Sets vertical position, velocity, and acceleration in meters using jerk-limited shaping.
+    // Calculates required acceleration using current state and constraints.
+    // If `limit_output` is true, limits are applied to combined (desired + correction) command.
+    void input_pos_vel_accel_D_m(float &pos_d_m, float &vel_d_ms, float accel_d_mss, bool limit_output = true);
 
-    // is_active_xy - returns true if the xy position controller has been run very recently
-    bool is_active_xy() const;
+    // Sets target altitude in cm using jerk-limited shaping to gradually move to the new position.
+    // See D_set_alt_target_with_slew_m() for full details.
+    void set_alt_target_with_slew_cm(float pos_u_cm);
 
-    /// update_xy_controller - run the horizontal position controller - should be called at 100hz or higher
-    ///     when use_desired_velocity is true the desired velocity (i.e. feed forward) is incorporated at the pos_to_rate step
-    void update_xy_controller();
+    // Sets target altitude in meters using jerk-limited shaping.
+    void D_set_alt_target_with_slew_m(float pos_u_m);
 
-    /// set_target_to_stopping_point_xy - sets horizontal target to reasonable stopping position in cm from home
-    void set_target_to_stopping_point_xy();
+    // Returns true if the U-axis controller has run in the last 5 control loop cycles.
+    bool D_is_active() const;
 
-    /// get_stopping_point_xy - calculates stopping point based on current position, velocity, vehicle acceleration
-    ///     results placed in stopping_position vector
-    ///     set_accel_xy() should be called before this method to set vehicle acceleration
-    ///     set_leash_length() should have been called before this method
-    void get_stopping_point_xy(Vector3f &stopping_point) const;
+    // Runs the vertical (U-axis) position controller.
+    // Computes output acceleration based on position and velocity errors using PID correction.
+    // Feedforward velocity and acceleration are combined with corrections to produce a smooth vertical command.
+    // Desired position, velocity, and acceleration must be set before calling.
+    void D_update_controller();
 
-    /// get_distance_to_target - get horizontal distance to position target in cm (used for reporting)
-    float get_distance_to_target() const;
 
-    /// get_bearing_to_target - get bearing to target position in centi-degrees
-    int32_t get_bearing_to_target() const;
 
-    /// xyz velocity controller
+    ///
+    /// Accessors
+    ///
 
-    /// init_vel_controller_xyz - initialise the velocity controller - should be called once before the caller attempts to use the controller
-    void init_vel_controller_xyz();
+    // Sets externally computed NED position, velocity, and acceleration in meters, m/s, and m/s².
+    // Use when path planning or shaping is done outside this controller.
+    void set_pos_vel_accel_NED_m(const Vector3p& pos_ned_m, const Vector3f& vel_ned_ms, const Vector3f& accel_ned_mss);
 
-    /// update_velocity_controller_xyz - run the velocity controller - should be called at 100hz or higher
-    ///     velocity targets should we set using set_desired_velocity_xyz() method
-    ///     callers should use get_roll() and get_pitch() methods and sent to the attitude controller
-    ///     throttle targets will be sent directly to the motors
-    void update_vel_controller_xyz();
+    // Sets externally computed NE position, velocity, and acceleration in meters, m/s, and m/s².
+    // Use when path planning or shaping is done outside this controller.
+    void set_pos_vel_accel_NE_m(const Vector2p& pos_ne_m, const Vector2f& vel_ne_ms, const Vector2f& accel_ne_mss);
 
-    /// get desired roll, pitch which should be fed into stabilize controllers
-    float get_roll() const { return _roll_target; }
-    float get_pitch() const { return _pitch_target; }
 
-    // get_leash_xy - returns horizontal leash length in cm
-    float get_leash_xy() const { return _leash; }
+    /// Position
 
-    /// get pid controllers
-    AC_P& get_pos_z_p() { return _p_pos_z; }
-    AC_P& get_vel_z_p() { return _p_vel_z; }
-    AC_PID& get_accel_z_pid() { return _pid_accel_z; }
-    AC_P& get_pos_xy_p() { return _p_pos_xy; }
-    AC_PID_2D& get_vel_xy_pid() { return _pid_vel_xy; }
+    // Returns the estimated position in NED frame, in meters relative to EKF origin.
+    const Vector3p& get_pos_estimate_NED_m() const { return _pos_estimate_ned_m; }
 
-    /// accessors for reporting
-    const Vector3f& get_vel_target() const { return _vel_target; }
-    const Vector3f& get_accel_target() const { return _accel_target; }
+    // Returns estimated altitude above EKF origin in meters.
+    float get_pos_estimate_U_m() const { return -_pos_estimate_ned_m.z; }
 
-    // lean_angles_to_accel - convert roll, pitch lean angles to lat/lon frame accelerations in cm/s/s
-    void accel_to_lean_angles(float accel_x_cmss, float accel_y_cmss, float& roll_target, float& pitch_target) const;
+    // Returns the target position in NED frame, in meters relative to EKF origin.
+    const Vector3p& get_pos_target_NED_m() const { return _pos_target_ned_m; }
 
-    // lean_angles_to_accel - convert roll, pitch lean angles to lat/lon frame accelerations in cm/s/s
-    void lean_angles_to_accel(float& accel_x_cmss, float& accel_y_cmss) const;
+    // Sets the desired NE position in meters relative to EKF origin.
+    void set_pos_desired_NE_m(const Vector2p& pos_desired_ne_m) { _pos_desired_ned_m.xy() = pos_desired_ne_m; }
 
-    // time_since_last_xy_update - returns time in seconds since the horizontal position controller was last run
-    float time_since_last_xy_update() const;
+    // Returns the desired position in NED frame, in meters relative to EKF origin.
+    const Vector3p& get_pos_desired_NED_m() const { return _pos_desired_ned_m; }
 
+    // Returns target altitude above EKF origin in centimeters.
+    // See get_pos_target_U_m() for full details.
+    float get_pos_target_U_cm() const { return get_pos_target_U_m() * 100.0; }
+
+    // Returns target altitude above EKF origin in meters.
+    float get_pos_target_U_m() const { return -_pos_target_ned_m.z; }
+
+    // Sets desired altitude above EKF origin in centimeters.
+    // See set_pos_desired_U_m() for full details.
+    void set_pos_desired_U_cm(float pos_desired_u_cm) { set_pos_desired_U_m(pos_desired_u_cm * 0.01); }
+
+    // Sets desired altitude above EKF origin in meters.
+    void set_pos_desired_U_m(float pos_desired_u_m) { _pos_desired_ned_m.z = -pos_desired_u_m; }
+
+    // Returns desired altitude above EKF origin in centimeters.
+    // See get_pos_desired_U_m() for full details.
+    float get_pos_desired_U_cm() const { return get_pos_desired_U_m() * 100.0; }
+
+    // Returns desired altitude above EKF origin in meters.
+    float get_pos_desired_U_m() const { return -_pos_desired_ned_m.z; }
+
+
+    /// Stopping Point
+
+    // Computes NE stopping point in meters based on current position, velocity, and acceleration.
+    void get_stopping_point_NE_m(Vector2p &stopping_point_ne_m) const;
+
+    // Computes vertical stopping point relative to EKF origin in meters, Down-positive. based on current velocity and acceleration.
+    void get_stopping_point_D_m(postype_t &stopping_point_d_m) const;
+
+
+    /// Position Error
+
+    // Returns NED position error vector in meters between current and target positions.
+    const Vector3f get_pos_error_NED_m() const { return Vector3f{_p_pos_ne_m.get_error().x, _p_pos_ne_m.get_error().y, _p_pos_d_m.get_error()}; }
+
+    // Returns total NE-plane position error magnitude in meters.
+    float get_pos_error_NE_m() const { return _p_pos_ne_m.get_error().length(); }
+
+    // Returns vertical position error (altitude) in centimeters.
+    // See get_pos_error_D_m() for full details.
+    float get_pos_error_U_cm() const { return -get_pos_error_D_m() * 100.0; }
+
+    // Returns vertical position error (altitude) in meters.
+    float get_pos_error_D_m() const { return _p_pos_d_m.get_error(); }
+
+
+    /// Velocity
+
+    // Returns current velocity estimate in NED frame in m/s.
+    const Vector3f& get_vel_estimate_NED_ms() const { return _vel_estimate_ned_ms; }
+
+    // Returns current velocity estimate (Up) in m/s.
+    float get_vel_estimate_U_ms() const { return -_vel_estimate_ned_ms.z; }
+
+    // Sets desired velocity in NED frame in cm/s.
+    // See set_vel_desired_NED_ms() for full details.
+    void set_vel_desired_NEU_cms(const Vector3f &vel_desired_neu_cms) { set_vel_desired_NED_ms(Vector3f{vel_desired_neu_cms.x, vel_desired_neu_cms.y, -vel_desired_neu_cms.z} * 0.01); }
+
+    // Sets desired velocity in NED frame in m/s.
+    void set_vel_desired_NED_ms(const Vector3f &vel_desired_ned_ms) { _vel_desired_ned_ms = vel_desired_ned_ms; }
+
+    // Sets desired horizontal (NE) velocity in m/s.
+    void set_vel_desired_NE_ms(const Vector2f &vel_desired_ne_ms) { _vel_desired_ned_ms.xy() = vel_desired_ne_ms; }
+
+    // Returns desired velocity in NEU frame in cm/s.
+    // See get_vel_desired_NED_ms() for full details.
+    const Vector3f get_vel_desired_NEU_cms() const { return Vector3f{_vel_desired_ned_ms.x, _vel_desired_ned_ms.y, -_vel_desired_ned_ms.z} * 100.0; }
+
+    // Returns desired velocity in NED frame in m/s.
+    const Vector3f& get_vel_desired_NED_ms() const { return _vel_desired_ned_ms; }
+
+    // Returns desired velocity (Up) in m/s.
+    float get_vel_desired_U_ms() const { return -_vel_desired_ned_ms.z; }
+
+    // Returns velocity target in NEU frame in cm/s.
+    // See get_vel_target_NED_ms() for full details.
+    const Vector3f get_vel_target_NEU_cms() const { return Vector3f{_vel_target_ned_ms.x, _vel_target_ned_ms.y, -_vel_target_ned_ms.z} * 100.0; }
+
+    // Returns velocity target in NED frame in m/s.
+    const Vector3f& get_vel_target_NED_ms() const { return _vel_target_ned_ms; }
+
+    // Sets desired vertical velocity (Up) in m/s.
+    void set_vel_desired_D_ms(float vel_desired_d_ms) { _vel_desired_ned_ms.z = vel_desired_d_ms; }
+
+    // Returns vertical velocity target (Up) in cm/s.
+    // See get_vel_target_U_ms() for full details.
+    float get_vel_target_U_cms() const { return get_vel_target_U_ms() * 100.0; }
+
+    // Returns vertical velocity target (Up) in m/s.
+    float get_vel_target_U_ms() const { return -_vel_target_ned_ms.z; }
+
+
+    /// Acceleration
+
+    // Sets desired horizontal acceleration in m/s².
+    void set_accel_desired_NE_mss(const Vector2f &accel_desired_ne_mss) { _accel_desired_ned_mss.xy() = accel_desired_ne_mss; }
+
+    // Returns target NED acceleration in m/s².
+    const Vector3f& get_accel_target_NED_mss() const { return _accel_target_ned_mss; }
+
+
+    /// Terrain
+
+    // Sets both the terrain altitude and terrain target to the same value
+    // (altitude above EKF origin in centimeters, Up-positive).
+    // See set_pos_terrain_target_D_m() for full description.
+    void set_pos_terrain_target_U_cm(float pos_terrain_target_u_cm) { set_pos_terrain_target_D_m(-pos_terrain_target_u_cm * 0.01); }
+
+    // Sets both the terrain altitude and terrain target to the same value
+    // (relative to EKF origin in meters, Down-positive).
+    void set_pos_terrain_target_D_m(float pos_terrain_target_d_m) { _pos_terrain_target_d_m = pos_terrain_target_d_m; }
+
+    // Initializes both the terrain altitude and terrain target to the same value
+    // (altitude above EKF origin in centimeters, Up-positive).
+    // See init_pos_terrain_D_m() for full description.
+    void init_pos_terrain_U_cm(float pos_terrain_u_cm);
+
+    // Initializes both the terrain altitude and terrain target to the same value
+    // (relative to EKF origin in meters, Down-positive).
+    void init_pos_terrain_D_m(float pos_terrain_d_m);
+
+    // Returns the current terrain altitude (Down-positive, relative to EKF origin, in meters).
+    float get_pos_terrain_D_m() const { return _pos_terrain_d_m; }
+
+    // Returns the current terrain correction velocity (Down-positive, m/s).
+    float get_vel_terrain_D_ms() const { return _vel_terrain_d_ms; }
+
+
+    /// Offset
+
+#if AP_SCRIPTING_ENABLED
+    // Sets additional position, velocity, and acceleration offsets in meters (NED frame) for scripting.
+    // Offsets are added to the controller’s internal target.
+    // Used in LUA
+    bool set_posvelaccel_offset(const Vector3f &pos_offset_NED_m, const Vector3f &vel_offset_NED_ms, const Vector3f &accel_offset_NED_mss);
+
+    // Retrieves current scripted offsets in meters (NED frame).
+    // Used in LUA
+
+    bool get_posvelaccel_offset(Vector3f &pos_offset_NED_m, Vector3f &vel_offset_NED_ms, Vector3f &accel_offset_NED_mss);
+
+    // Retrieves current target velocity (NED frame, m/s) including any scripted offset.
+    // Used in LUA
+    bool get_vel_target(Vector3f &vel_target_NED_ms);
+
+    // Retrieves current target acceleration (NED frame, m/s²) including any scripted offset.
+    // Used in LUA
+    bool get_accel_target(Vector3f &accel_target_NED_mss);
+#endif
+
+    // Sets NE offset targets in meters, m/s, and m/s².
+    void set_posvelaccel_offset_target_NE_m(const Vector2p& pos_offset_target_ne_m, const Vector2f& vel_offset_target_ne_ms, const Vector2f& accel_offset_target_ne_mss);
+
+    // Sets vertical offset targets (m, m/s, m/s²) relative to EKF origin in meters, Down-positive.
+    void set_posvelaccel_offset_target_D_m(float pos_offset_target_d_m, float vel_offset_target_d_ms, float accel_offset_target_d_mss);
+
+    // Returns current NED position offset in meters.
+    const Vector3p& get_pos_offset_NED_m() const { return _pos_offset_ned_m; }
+
+    // Returns current NED velocity offset in m/s.
+    const Vector3f& get_vel_offset_NED_ms() const { return _vel_offset_ned_ms; }
+
+    // Returns current NED acceleration offset in m/s².
+    const Vector3f& get_accel_offset_NED_mss() const { return _accel_offset_ned_mss; }
+
+    // Sets vertical position offset in meters relative to EKF origin in meters, Down-positive.
+    void set_pos_offset_D_m(float pos_offset_d_m) { _pos_offset_ned_m.z = pos_offset_d_m; }
+
+    // Returns vertical position offset in meters relative to EKF origin in meters, Down-positive.
+    float get_pos_offset_U_m() const { return -_pos_offset_ned_m.z; }
+
+    // Returns vertical velocity offset in m/s.
+    float get_vel_offset_D_ms() const { return _vel_offset_ned_ms.z; }
+
+    // Returns vertical acceleration offset in m/s².
+    float get_accel_offset_D_mss() const { return _accel_offset_ned_mss.z; }
+
+    /// Outputs
+
+    // Returns desired roll angle in radians for the attitude controller
+    float get_roll_rad() const { return _roll_target_rad; }
+
+    // Returns desired pitch angle in radians for the attitude controller.
+    float get_pitch_rad() const { return _pitch_target_rad; }
+
+    // Returns desired yaw angle in radians for the attitude controller.
+    float get_yaw_rad() const { return _yaw_target_rad; }
+
+    // Returns desired yaw rate in radians/second for the attitude controller.
+    float get_yaw_rate_rads() const { return _yaw_rate_target_rads; }
+
+    // Returns desired roll angle in centidegrees for the attitude controller.
+    // See get_roll_rad() for full details.
+    float get_roll_cd() const { return rad_to_cd(_roll_target_rad); }
+
+    // Returns desired pitch angle in centidegrees for the attitude controller.
+    // See get_pitch_rad() for full details.
+    float get_pitch_cd() const { return rad_to_cd(_pitch_target_rad); }
+
+    // Returns desired thrust direction as a unit vector in the body frame.
+    Vector3f get_thrust_vector() const;
+
+    // Returns bearing from current position to position target in radians.
+    // 0 = North, positive = clockwise.
+    float get_bearing_to_target_rad() const;
+
+    // Returns the maximum allowed roll/pitch angle in radians.
+    float get_lean_angle_max_rad() const;
+
+    // Overrides the maximum allowed roll/pitch angle in radians.
+    // A value of 0 reverts to using the ANGLE_MAX parameter.
+    void set_lean_angle_max_rad(float angle_max_rad) { _angle_max_override_rad = angle_max_rad; }
+
+    // Overrides the maximum allowed roll/pitch angle in degrees.
+    // See set_lean_angle_max_rad() for full details.
+    void set_lean_angle_max_deg(const float angle_max_deg) { set_lean_angle_max_rad(radians(angle_max_deg)); }
+
+    // Overrides the maximum allowed roll/pitch angle in centidegrees.
+    // See set_lean_angle_max_rad() for full details.
+    void set_lean_angle_max_cd(const float angle_max_cd) { set_lean_angle_max_rad(cd_to_rad(angle_max_cd)); }
+
+    /// Other
+
+    // Returns reference to the NE position P controller.
+    AC_P_2D& NE_get_pos_p() { return _p_pos_ne_m; }
+
+    // Returns reference to the D (vertical) position P controller.
+    AC_P_1D& D_get_pos_p() { return _p_pos_d_m; }
+
+    // Returns reference to the NE velocity PID controller.
+    AC_PID_2D& NE_get_vel_pid() { return _pid_vel_ne_m; }
+
+    // Returns reference to the D (vertical) velocity PID controller.
+    AC_PID_Basic& D_get_vel_pid() { return _pid_vel_d_m; }
+
+    // Returns reference to the D acceleration PID controller.
+    AC_PID& D_get_accel_pid() { return _pid_accel_d_m; }
+
+    // Marks that NE acceleration has been externally limited.
+    // Prevents I-term windup by storing the current target direction.
+    void NE_set_externally_limited() { _limit_vector_ned.x = _accel_target_ned_mss.x; _limit_vector_ned.y = _accel_target_ned_mss.y; }
+
+    // Converts lean angles (rad) to NED acceleration in m/s².
+    Vector3f lean_angles_rad_to_accel_NED_mss(const Vector3f& att_target_euler_rad) const;
+
+    // Writes position controller diagnostic logs (PSCN, PSCE, etc).
     void write_log();
 
-    // provide feedback on whether arming would be a good idea right now:
+    // Performs pre-arm checks for position control parameters and EKF readiness.
+    // Returns false if failure_msg is populated.
     bool pre_arm_checks(const char *param_prefix,
                         char *failure_msg,
                         const uint8_t failure_msg_len);
 
-    // enable or disable high vibration compensation
+    // Enables or disables vibration compensation mode.
+    // When enabled, disables use of horizontal velocity estimates.
     void set_vibe_comp(bool on_off) { _vibe_comp_enabled = on_off; }
+
+    // Reset handling method
+    enum class EKFResetMethod : uint8_t {
+        MoveTarget = 0,     // the target position is reset so the vehicle does not physically move
+        MoveVehicle = 1     // the target position is smoothly transitioned so the vehicle moves to its previous position coordinates
+    };
+    void set_reset_handling_method(EKFResetMethod reset_method) { _ekf_reset_method = reset_method; }
+
+    // Returns confidence (0–1) in vertical control authority based on output usage.
+    // Used to assess throttle margin and PID effectiveness.
+    float get_vel_D_control_ratio() const { return constrain_float(_vel_d_control_ratio, 0.0f, 1.0f); }
+
+    // Returns lateral distance to closest point on active trajectory in meters.
+    // Used to assess horizontal deviation from path.
+    float crosstrack_error_m() const;
+
+    // Resets NED position controller state to prevent transients when exiting standby.
+    // Zeros I-terms and aligns targets to current position.
+    void NED_standby_reset();
+
+    // Returns measured vertical (Down) acceleration in m/s² (Earth frame, gravity-compensated).
+    // Positive = downward acceleration.
+    float get_estimated_accel_D_mss() const { return _ahrs.get_accel_ef().z + GRAVITY_MSS; }
+
+    // Returns measured vertical (Up) acceleration in m/s² (Earth frame, gravity-compensated).
+    // Positive = upward acceleration.
+    float get_estimated_accel_U_mss() const { return -get_estimated_accel_D_mss(); }
+
+    // Returns true if the requested forward pitch is limited by the configured tilt constraint.
+    bool get_fwd_pitch_is_limited() const;
+
+    // Sets artificial NE position disturbance in meters.
+    void set_disturb_pos_NE_m(const Vector2f& disturb_pos_m) { _disturb_pos_ne_m = disturb_pos_m; }
+
+    // Sets artificial NE velocity disturbance in m/s.
+    void set_disturb_vel_NE_ms(const Vector2f& disturb_vel_ms) { _disturb_vel_ne_ms = disturb_vel_ms; }
+
+    // Logs position controller state along the North axis to PSCN..
+    // Logs desired, target, and actual position [m], velocity [m/s], and acceleration [m/s²].
+    static void Write_PSCN(float pos_desired_m, float pos_target_m, float pos_m, float vel_desired_ms, float vel_target_ms, float vel_ms, float accel_desired_mss, float accel_target_mss, float accel_mss);
+
+    // Logs position controller state along the East axis to PSCE.
+    // Logs desired, target, and actual values for position [m], velocity [m/s], and acceleration [m/s²].
+    static void Write_PSCE(float pos_desired_m, float pos_target_m, float pos_m, float vel_desired_ms, float vel_target_ms, float vel_ms, float accel_desired_mss, float accel_target_mss, float accel_mss);
+
+    // Logs position controller state along the Down (vertical) axis to PSCD.
+    // Logs desired, target, and actual values for position [m], velocity [m/s], and acceleration [m/s²].
+    static void Write_PSCD(float pos_desired_m, float pos_target_m, float pos_m, float vel_desired_ms, float vel_target_ms, float vel_ms, float accel_desired_mss, float accel_target_mss, float accel_mss);
+
+    // Logs offset tracking along the North axis to PSON.
+    // Logs target and actual offset for position [m], velocity [m/s], and acceleration [m/s²].
+    static void Write_PSON(float pos_target_offset_m, float pos_offset_m, float vel_target_offset_ms, float vel_offset_ms, float accel_target_offset_mss, float accel_offset_mss);
+
+    // Logs offset tracking along the East axis to PSOE.
+    // Logs target and actual offset for position [m], velocity [m/s], and acceleration [m/s²].
+    static void Write_PSOE(float pos_target_offset_m, float pos_offset_m, float vel_target_offset_ms, float vel_offset_ms, float accel_target_offset_mss, float accel_offset_mss);
+
+    // Logs offset tracking along the Down axis to PSOD.
+    // Logs target and actual offset for position [m], velocity [m/s], and acceleration [m/s²].
+    static void Write_PSOD(float pos_target_offset_m, float pos_offset_m, float vel_target_offset_ms, float vel_offset_ms, float accel_target_offset_mss, float accel_offset_mss);
+
+    // Logs terrain-following offset tracking along the Down axis to PSOT.
+    // Logs target and actual offset for position [m], velocity [m/s], and acceleration [m/s²].
+    static void Write_PSOT(float pos_target_offset_m, float pos_offset_m, float vel_target_offset_ms, float vel_offset_ms, float accel_target_offset_mss, float accel_offset_mss);
+
+    // perform any required parameter conversions
+    void convert_parameters();
+
+    // Returns pointer to the global AC_PosControl singleton.
+    static AC_PosControl *get_singleton(void) { return _singleton; }
 
     static const struct AP_Param::GroupInfo var_info[];
 
 protected:
 
-    // general purpose flags
-    struct poscontrol_flags {
-            uint16_t recalc_leash_z     : 1;    // 1 if we should recalculate the z axis leash length
-            uint16_t recalc_leash_xy    : 1;    // 1 if we should recalculate the xy axis leash length
-            uint16_t reset_desired_vel_to_pos   : 1;    // 1 if we should reset the rate_to_accel_xy step
-            uint16_t reset_accel_to_lean_xy     : 1;    // 1 if we should reset the accel to lean angle step
-            uint16_t reset_rate_to_accel_z      : 1;    // 1 if we should reset the rate_to_accel_z step
-            uint16_t freeze_ff_z        : 1;    // 1 used to freeze velocity to accel feed forward for one iteration
-            uint16_t use_desvel_ff_z    : 1;    // 1 to use z-axis desired velocity as feed forward into velocity step
-            uint16_t vehicle_horiz_vel_override : 1; // 1 if we should use _vehicle_horiz_vel as our velocity process variable for one timestep
-    } _flags;
+    // Calculates vertical throttle using vibration-resistant feedforward estimation.
+    // Returns throttle output using manual feedforward gain for vibration compensation mode.
+    // Integrator is adjusted using velocity error when PID is being overridden.
+    float get_throttle_with_vibration_override();
 
-    // limit flags structure
-    struct poscontrol_limit_flags {
-        uint8_t pos_up      : 1;    // 1 if we have hit the vertical position leash limit while going up
-        uint8_t pos_down    : 1;    // 1 if we have hit the vertical position leash limit while going down
-        uint8_t vel_up      : 1;    // 1 if we have hit the vertical velocity limit going up
-        uint8_t vel_down    : 1;    // 1 if we have hit the vertical velocity limit going down
-        uint8_t accel_xy    : 1;    // 1 if we have hit the horizontal accel limit
-    } _limit;
+    // Converts horizontal acceleration (m/s²) to roll/pitch lean angles in radians.
+    void accel_NE_mss_to_lean_angles_rad(float accel_n_mss, float accel_e_mss, float& roll_target_rad, float& pitch_target_rad) const;
 
-    ///
-    /// z controller private methods
-    ///
+    // Converts current target lean angles to NE acceleration in m/s².
+    void lean_angles_to_accel_NE_mss(float& accel_n_mss, float& accel_e_mss) const;
 
-    // run position control for Z axis
-    // target altitude should be set with one of these functions
-    //          set_alt_target
-    //          set_target_to_stopping_point_z
-    //          init_takeoff
-    void run_z_controller();
+    // Computes desired yaw and yaw rate based on the NE acceleration and velocity vectors.
+    // Aligns yaw with the direction of travel if speed exceeds 5% of maximum.
+    void calculate_yaw_and_rate_yaw();
 
-    ///
-    /// xy controller private methods
-    ///
+    // Computes scaling factor to increase max vertical accel/jerk if vertical speed exceeds configured limits.
+    float calculate_overspeed_gain();
 
-    /// move velocity target using desired acceleration
-    void desired_accel_to_vel(float nav_dt);
 
-    /// desired_vel_to_pos - move position target using desired velocities
-    void desired_vel_to_pos(float nav_dt);
+    /// Terrain Following
 
-    /// run horizontal position controller correcting position and velocity
-    ///     converts position (_pos_target) to target velocity (_vel_target)
-    ///     desired velocity (_vel_desired) is combined into final target velocity
-    ///     converts desired velocities in lat/lon directions to accelerations in lat/lon frame
-    ///     converts desired accelerations provided in lat/lon frame to roll/pitch angles
-    void run_xy_controller(float dt);
+    // Initializes terrain position, velocity, and acceleration to match the terrain target.
+    void init_terrain();
 
-    /// calc_leash_length - calculates the horizontal leash length given a maximum speed, acceleration and position kP gain
-    float calc_leash_length(float speed_cms, float accel_cms, float kP) const;
+    // Updates terrain estimate (_pos_terrain_d_m) toward target using filter time constants.
+    void update_terrain();
 
-    /// limit vector to a given length, returns true if vector was limited
-    static bool limit_vector_length(float& vector_x, float& vector_y, float max_length);
 
-    /// Proportional controller with piecewise sqrt sections to constrain second derivative
-    static Vector3f sqrt_controller(const Vector3f& error, float p, float second_ord_lim);
+    /// Offsets
 
-    /// initialise and check for ekf position resets
-    void init_ekf_xy_reset();
-    void check_for_ekf_xy_reset();
-    void init_ekf_z_reset();
-    void check_for_ekf_z_reset();
+    // Initializes NE position/velocity/acceleration offsets to match their respective targets.
+    void NE_init_offsets();
+
+    // Initializes vertical (D) offsets to match their respective targets.
+    void D_init_offsets();
+
+    // Updates NE offsets by gradually moving them toward their targets.
+    void NE_update_offsets();
+
+    // Updates vertical (D) offsets by gradually moving them toward their targets.
+    void D_update_offsets();
+
+    // Initializes tracking of NE EKF position resets.
+    void NE_init_ekf_reset();
+
+    // Handles NE position reset detection and response (e.g., clearing accumulated errors).
+    void NE_handle_ekf_reset();
+
+    // Initializes tracking of vertical (D) EKF resets.
+    void D_init_ekf_reset();
+
+    // Handles the vertical (D) EKF reset detection and response.
+    void D_handle_ekf_reset();
 
     // references to inertial nav and ahrs libraries
-    AP_AHRS_View &        _ahrs;
-    const AP_InertialNav&       _inav;
-    const AP_Motors&            _motors;
-    AC_AttitudeControl&         _attitude_control;
+    AP_AHRS_View&           _ahrs;
+    const class AP_Motors&  _motors;
+    AC_AttitudeControl&     _attitude_control;
 
     // parameters
-    AP_Float    _accel_xy_filt_hz;      // XY acceleration filter cutoff frequency
-    AP_Float    _lean_angle_max;        // Maximum autopilot commanded angle (in degrees). Set to zero for Angle Max
-    AC_P        _p_pos_z;
-    AC_P        _p_vel_z;
-    AC_PID      _pid_accel_z;
-    AC_P        _p_pos_xy;
-    AC_PID_2D   _pid_vel_xy;
+    AP_Float        _lean_angle_max_deg;    // Maximum autopilot commanded angle (in degrees). Set to zero for Angle Max
+    AP_Float        _shaping_jerk_ne_msss;  // Jerk limit of the ne kinematic path generation in m/s³ used to determine how quickly the aircraft varies the acceleration target
+    AP_Float        _shaping_jerk_d_msss;   // Jerk limit of the u kinematic path generation in m/s³ used to determine how quickly the aircraft varies the acceleration target
+    AC_P_2D         _p_pos_ne_m;            // XY axis position controller to convert target distance (m) to target velocity (m/s)
+    AC_P_1D         _p_pos_d_m;             // Z axis position controller to convert target altitude (m) to target climb rate (m/s)
+    AC_PID_2D       _pid_vel_ne_m;          // XY axis velocity controller to convert target velocity (m/s) to target acceleration (m/s²)
+    AC_PID_Basic    _pid_vel_d_m;           // Z axis velocity controller to convert target climb rate (m/s) to target acceleration (m/s²)
+    AC_PID          _pid_accel_d_m;         // Z axis acceleration controller to convert target acceleration (in units of gravity) to normalised throttle output
 
     // internal variables
-    float       _dt;                    // time difference (in seconds) between calls from the main program
-    uint64_t    _last_update_xy_us;     // system time (in microseconds) since last update_xy_controller call
-    uint64_t    _last_update_z_us;      // system time (in microseconds) of last update_z_controller call
-    float       _speed_down_cms;        // max descent rate in cm/s
-    float       _speed_up_cms;          // max climb rate in cm/s
-    float       _speed_cms;             // max horizontal speed in cm/s
-    float       _accel_z_cms;           // max vertical acceleration in cm/s/s
-    float       _accel_last_z_cms;      // max vertical acceleration in cm/s/s
-    float       _accel_cms;             // max horizontal acceleration in cm/s/s
-    float       _leash;                 // horizontal leash length in cm.  target will never be further than this distance from the vehicle
-    float       _leash_down_z;          // vertical leash down in cm.  target will never be further than this distance below the vehicle
-    float       _leash_up_z;            // vertical leash up in cm.  target will never be further than this distance above the vehicle
-    float       _vel_z_control_ratio = 2.0f;   // confidence that we have control in the vertical axis
+    float       _dt_s;                      // time difference (in seconds) since the last loop time
+    uint32_t    _last_update_ne_ticks;      // ticks of last NE_update_controller call
+    uint32_t    _last_update_d_ticks;       // ticks of last update_z_controller call
+    float       _vel_max_ne_ms;             // max horizontal speed in m/s used for kinematic shaping
+    float       _vel_max_up_ms;             // max climb rate in m/s used for kinematic shaping
+    float       _vel_max_down_ms;           // max descent rate in m/s used for kinematic shaping
+    float       _accel_max_ne_mss;          // max horizontal acceleration in m/s² used for kinematic shaping
+    float       _accel_max_d_mss;           // max vertical acceleration in m/s² used for kinematic shaping
+    float       _jerk_max_ne_msss;          // Jerk limit of the ne kinematic path generation in m/s³ used to determine how quickly the aircraft varies the acceleration target
+    float       _jerk_max_d_msss;           // Jerk limit of the z kinematic path generation in m/s³ used to determine how quickly the aircraft varies the acceleration target
+    float       _vel_d_control_ratio = 2.0f;// confidence that we have control in the vertical axis
+    Vector2f    _disturb_pos_ne_m;          // position disturbance generated by system ID mode
+    Vector2f    _disturb_vel_ne_ms;         // velocity disturbance generated by system ID mode
+    float       _ne_control_scale_factor = 1.0; // single loop scale factor for XY control
 
     // output from controller
-    float       _roll_target;           // desired roll angle in centi-degrees calculated by position controller
-    float       _pitch_target;          // desired roll pitch in centi-degrees calculated by position controller
+    float       _roll_target_rad;           // desired roll angle in radians calculated by position controller
+    float       _pitch_target_rad;          // desired roll pitch in radians calculated by position controller
+    float       _yaw_target_rad;            // desired yaw in radians calculated by position controller
+    float       _yaw_rate_target_rads;      // desired yaw rate in radians per second calculated by position controller
 
     // position controller internal variables
-    Vector3f    _pos_target;            // target location in cm from home
-    Vector3f    _pos_error;             // error between desired and actual position in cm
-    Vector3f    _vel_desired;           // desired velocity in cm/s
-    Vector3f    _vel_target;            // velocity target in cm/s calculated by pos_to_rate step
-    Vector3f    _vel_error;             // error between desired and actual acceleration in cm/s
-    Vector3f    _vel_last;              // previous iterations velocity in cm/s
-    Vector3f    _accel_desired;         // desired acceleration in cm/s/s (feed forward)
-    Vector3f    _accel_target;          // acceleration target in cm/s/s
-    Vector3f    _accel_error;           // acceleration error in cm/s/s
-    Vector2f    _vehicle_horiz_vel;     // velocity to use if _flags.vehicle_horiz_vel_override is set
-    LowPassFilterFloat _vel_error_filter;   // low-pass-filter on z-axis velocity error
+    Vector3p    _pos_estimate_ned_m;        // estimated location, frame NED in m relative to the EKF origin.
+    Vector3p    _pos_desired_ned_m;         // desired location, frame NED in m relative to the EKF origin. This is equal to the _pos_target_ned_m minus offsets
+    Vector3p    _pos_target_ned_m;          // target location, frame NED in m relative to the EKF origin. This is equal to the _pos_desired_ned_m plus offsets
+    Vector3f    _vel_estimate_ned_ms;       // estimated velocity in NED m/s
+    Vector3f    _vel_desired_ned_ms;        // desired velocity in NED m/s
+    Vector3f    _vel_target_ned_ms;         // velocity target in NED m/s calculated by pos_to_rate step
+    Vector3f    _accel_desired_ned_mss;     // desired acceleration in NED m/s² (feed forward)
+    Vector3f    _accel_target_ned_mss;      // acceleration target in NED m/s²
+    // todo: seperate the limit vector into ne and u. ne is based on acceleration while u is set +-1 based on throttle saturation. Together they don't form a direction vector because the units are different.
+    Vector3f    _limit_vector_ned;          // the direction that the position controller is limited, zero when not limited
 
-    LowPassFilterVector2f _accel_target_filter; // acceleration target filter
+    // terrain handling variables
+    float    _pos_terrain_target_d_m;   // position terrain target in m relative to the EKF origin in NED frame
+    float    _pos_terrain_d_m;          // position terrain in m from the EKF origin in NED frame. This terrain moves towards _pos_terrain_target_d_m
+    float    _vel_terrain_d_ms;         // velocity terrain in NED m/s calculated by pos_to_rate step. This terrain moves towards _vel_terrain_target
+    float    _accel_terrain_d_mss;      // acceleration terrain in NED m/s²
+
+    // offset handling variables
+    Vector3p    _pos_offset_target_ned_m;       // position offset target in m relative to the EKF origin in NED frame
+    Vector3p    _pos_offset_ned_m;              // position offset in m from the EKF origin in NED frame. This offset moves towards _pos_offset_target_ned_m
+    Vector3f    _vel_offset_target_ned_ms;      // velocity offset target in m/s in NED frame
+    Vector3f    _vel_offset_ned_ms;             // velocity offset in NED m/s calculated by pos_to_rate step. This offset moves towards _vel_offset_target_ned_ms
+    Vector3f    _accel_offset_target_ned_mss;   // acceleration offset target in m/s² in NED frame
+    Vector3f    _accel_offset_ned_mss;          // acceleration offset in NED m/s²
+    uint32_t    _posvelaccel_offset_target_ne_ms;   // system time that pos, vel, accel targets were set (used to implement timeouts)
+    uint32_t    _posvelaccel_offset_target_d_ms;    // system time that pos, vel, accel targets were set (used to implement timeouts)
 
     // ekf reset handling
-    uint32_t    _ekf_xy_reset_ms;      // system time of last recorded ekf xy position reset
-    uint32_t    _ekf_z_reset_ms;       // system time of last recorded ekf altitude reset
+    uint16_t    _ahrs_position_NE_reset_count;       // count of ekf ne position resets
+    uint16_t    _ahrs_position_D_reset_count;        // count of ekf altitude resets
+    EKFResetMethod _ekf_reset_method = EKFResetMethod::MoveTarget;  // EKF reset handling method.  Loiter should use MoveTarget, Auto should use MoveVehicle
 
     // high vibration handling
     bool        _vibe_comp_enabled;     // true when high vibration compensation is on
+
+    // angle max override, if zero then use ANGLE_MAX parameter
+    float       _angle_max_override_rad;
+
+    // return true if on a real vehicle or SITL with lock-step scheduling
+    bool has_good_timing(void) const;
+
+private:
+    // Internal log writer for PSCx (North, East, Down tracking).
+    // Reduces duplication between Write_PSCN, PSCE, and PSCD.
+    // Used for logging desired/target/actual position, velocity, and acceleration per axis.
+    static void Write_PSCx(LogMessages ID, float pos_desired_m, float pos_target_m, float pos_m, 
+                            float vel_desired_ms, float vel_target_ms, float vel_ms, 
+                            float accel_desired_mss, float accel_target_mss, float accel_mss);
+
+    // Internal log writer for PSOx (North, East, Down tracking).
+    // Reduces duplication between Write_PSON, PSOE, and PSOD.
+    // Used for logging the target/actual position, velocity, and acceleration offset per axis.
+    static void Write_PSOx(LogMessages id, float pos_target_offset_m, float pos_offset_m,
+                            float vel_target_offset_ms, float vel_offset_ms,
+                            float accel_target_offset_mss, float accel_offset_mss);
+
+    // singleton
+    static AC_PosControl *_singleton;
 };

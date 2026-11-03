@@ -17,14 +17,7 @@ public:
     AP_LeakDetector();
 
     /* Do not allow copies */
-    AP_LeakDetector(const AP_LeakDetector &other) = delete;
-    AP_LeakDetector &operator=(const AP_LeakDetector&) = delete;
-
-    enum LeakDetector_Type {
-        LEAKDETECTOR_TYPE_NONE = 0,
-        LEAKDETECTOR_TYPE_DIGITAL = 1,
-        LEAKDETECTOR_TYPE_ANALOG = 2
-    };
+    CLASS_NO_COPY(AP_LeakDetector);
 
     struct LeakDetector_State {
         uint8_t instance;
@@ -43,6 +36,8 @@ public:
     // Update all drivers
     bool update(void);
 
+    int8_t get_pin(uint8_t instance) const;
+
     static const struct AP_Param::GroupInfo var_info[];
 
 private:
@@ -52,7 +47,6 @@ private:
     bool _status; // Current status, true if leak detected, false if all sensors dry
     uint32_t _last_detect_ms;
 
-    AP_Int8 _type[LEAKDETECTOR_MAX_INSTANCES]; // Analog, Digital, Mavlink
     AP_Int8 _pin[LEAKDETECTOR_MAX_INSTANCES]; // Pin that detector is connected to
     AP_Int8 _default_reading[LEAKDETECTOR_MAX_INSTANCES]; // Default reading when leak detector is dry
 };

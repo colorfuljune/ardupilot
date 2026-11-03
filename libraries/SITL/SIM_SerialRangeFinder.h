@@ -34,11 +34,16 @@ public:
     // update state
     virtual void update(float range);
 
-    virtual uint32_t packet_for_alt(uint16_t alt_cm, uint8_t *buffer, uint8_t buflen) = 0;
+    virtual uint32_t packet_for_alt(float alt_m, uint8_t *buffer, uint8_t buflen) = 0;
 
     virtual uint16_t reading_interval_ms() const { return 200; } // 5Hz default
 
+    // Rangefinders that return temperature most likely a depthfinder for boats
+    virtual bool has_temperature() const { return false; }
+    virtual uint32_t packet_for_temperature(float temperature, uint8_t *buffer, uint8_t buflen) { return 0; }; // 0 length packet by default
+
 private:
+    void send_temperature();
 
     uint32_t last_sent_ms;
 };

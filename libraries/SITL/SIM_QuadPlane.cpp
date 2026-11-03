@@ -28,8 +28,14 @@ QuadPlane::QuadPlane(const char *frame_str) :
     // default to X frame
     const char *frame_type = "x";
     uint8_t motor_offset = 4;
-    
-    if (strstr(frame_str, "-octa-quad")) {
+
+    ground_behavior = GROUND_BEHAVIOR_NO_MOVEMENT;
+
+    if (strstr(frame_str, "-octa-quad-cor")) {
+        frame_type = "octa-quad-cor";
+    } else if (strstr(frame_str, "-octa-quad-cw-cor")) {
+        frame_type = "octa-quad-cw-cor";
+    } else if (strstr(frame_str, "-octa-quad")) {
         frame_type = "octa-quad";
     } else if (strstr(frame_str, "-octaquad")) {
         frame_type = "octa-quad";
@@ -63,17 +69,25 @@ QuadPlane::QuadPlane(const char *frame_str) :
         thrust_scale = 0;
         // vtol motors start at 2
         motor_offset = 2;
+    } else if (strstr(frame_str, "-tilt")) {
+        frame_type = "tilt";
+        // fwd motor gives zero thrust
+        thrust_scale = 0;
     } else if (strstr(frame_str, "cl84")) {
         frame_type = "tilttri";
         // fwd motor gives zero thrust
         thrust_scale = 0;
+    } else if (strstr(frame_str, "-copter_tailsitter")) {
+        frame_type = "+";
+        copter_tailsitter = true;
+        ground_behavior = GROUND_BEHAVIOR_TAILSITTER;
+        thrust_scale *= 1.5;
     }
-    frame = Frame::find_frame(frame_type);
+    frame = Frame::create_frame(frame_type);
     if (frame == nullptr) {
-        printf("Failed to find frame '%s'\n", frame_type);
+        printf("Failed to find frame '%s' or insufficient memory\n", frame_type);
         exit(1);
     }
-    num_motors = 1 + frame->num_motors;
 
     if (strstr(frame_str, "cl84")) {
         // setup retract servos at front
@@ -86,10 +100,18 @@ QuadPlane::QuadPlane(const char *frame_str) :
     // leave first 4 servos free for plane
     frame->motor_offset = motor_offset;
 
-    // we use zero terminal velocity to let the plane model handle the drag
-    frame->init(mass, 0.51, 0, 0);
+    // increase mass for plane components
+    frame->set_mass_scale(1.5);
 
-    ground_behavior = GROUND_BEHAVIOR_NO_MOVEMENT;
+    frame->init(frame_str);
+    battery.setup(frame->get_model_batt_capacity_ah(),
+                  frame->get_model_batt_resistance_ohm(),
+                  frame->get_model_batt_max_voltage(),
+                  ambient_outside_temperature_degC());
+
+    mass = frame->get_mass();
+
+    lock_step_scheduled = true;
 }
 
 /*
@@ -97,21 +119,43 @@ QuadPlane::QuadPlane(const char *frame_str) :
  */
 void QuadPlane::update(const struct sitl_input &input)
 {
+    // refresh mass in case SIM_FRM_ parameters have changed
+    mass = frame->get_mass();
+
     // get wind vector setup
     update_wind(input);
 
     // first plane forces
     Vector3f rot_accel;
-    calculate_forces(input, rot_accel, accel_body);
+    calculate_forces(input, rot_accel);
 
     // now quad forces
     Vector3f quad_rot_accel;
     Vector3f quad_accel_body;
 
-    frame->calculate_forces(*this, input, quad_rot_accel, quad_accel_body, &rpm[1]);
+    motor_mask |= ((1U<<frame->num_motors)-1U) << frame->motor_offset;
+    frame->calculate_forces(*this, input, quad_rot_accel, quad_accel_body, rpm);
 
-    // estimate voltage and current
-    frame->current_and_voltage(input, battery_voltage, battery_current);
+    // rotate frames for copter tailsitters
+    if (copter_tailsitter) {
+        quad_rot_accel.rotate(ROTATION_PITCH_270);
+        quad_accel_body.rotate(ROTATION_PITCH_270);
+    }
+
+    if (frame->battery_changed()) {
+        // battery model changed via SIM_FRM_ parameters
+        battery.setup(frame->get_model_batt_capacity_ah(),
+                      frame->get_model_batt_resistance_ohm(),
+                      frame->get_model_batt_max_voltage(),
+                      ambient_outside_temperature_degC());
+    }
+    battery.maybe_reset(sitl->batt_voltage, sitl->batt_capacity_ah, sitl->batt_resistance);
+    battery_voltage = battery.get_voltage();
+    battery_current = frame->get_current_amp();
+    battery_temperature_degC = battery.get_temperature_degC();
+
+    const uint64_t now_us = AP_HAL::micros64();
+    battery.consume_energy(battery_current, now_us);
 
     float throttle;
     if (reverse_thrust) {

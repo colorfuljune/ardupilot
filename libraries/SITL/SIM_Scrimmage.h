@@ -18,9 +18,13 @@
 
 #pragma once
 
+#include "SIM_config.h"
+
+#if AP_SIM_SCRIMMAGE_ENABLED
+
 #include <string>
 
-#include <AP_HAL/utility/Socket.h>
+#include <AP_HAL/utility/Socket_native.h>
 
 #include "SIM_Aircraft.h"
 
@@ -38,7 +42,7 @@ public:
 
     /* static object creator */
     static Aircraft *create(const char *frame_str) {
-        return new Scrimmage(frame_str);
+        return NEW_NOTHROW Scrimmage(frame_str);
     }
 
     /*  Create and set in/out socket for extenal simulator */
@@ -76,10 +80,10 @@ private:
     void send_servos(const struct sitl_input &input);
 
     uint64_t prev_timestamp_us;
-    SocketAPM recv_sock;
-    SocketAPM send_sock;
-
-    const char *frame_str;
+    SocketAPM_native recv_sock;
+    SocketAPM_native send_sock;
 };
 
 } // namespace SITL
+
+#endif  // AP_SIM_SCRIMMAGE_ENABLED

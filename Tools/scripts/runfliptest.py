@@ -1,4 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+
+# flake8: noqa
 
 import pexpect, time, sys
 from pymavlink import mavutil
@@ -37,7 +39,7 @@ def wait_time(mav, simtime):
 
 cmd = 'sim_vehicle.py -j4 -D -L KSFO -S5'
 mavproxy = pexpect.spawn(cmd, logfile=sys.stdout, timeout=30)
-mavproxy.expect("Ready to FLY")
+mavproxy.expect("ArduPilot Ready")
 
 mav = mavutil.mavlink_connection('127.0.0.1:14550')
 

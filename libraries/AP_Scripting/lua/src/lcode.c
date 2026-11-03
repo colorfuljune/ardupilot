@@ -9,6 +9,9 @@
 
 #if defined(ARDUPILOT_BUILD)
 #pragma GCC diagnostic ignored "-Wfloat-equal"
+#if defined(__GNUC__) &&  __GNUC__ >= 7 || defined(__clang_major__) && __clang_major__ >= 10
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#endif
 #endif
 
 #include "lprefix.h"
@@ -1065,7 +1068,7 @@ static void codecomp (FuncState *fs, BinOpr opr, expdesc *e1, expdesc *e2) {
 
 
 /*
-** Aplly prefix operation 'op' to expression 'e'.
+** Apply prefix operation 'op' to expression 'e'.
 */
 void luaK_prefix (FuncState *fs, UnOpr op, expdesc *e, int line) {
   static const expdesc ef = {VKINT, {0}, NO_JUMP, NO_JUMP};

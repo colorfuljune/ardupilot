@@ -1,6 +1,6 @@
 #include "Copter.h"
 
-#if MODE_LOITER_ENABLED == ENABLED
+#if MODE_LOITER_ENABLED
 
 /*
  * Init and run calls for loiter flight mode
@@ -9,32 +9,32 @@
 // loiter_init - initialise loiter controller
 bool ModeLoiter::init(bool ignore_checks)
 {
-    if (!copter.failsafe.radio) {
-        float target_roll, target_pitch;
-        // apply SIMPLE mode transform to pilot inputs
-        update_simple_mode();
+    float target_roll_rad, target_pitch_rad;
+    // convert pilot input to lean angles
+    get_pilot_desired_lean_angles_rad(target_roll_rad, target_pitch_rad, loiter_nav->get_angle_max_rad(), attitude_control->get_althold_lean_angle_max_rad());
 
-        // convert pilot input to lean angles
-        get_pilot_desired_lean_angles(target_roll, target_pitch, loiter_nav->get_angle_max_cd(), attitude_control->get_althold_lean_angle_max());
+    // process pilot's roll and pitch input
+    loiter_nav->set_pilot_desired_acceleration_rad(target_roll_rad, target_pitch_rad);
 
-        // process pilot's roll and pitch input
-        loiter_nav->set_pilot_desired_acceleration(target_roll, target_pitch, G_Dt);
-    } else {
-        // clear out pilot desired acceleration in case radio failsafe event occurs and we do not switch to RTL for some reason
-        loiter_nav->clear_pilot_desired_acceleration();
-    }
     loiter_nav->init_target();
 
-    // initialise position and desired velocity
-    if (!pos_control->is_active_z()) {
-        pos_control->set_alt_target_to_current_alt();
-        pos_control->set_desired_velocity_z(inertial_nav.get_velocity_z());
+    // initialise the vertical position controller
+    if (!pos_control->D_is_active()) {
+        pos_control->D_init_controller();
     }
+
+    // set vertical speed and acceleration limits
+    pos_control->D_set_max_speed_accel_m(get_pilot_speed_dn_ms(), get_pilot_speed_up_ms(), get_pilot_accel_D_mss());
+    pos_control->D_set_correction_speed_accel_m(get_pilot_speed_dn_ms(), get_pilot_speed_up_ms(), get_pilot_accel_D_mss());
+
+#if AC_PRECLAND_ENABLED
+    _precision_loiter_active = false;
+#endif
 
     return true;
 }
 
-#if PRECISION_LANDING == ENABLED
+#if AC_PRECLAND_ENABLED
 bool ModeLoiter::do_precision_loiter()
 {
     if (!_precision_loiter_enabled) {
@@ -44,7 +44,7 @@ bool ModeLoiter::do_precision_loiter()
         return false;        // don't move on the ground
     }
     // if the pilot *really* wants to move the vehicle, let them....
-    if (loiter_nav->get_pilot_desired_acceleration().length() > 50.0f) {
+    if (loiter_nav->get_pilot_desired_acceleration_NE_mss().length() > 0.5) {
         return false;
     }
     if (!copter.precland.target_acquired()) {
@@ -56,17 +56,19 @@ bool ModeLoiter::do_precision_loiter()
 void ModeLoiter::precision_loiter_xy()
 {
     loiter_nav->clear_pilot_desired_acceleration();
-    Vector2f target_pos, target_vel_rel;
-    if (!copter.precland.get_target_position_cm(target_pos)) {
-        target_pos.x = inertial_nav.get_position().x;
-        target_pos.y = inertial_nav.get_position().y;
+    Vector2p target_pos_ne_m;
+    Vector2f target_vel_ne_ms;
+    if (!copter.precland.get_target_position_m(target_pos_ne_m)) {
+        target_pos_ne_m = pos_control->get_pos_estimate_NED_m().xy();
     }
-    if (!copter.precland.get_target_velocity_relative_cms(target_vel_rel)) {
-        target_vel_rel.x = -inertial_nav.get_velocity().x;
-        target_vel_rel.y = -inertial_nav.get_velocity().y;
-    }
-    pos_control->set_xy_target(target_pos.x, target_pos.y);
-    pos_control->override_vehicle_velocity_xy(-target_vel_rel);
+    // get the velocity of the target
+    copter.precland.get_target_velocity_ms(pos_control->get_vel_estimate_NED_ms().xy(), target_vel_ne_ms);
+
+    Vector2f zero;
+    // target vel will remain zero if landing target is stationary
+    pos_control->input_pos_vel_accel_NE_m(target_pos_ne_m, target_vel_ne_ms, zero);
+    // run pos controller
+    pos_control->NE_update_controller();
 }
 #endif
 
@@ -74,36 +76,24 @@ void ModeLoiter::precision_loiter_xy()
 // should be called at 100hz or more
 void ModeLoiter::run()
 {
-    float target_roll, target_pitch;
-    float target_yaw_rate = 0.0f;
-    float target_climb_rate = 0.0f;
-    float takeoff_climb_rate = 0.0f;
+    float target_roll_rad, target_pitch_rad;
+    float target_yaw_rate_rads = 0.0f;
+    float target_climb_rate_ms = 0.0f;
 
-    // initialize vertical speed and acceleration
-    pos_control->set_max_speed_z(-get_pilot_speed_dn(), g.pilot_speed_up);
-    pos_control->set_max_accel_z(g.pilot_accel_z);
+    // set vertical speed and acceleration limits
+    pos_control->D_set_max_speed_accel_m(get_pilot_speed_dn_ms(), get_pilot_speed_up_ms(), get_pilot_accel_D_mss());
 
-    // process pilot inputs unless we are in radio failsafe
-    if (!copter.failsafe.radio) {
-        // apply SIMPLE mode transform to pilot inputs
-        update_simple_mode();
+    // convert pilot input to lean angles
+    get_pilot_desired_lean_angles_rad(target_roll_rad, target_pitch_rad, loiter_nav->get_angle_max_rad(), attitude_control->get_althold_lean_angle_max_rad());
 
-        // convert pilot input to lean angles
-        get_pilot_desired_lean_angles(target_roll, target_pitch, loiter_nav->get_angle_max_cd(), attitude_control->get_althold_lean_angle_max());
+    // process pilot's roll and pitch input
+    loiter_nav->set_pilot_desired_acceleration_rad(target_roll_rad, target_pitch_rad);
 
-        // process pilot's roll and pitch input
-        loiter_nav->set_pilot_desired_acceleration(target_roll, target_pitch, G_Dt);
+    // get pilot's desired yaw rate
+    target_yaw_rate_rads = get_pilot_desired_yaw_rate_rads();
 
-        // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(channel_yaw->get_control_in());
-
-        // get pilot desired climb rate
-        target_climb_rate = get_pilot_desired_climb_rate(channel_throttle->get_control_in());
-        target_climb_rate = constrain_float(target_climb_rate, -get_pilot_speed_dn(), g.pilot_speed_up);
-    } else {
-        // clear out pilot desired acceleration in case radio failsafe event occurs and we do not switch to RTL for some reason
-        loiter_nav->clear_pilot_desired_acceleration();
-    }
+    // get pilot desired climb rate
+    target_climb_rate_ms = get_pilot_desired_climb_rate_ms();
 
     // relax loiter target if we might be landed
     if (copter.ap.land_complete_maybe) {
@@ -111,92 +101,93 @@ void ModeLoiter::run()
     }
 
     // Loiter State Machine Determination
-    AltHoldModeState loiter_state = get_alt_hold_state(target_climb_rate);
+    AltHoldModeState loiter_state = get_alt_hold_state_D_ms(target_climb_rate_ms);
 
     // Loiter State Machine
     switch (loiter_state) {
 
-    case AltHold_MotorStopped:
+    case AltHoldModeState::MotorStopped:
         attitude_control->reset_rate_controller_I_terms();
-        attitude_control->set_yaw_target_to_current_heading();
-        pos_control->relax_alt_hold_controllers(0.0f);   // forces throttle output to go to zero
+        attitude_control->reset_yaw_target_and_rate();
+        pos_control->D_relax_controller(0.0f);   // forces throttle output to decay to zero
         loiter_nav->init_target();
-        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(loiter_nav->get_roll(), loiter_nav->get_pitch(), target_yaw_rate);
-        pos_control->update_z_controller();
         break;
 
-    case AltHold_Takeoff:
-        // initiate take-off
-        if (!takeoff.running()) {
-            takeoff.start(constrain_float(g.pilot_takeoff_alt,0.0f,1000.0f));
-        }
-
-        // get takeoff adjusted pilot and takeoff climb rates
-        takeoff.get_climb_rates(target_climb_rate, takeoff_climb_rate);
-
-        // get avoidance adjusted climb rate
-        target_climb_rate = get_avoidance_adjusted_climbrate(target_climb_rate);
-
-        // run loiter controller
-        loiter_nav->update();
-
-        // call attitude controller
-        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(loiter_nav->get_roll(), loiter_nav->get_pitch(), target_yaw_rate);
-
-        // update altitude target and call position controller
-        pos_control->set_alt_target_from_climb_rate_ff(target_climb_rate, G_Dt, false);
-        pos_control->add_takeoff_climb_rate(takeoff_climb_rate, G_Dt);
-        pos_control->update_z_controller();
-        break;
-
-    case AltHold_Landed_Ground_Idle:
-        attitude_control->set_yaw_target_to_current_heading();
+    case AltHoldModeState::Landed_Ground_Idle:
+        attitude_control->reset_yaw_target_and_rate();
         FALLTHROUGH;
 
-    case AltHold_Landed_Pre_Takeoff:
-        attitude_control->reset_rate_controller_I_terms();
+    case AltHoldModeState::Landed_Pre_Takeoff:
+        attitude_control->reset_rate_controller_I_terms_smoothly();
         loiter_nav->init_target();
-        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(0.0f, 0.0f, 0.0f);
-        pos_control->relax_alt_hold_controllers(0.0f);   // forces throttle output to go to zero
-        pos_control->update_z_controller();
+        pos_control->D_relax_controller(0.0f);   // forces throttle output to decay to zero
         break;
 
-    case AltHold_Flying:
-        // set motors to full range
-        motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
-
-#if PRECISION_LANDING == ENABLED
-        if (do_precision_loiter()) {
-            precision_loiter_xy();
+    case AltHoldModeState::Takeoff:
+        // initiate take-off
+        if (!takeoff.running()) {
+            takeoff.start_m(constrain_float(g2.pilot_takeoff_alt_m, 0.0, 10.0));
         }
-#endif
+
+        // get avoidance adjusted climb rate
+        target_climb_rate_ms = get_avoidance_adjusted_climbrate_ms(target_climb_rate_ms);
+
+        // set position controller targets adjusted for pilot input
+        takeoff.do_pilot_takeoff_ms(target_climb_rate_ms);
 
         // run loiter controller
         loiter_nav->update();
+        break;
 
-        // call attitude controller
-        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(loiter_nav->get_roll(), loiter_nav->get_pitch(), target_yaw_rate);
+    case AltHoldModeState::Flying:
+#if AC_PRECLAND_ENABLED
+        bool precision_loiter_old_state = _precision_loiter_active;
+        if (do_precision_loiter()) {
+            precision_loiter_xy();
+            _precision_loiter_active = true;
+        } else {
+            _precision_loiter_active = false;
+        }
+        if (precision_loiter_old_state && !_precision_loiter_active) {
+            // prec loiter was active, not any more, let's init again as user takes control
+            loiter_nav->init_target();
+        }
+        // run loiter controller if we are not doing prec loiter
+        if (!_precision_loiter_active) {
+            loiter_nav->update();
+        }
+#else
+        loiter_nav->update();
+#endif
 
-        // adjust climb rate using rangefinder
-        target_climb_rate = copter.surface_tracking.adjust_climb_rate(target_climb_rate);
 
         // get avoidance adjusted climb rate
-        target_climb_rate = get_avoidance_adjusted_climbrate(target_climb_rate);
+        target_climb_rate_ms = get_avoidance_adjusted_climbrate_ms(target_climb_rate_ms);
 
-        pos_control->set_alt_target_from_climb_rate_ff(target_climb_rate, G_Dt, false);
-        pos_control->update_z_controller();
+#if AP_RANGEFINDER_ENABLED
+        // update the vertical offset based on the surface measurement
+        copter.surface_tracking.update_surface_offset();
+#endif
+
+        // Send the commanded climb rate to the position controller
+        pos_control->D_set_pos_target_from_climb_rate_ms(target_climb_rate_ms);
         break;
     }
+
+    // call attitude controller
+    attitude_control->input_thrust_vector_rate_heading_rads(loiter_nav->get_thrust_vector(), target_yaw_rate_rads, false);
+    // run the vertical position controller and set output throttle
+    pos_control->D_update_controller();
 }
 
-uint32_t ModeLoiter::wp_distance() const
+float ModeLoiter::wp_distance_m() const
 {
-    return loiter_nav->get_distance_to_target();
+    return loiter_nav->get_distance_to_target_m();
 }
 
-int32_t ModeLoiter::wp_bearing() const
+float ModeLoiter::wp_bearing_deg() const
 {
-    return loiter_nav->get_bearing_to_target();
+    return degrees(loiter_nav->get_bearing_to_target_rad());
 }
 
 #endif

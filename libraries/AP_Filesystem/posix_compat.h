@@ -20,6 +20,8 @@
 #include <sys/types.h>
 #include <stdio.h>
 #include <stddef.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,7 +31,13 @@ extern "C" {
   these are here to allow lua to build on HAL_ChibiOS
  */
 
-typedef struct apfs_file APFS_FILE;
+typedef struct apfs_file {
+    int fd;
+    bool error;
+    bool eof;
+    int16_t unget;
+    char *tmpfile_name;
+} APFS_FILE;
 
 APFS_FILE *apfs_fopen(const char *pathname, const char *mode);
 int apfs_fprintf(APFS_FILE *stream, const char *format, ...);
@@ -50,7 +58,6 @@ long apfs_ftell(APFS_FILE *stream);
 APFS_FILE *apfs_freopen(const char *pathname, const char *mode, APFS_FILE *stream);
 int apfs_remove(const char *pathname);
 int apfs_rename(const char *oldpath, const char *newpath);
-char *tmpnam(char *s);
 
 #undef stdin
 #undef stdout
@@ -70,6 +77,20 @@ char *tmpnam(char *s);
 #endif
 
 #define FILE APFS_FILE
+
+#ifndef __cplusplus
+/*
+  only redefine posix functions for C code (eg. lua).
+  for C++ use the AP_Filsystem APIs
+*/
+
+// on some platforms, some functions are implemented with macros. undefine
+// those which have caused macro redefinition warnings in the past.
+#undef clearerr
+#undef ferror
+#undef feof
+#undef getc
+
 #define fopen(p,m) apfs_fopen(p,m)
 #define fprintf(stream, format, args...) apfs_fprintf(stream, format, ##args)
 #define fflush(s) apfs_fflush(s)
@@ -82,17 +103,17 @@ char *tmpnam(char *s);
 #define ferror(stream) apfs_ferror(stream)
 #define fclose(stream) apfs_fclose(stream)
 #define tmpfile() apfs_tmpfile()
-#undef getc
 #define getc(stream) apfs_getc(stream)
 #define ungetc(c, stream) apfs_ungetc(c, stream)
 #define feof(stream) apfs_ferror(stream)
 #define ftell(stream) apfs_ftell(stream)
 #define freopen(pathname, mode, stream) apfs_freopen(pathname, mode, stream)
-#define remove(pathname) apfs_remove(pathname)
 #define rename(oldpath, newpath) apfs_rename(oldpath, newpath)
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#define remove(pathname) apfs_remove(pathname)
 int sprintf(char *str, const char *format, ...);
 #endif
+#endif // __cplusplus
 
 #ifdef __cplusplus
 }

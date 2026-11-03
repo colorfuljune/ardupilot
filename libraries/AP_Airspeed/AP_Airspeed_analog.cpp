@@ -16,11 +16,14 @@
  *   analog airspeed driver
  */
 
+#include "AP_Airspeed_analog.h"
+
+#if AP_AIRSPEED_ANALOG_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Common/AP_Common.h>
 
 #include "AP_Airspeed.h"
-#include "AP_Airspeed_analog.h"
 
 extern const AP_HAL::HAL &hal;
 
@@ -35,17 +38,24 @@ AP_Airspeed_Analog::AP_Airspeed_Analog(AP_Airspeed &_frontend, uint8_t _instance
 
 bool AP_Airspeed_Analog::init()
 {
+    set_bus_id(AP_HAL::Device::make_bus_id(
+        AP_HAL::Device::BUS_TYPE_UNKNOWN,
+        0,
+        0,
+        uint8_t(DevType::ANALOG)
+    ));
     return _source != nullptr;
 }
 
 // read the airspeed sensor
 bool AP_Airspeed_Analog::get_differential_pressure(float &pressure)
 {
-    if (_source == nullptr) {
+    // allow pin to change
+    if (_source == nullptr || !_source->set_pin(get_pin())) {
         return false;
     }
-    // allow pin to change
-    _source->set_pin(get_pin());
     pressure = _source->voltage_average_ratiometric() * VOLTS_TO_PASCAL / get_psi_range();
     return true;
 }
+
+#endif  // AP_AIRSPEED_ANALOG_ENABLED

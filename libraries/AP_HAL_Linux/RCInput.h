@@ -4,6 +4,10 @@
 
 #include "AP_HAL_Linux.h"
 
+#ifndef AP_RCPROTOCOL_ZYNQ_ENABLED
+#define AP_RCPROTOCOL_ZYNQ_ENABLED 0
+#endif  // AP_RCPROTOCOL_ZYNQ_ENABLED
+
 #define LINUX_RC_INPUT_NUM_CHANNELS 16
 
 namespace Linux {
@@ -32,21 +36,6 @@ public:
     // default empty _timer_tick, this is overridden by board
     // specific implementations
     virtual void _timer_tick() {}
-
-    // add some DSM input bytes, for RCInput over a serial port
-    bool add_dsm_input(const uint8_t *bytes, size_t nbytes);
-
-    // add some SBUS input bytes, for RCInput over a serial port
-    void add_sbus_input(const uint8_t *bytes, size_t nbytes);
-
-    // add some SUMD input bytes, for RCInput over a serial port
-    bool add_sumd_input(const uint8_t *bytes, size_t nbytes);
-
-    // add some st24 input bytes, for RCInput over a serial port
-    bool add_st24_input(const uint8_t *bytes, size_t nbytes);
-
-    // add some srxl input bytes, for RCInput over a serial port
-    bool add_srxl_input(const uint8_t *bytes, size_t nbytes);
 
 protected:
     void _process_rc_pulse(uint16_t width_s0, uint16_t width_s1);
@@ -80,20 +69,6 @@ protected:
         uint16_t bytes[16]; // including start bit and stop bit
         uint16_t bit_ofs;
     } dsm_state;
-
-    // state of add_dsm_input
-    struct {
-        uint8_t frame[16];
-        uint8_t partial_frame_count;
-        uint32_t last_input_ms;
-    } dsm;
-
-    // state of add_sbus_input
-    struct {
-        uint8_t frame[25];
-        uint8_t partial_frame_count;
-        uint32_t last_input_ms;
-    } sbus;
 
     int16_t _rssi = -1;
 };

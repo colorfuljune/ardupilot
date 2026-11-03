@@ -209,15 +209,18 @@ uint32_t get_fattime()
     return fattime;
 }
 
-#if !defined(NO_FASTBOOT)
+#if AP_FASTBOOT_ENABLED
 
 // get RTC backup registers starting at given idx
 void get_rtc_backup(uint8_t idx, uint32_t *v, uint8_t n)
 {
     while (n--) {
 #if defined(STM32F1)
+        (void)idx;
         __IO uint32_t *dr = (__IO uint32_t *)&BKP->DR1;
         *v++ = (dr[n/2]&0xFFFF) | (dr[n/2+1]<<16);
+#elif defined(STM32G4)
+        *v++ = ((__IO uint32_t *)&TAMP->BKP0R)[idx++];
 #else
         *v++ = ((__IO uint32_t *)&RTC->BKP0R)[idx++];
 #endif
@@ -240,9 +243,12 @@ void set_rtc_backup(uint8_t idx, const uint32_t *v, uint8_t n)
 #endif
     while (n--) {
 #if defined(STM32F1)
+        (void)idx;
         __IO uint32_t *dr = (__IO uint32_t *)&BKP->DR1;
         dr[n/2] =   (*v) & 0xFFFF;
         dr[n/2+1] = (*v) >> 16;
+#elif defined(STM32G4)
+        ((__IO uint32_t *)&TAMP->BKP0R)[idx++] = *v++;
 #else
         ((__IO uint32_t *)&RTC->BKP0R)[idx++] = *v++;
 #endif
@@ -266,19 +272,24 @@ void set_fast_reboot(enum rtc_boot_magic v)
     }
 }
 
-#else // NO_FASTBOOT
+#else // AP_FASTBOOT_ENABLED is not set
 
 // set n RTC backup registers starting at given idx
 void set_rtc_backup(uint8_t idx, const uint32_t *v, uint8_t n)
 {
+    (void)idx;
+    (void)v;
+    (void)n;
 }
 
 // get RTC backup registers starting at given idx
 void get_rtc_backup(uint8_t idx, uint32_t *v, uint8_t n)
 {
-    return 0;
+    (void)idx;
+    (void)v;
+    (void)n;
 }
-#endif // NO_FASTBOOT
+#endif // AP_FASTBOOT_ENABLED
 
 /*
   enable peripheral power if needed This is done late to prevent
@@ -287,7 +298,7 @@ void get_rtc_backup(uint8_t idx, uint32_t *v, uint8_t n)
 */
 void peripheral_power_enable(void)
 {
-#if defined(HAL_GPIO_PIN_nVDD_5V_PERIPH_EN) || defined(HAL_GPIO_PIN_nVDD_5V_HIPOWER_EN) || defined(HAL_GPIO_PIN_VDD_3V3_SENSORS_EN) || defined(HAL_GPIO_PIN_nVDD_3V3_SD_CARD_EN) || defined(HAL_GPIO_PIN_VDD_3V3_SD_CARD_EN)
+#if defined(HAL_GPIO_PIN_nVDD_5V_PERIPH_EN) || defined(HAL_GPIO_PIN_VDD_5V_PERIPH_EN) || defined(HAL_GPIO_PIN_nVDD_5V_HIPOWER_EN) || defined(HAL_GPIO_PIN_VDD_3V3_SENSORS_EN)|| defined(HAL_GPIO_PIN_VDD_3V3_SENSORS2_EN) || defined(HAL_GPIO_PIN_VDD_3V3_SENSORS3_EN) || defined(HAL_GPIO_PIN_VDD_3V3_SENSORS4_EN) || defined(HAL_GPIO_PIN_nVDD_3V3_SD_CARD_EN) || defined(HAL_GPIO_PIN_VDD_3V3_SD_CARD_EN) || defined(HAL_GPIO_PIN_VDD_3V5_LTE_EN)
     // we don't know what state the bootloader had the CTS pin in, so
     // wait here with it pulled up from the PAL table for enough time
     // for the radio to be definately powered down
@@ -299,12 +310,27 @@ void peripheral_power_enable(void)
 #ifdef HAL_GPIO_PIN_nVDD_5V_PERIPH_EN
     palWriteLine(HAL_GPIO_PIN_nVDD_5V_PERIPH_EN, 0);
 #endif
+#ifdef HAL_GPIO_PIN_VDD_5V_PERIPH_EN
+    palWriteLine(HAL_GPIO_PIN_VDD_5V_PERIPH_EN, 1);
+#endif
 #ifdef HAL_GPIO_PIN_nVDD_5V_HIPOWER_EN
     palWriteLine(HAL_GPIO_PIN_nVDD_5V_HIPOWER_EN, 0);
+#endif
+#ifdef HAL_GPIO_PIN_VDD_5V_HIPOWER_EN
+    palWriteLine(HAL_GPIO_PIN_VDD_5V_HIPOWER_EN, 1);
 #endif
 #ifdef HAL_GPIO_PIN_VDD_3V3_SENSORS_EN
     // the TBS-Colibri-F7 needs PE3 low at power on
     palWriteLine(HAL_GPIO_PIN_VDD_3V3_SENSORS_EN, 1);
+#endif
+#ifdef HAL_GPIO_PIN_VDD_3V3_SENSORS2_EN
+    palWriteLine(HAL_GPIO_PIN_VDD_3V3_SENSORS2_EN, 1);
+#endif
+#ifdef HAL_GPIO_PIN_VDD_3V3_SENSORS3_EN
+    palWriteLine(HAL_GPIO_PIN_VDD_3V3_SENSORS3_EN, 1);
+#endif
+#ifdef HAL_GPIO_PIN_VDD_3V3_SENSORS4_EN
+    palWriteLine(HAL_GPIO_PIN_VDD_3V3_SENSORS4_EN, 1);
 #endif
 #ifdef HAL_GPIO_PIN_nVDD_3V3_SD_CARD_EN
     // the TBS-Colibri-F7 needs PG7 low for SD card
@@ -314,6 +340,9 @@ void peripheral_power_enable(void)
     // others need it active high
     palWriteLine(HAL_GPIO_PIN_VDD_3V3_SD_CARD_EN, 1);
 #endif
+#ifdef HAL_GPIO_PIN_VDD_3V5_LTE_EN
+    palWriteLine(HAL_GPIO_PIN_VDD_3V5_LTE_EN, 1);
+#endif
     for (i=0; i<20; i++) {
         // give 20ms for sensors to settle
         chThdSleep(chTimeMS2I(1));
@@ -321,7 +350,7 @@ void peripheral_power_enable(void)
 #endif
 }
 
-#if defined(STM32F7) || defined(STM32H7) || defined(STM32F4) || defined(STM32F3)
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32F4) || defined(STM32F3) || defined(STM32G4) || defined(STM32L4) || defined(STM32L4PLUS)
 /*
   read mode of a pin. This allows a pin config to be read, changed and
   then written back
@@ -331,6 +360,7 @@ iomode_t palReadLineMode(ioline_t line)
     ioportid_t port = PAL_PORT(line);
     uint8_t pad = PAL_PAD(line);
     iomode_t ret = 0;
+    const syssts_t sts = chSysGetStatusAndLockX();
     ret |= (port->MODER >> (pad*2)) & 0x3;
     ret |= ((port->OTYPER >> pad)&1) << 2;
     ret |= ((port->OSPEEDR >> (pad*2))&3) << 3;
@@ -340,6 +370,7 @@ iomode_t palReadLineMode(ioline_t line)
     } else {
         ret |= ((port->AFRH >> ((pad-8)*4))&0xF) << 7;
     }
+    chSysRestoreStatusX(sts);
     return ret;
 }
 
@@ -350,10 +381,24 @@ void palLineSetPushPull(ioline_t line, enum PalPushPull pp)
 {
     ioportid_t port = PAL_PORT(line);
     uint8_t pad = PAL_PAD(line);
+    const syssts_t sts = chSysGetStatusAndLockX();
     port->PUPDR = (port->PUPDR & ~(3<<(pad*2))) | (pp<<(pad*2));
+    chSysRestoreStatusX(sts);
 }
 
 #endif // F7, H7, F4
+
+/*
+  set the mode of a pin. palSetLineMode() does an unlocked
+  read-modify-write of the port mode registers, which can corrupt the
+  mode of other pins on the same port if called concurrently
+ */
+void stm32_set_line_mode(ioline_t line, iomode_t mode)
+{
+    const syssts_t sts = chSysGetStatusAndLockX();
+    palSetLineMode(line, mode);
+    chSysRestoreStatusX(sts);
+}
 
 void stm32_cacheBufferInvalidate(const void *p, size_t size)
 {
@@ -422,14 +467,14 @@ void fault_printf(const char *fmt, ...)
     va_end(ap);
     fault_send_string(buffer);
 }
-#endif // HAL_GPIO_PIN_HARDFAULT
+#endif // HAL_GPIO_PIN_FAULT
 
 void system_halt_hook(void)
 {
 #ifdef HAL_GPIO_PIN_FAULT
     // optionally print the message on a fault pin
     while (true) {
-        fault_printf("PANIC:%s\n", ch.dbg.panic_msg);
+        fault_printf("PANIC:%s\n", currcore->dbg.panic_msg);
         fault_printf("RA0:0x%08x\n", __builtin_return_address(0));
     }
 #endif
@@ -449,3 +494,134 @@ void stack_overflow(thread_t *tp)
     (void)tp;
 #endif
 }
+
+#if CH_DBG_ENABLE_STACK_CHECK == TRUE
+/*
+  check how much stack is free given a stack base. Assumes the fill
+  byte is 0x55
+ */
+uint32_t stack_free(void *stack_base)
+{
+    const uint32_t *p = (uint32_t *)stack_base;
+    const uint32_t canary_word = 0x55555555;
+    while (*p == canary_word) {
+        p++;
+    }
+    return ((uint32_t)p) - (uint32_t)stack_base;
+}
+#endif
+
+#if HAL_USE_HW_RNG && defined(RNG)
+static bool stm32_rand_generate(uint32_t *val)
+{
+    uint32_t error_bits = 0;
+    error_bits = RNG_SR_SEIS | RNG_SR_CEIS;
+    /* Check for error flags and if data is ready. */
+    if (((RNG->SR & error_bits) == 0) && ((RNG->SR & RNG_SR_DRDY) == RNG_SR_DRDY)) {
+        *val = RNG->DR;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool stm32_rand_generate_blocking(unsigned char* output, unsigned int sz, uint32_t timeout_us)
+{
+    unsigned int i = 0;
+    uint32_t run_until = hrt_micros32() + timeout_us;
+    uint32_t val;
+    while ((i < sz) && (hrt_micros32() < run_until)) {
+        /* If not aligned or there is odd/remainder */
+        if( (i + sizeof(uint32_t)) > sz ||
+            ((uint32_t)&output[i] % sizeof(uint32_t)) != 0) {
+            /* Single byte at a time */
+            if (stm32_rand_generate(&val)) {
+                output[i] = val;
+                i++;
+            }
+        } else {
+            /* Use native 32 bit copy instruction */
+            if (stm32_rand_generate((uint32_t*)&output[i])) {
+                i += sizeof(uint32_t);
+            }
+        }
+    }
+    return i >= sz;
+}
+
+unsigned int stm32_rand_generate_nonblocking(unsigned char* output, unsigned int sz)
+{
+    if ((RNG->SR & RNG_SR_DRDY) != RNG_SR_DRDY) {
+        return false;
+    }
+    unsigned int i = 0;
+    uint32_t val;
+    while (i < sz) {
+        /* If not aligned or there is odd/remainder */
+        if( (i + sizeof(uint32_t)) > sz ||
+            ((uint32_t)&output[i] % sizeof(uint32_t)) != 0) {
+            /* Single byte at a time */
+            if (stm32_rand_generate(&val)) {
+                output[i] = val;
+                i++;
+            } else {
+                break;
+            }
+        } else {
+            /* Use native 32 bit copy instruction */
+            if (stm32_rand_generate((uint32_t*)&output[i])) {
+                i += sizeof(uint32_t);
+            } else {
+                break;
+            }
+        }
+    }
+    return i;
+}
+
+#endif // #if HAL_USE_HW_RNG && defined(RNG)
+
+/*
+  see if we should limit flash to 1M on devices with older revisions of STM32F427
+ */
+#ifdef STM32F427xx
+bool check_limit_flash_1M(void)
+{
+    const uint16_t revid = (*(uint32_t *)DBGMCU_BASE) >> 16;
+    static const uint16_t badrevs[4] = { 0x1000, 0x1001, 0x1003, 0x1007 };
+    for (uint8_t i=0; i<4; i++) {
+        if (revid == badrevs[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
+
+#if defined(DUAL_CORE)
+void stm32_disable_cm4_core() {
+    // Turn off second core for now
+    if ((FLASH->OPTSR_CUR & FLASH_OPTSR_BCM4)) {
+        //unlock flash
+        if (FLASH->OPTCR & FLASH_OPTCR_OPTLOCK) {
+            /* Unlock sequence */
+            FLASH->OPTKEYR = 0x08192A3B;
+            FLASH->OPTKEYR = 0x4C5D6E7F;
+        }
+        while (FLASH->OPTSR_CUR & FLASH_OPTSR_OPT_BUSY) {
+        }
+        // disable core boot
+        FLASH->OPTSR_PRG &= ~FLASH_OPTSR_BCM4;
+        // start programming
+        FLASH->OPTCR |= FLASH_OPTCR_OPTSTART;
+        // wait for completion by checking busy bit
+        while (FLASH->OPTSR_CUR & FLASH_OPTSR_OPT_BUSY) {
+        }
+        // lock flash
+        FLASH->OPTCR |= FLASH_OPTCR_OPTLOCK;
+        while (FLASH->OPTSR_CUR & FLASH_OPTSR_OPT_BUSY) {
+        }
+    }
+}
+#endif // DUAL_CORE

@@ -1,11 +1,14 @@
 #pragma once
 
+#include "AP_Compass_config.h"
+
+#if AP_COMPASS_LSM9DS1_ENABLED
+
 #include <AP_Common/AP_Common.h>
 #include <AP_HAL/AP_HAL.h>
 #include <AP_HAL/Device.h>
 #include <AP_Math/AP_Math.h>
 
-#include "AP_Compass.h"
 #include "AP_Compass_Backend.h"
 
 class AP_Compass_LSM9DS1 : public AP_Compass_Backend
@@ -15,8 +18,6 @@ public:
                                      enum Rotation rotation);
 
     static constexpr const char *name = "LSM9DS1";
-
-    void read() override;
 
     virtual ~AP_Compass_LSM9DS1() {}
 
@@ -36,7 +37,13 @@ private:
     void _dump_registers();
 
     AP_HAL::OwnPtr<AP_HAL::Device> _dev;
-    uint8_t _compass_instance;
     float _scaling;
     enum Rotation _rotation;
+
+    struct PACKED sample_regs {
+        uint8_t status;
+        int16_t val[3];
+    };
 };
+
+#endif

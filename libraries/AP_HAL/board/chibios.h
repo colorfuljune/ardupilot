@@ -1,9 +1,12 @@
 #pragma once
 
 #include <hwdef.h>
-#include <hal.h>
 
 #define HAL_BOARD_NAME "ChibiOS"
+
+#ifdef HAL_HAVE_PIXRACER_LED
+#error "use AP_NOTIFY_GPIO_LED_RGB_ENABLED in place of HAL_HAVE_PIXRACER_LED (and rename your pins!)"
+#endif
 
 #if HAL_MEMORY_TOTAL_KB >= 1000
 #define HAL_MEM_CLASS HAL_MEM_CLASS_1000
@@ -19,11 +22,20 @@
 #define HAL_MEM_CLASS HAL_MEM_CLASS_20
 #endif
 
-#ifndef HAL_GPIO_LED_ON
-#define HAL_GPIO_LED_ON           0
+// FIXME: BOARD_FLASH_SIZE is not adjusted for flash pages used for
+// storage, for the bootloader sector or for wasted pages (eg. defunct
+// OSD storage page).  These all impact the amount of space we have
+// for storing program!
+#ifndef HAL_PROGRAM_SIZE_LIMIT_KB
+#define HAL_PROGRAM_SIZE_LIMIT_KB (BOARD_FLASH_SIZE+EXT_FLASH_SIZE_MB*1024)
 #endif
-#ifndef HAL_GPIO_LED_OFF
-#define HAL_GPIO_LED_OFF          1
+
+#ifndef AP_REBOOT_MASS_STORAGE_ENABLED
+#if HAL_PROGRAM_SIZE_LIMIT_KB >= 2048
+#define AP_REBOOT_MASS_STORAGE_ENABLED 1
+#else
+#define AP_REBOOT_MASS_STORAGE_ENABLED 0
+#endif
 #endif
 
 #ifndef HAL_NUM_CAN_IFACES
@@ -56,12 +68,16 @@
 #define HAL_WITH_RAMTRON 0
 #endif
 
+#ifndef HAL_WITH_EKF_DOUBLE
+#define HAL_WITH_EKF_DOUBLE HAL_HAVE_HARDWARE_DOUBLE
+#endif
+
+#ifdef __cplusplus
 // allow for static semaphores
 #include <AP_HAL_ChibiOS/Semaphores.h>
 #define HAL_Semaphore ChibiOS::Semaphore
-
-#include <AP_HAL/EventHandle.h>
-#define HAL_EventHandle AP_HAL::EventHandle
+#define HAL_BinarySemaphore ChibiOS::BinarySemaphore
+#endif
 
 /* string names for well known SPI devices */
 #define HAL_BARO_MS5611_NAME "ms5611"
@@ -98,13 +114,24 @@
 #define CHIBIOS_SHORT_BOARD_NAME CHIBIOS_BOARD_NAME
 #endif
 
-#ifndef CONFIG_HAL_BOARD_SUBTYPE
-// allow for generic boards
-#define CONFIG_HAL_BOARD_SUBTYPE HAL_BOARD_SUBTYPE_CHIBIOS_GENERIC
+#define CONFIG_HAL_BOARD_SUBTYPE HAL_BOARD_SUBTYPE_NONE
+
+// note the compatability code here which only defaults the thread
+// enabled if AP_RCProtocol is enabled.  This is to prevent hwdefs
+// being merged enabling the thread when it is not needed.  It should
+// be removed in the future.
+#ifndef HAL_RCIN_THREAD_ENABLED
+#if defined(AP_RCPROTOCOL_ENABLED) && !AP_RCPROTOCOL_ENABLED
+#define HAL_RCIN_THREAD_ENABLED 0
+#else
+#define HAL_RCIN_THREAD_ENABLED 1
+#endif
 #endif
 
 // we support RC serial for BLHeli pass-thru
+#ifndef HAL_SUPPORT_RCOUT_SERIAL
 #define HAL_SUPPORT_RCOUT_SERIAL 1
+#endif
 
 // by default assume first I2C bus is internal
 #ifndef HAL_I2C_INTERNAL_MASK
@@ -114,4 +141,106 @@
 // put all storage of files under /APM directory
 #ifndef HAL_BOARD_STORAGE_DIRECTORY
 #define HAL_BOARD_STORAGE_DIRECTORY "/APM"
+#endif
+
+#if defined(STM32_WSPI_USE_QUADSPI1) && STM32_WSPI_USE_QUADSPI1
+#define HAL_USE_QUADSPI1 TRUE
+#else
+#define HAL_USE_QUADSPI1 FALSE
+#endif
+#if defined(STM32_WSPI_USE_QUADSPI2) && STM32_WSPI_USE_QUADSPI2
+#define HAL_USE_QUADSPI2 TRUE
+#else
+#define HAL_USE_QUADSPI2 FALSE
+#endif
+#if defined(STM32_WSPI_USE_OCTOSPI1) && STM32_WSPI_USE_OCTOSPI1
+#define HAL_USE_OCTOSPI1 TRUE
+#else
+#define HAL_USE_OCTOSPI1 FALSE
+#endif
+#if defined(STM32_WSPI_USE_OCTOSPI2) && STM32_WSPI_USE_OCTOSPI2
+#define HAL_USE_OCTOSPI2 TRUE
+#else
+#define HAL_USE_OCTOSPI2 FALSE
+#endif
+#define HAL_USE_QUADSPI (HAL_USE_QUADSPI1 || HAL_USE_QUADSPI2)
+#define HAL_USE_OCTOSPI (HAL_USE_OCTOSPI1 || HAL_USE_OCTOSPI2)
+
+#ifndef HAL_INS_RATE_LOOP
+#if defined(STM32H7) || defined(STM32F7) || (defined(STM32F4) \
+    && defined(INS_MAX_INSTANCES) && INS_MAX_INSTANCES == 1)
+/* F405 tested successfully with:
+   INS_GYRO_RATE = 1 (2kHz)
+   SCHED_LOOP_RATE = 200
+   FSTRATE_DIV = 2 (1kHz)
+   FSTRATE_ENABLE = 1
+   SERVO_DSHOT_RATE = 1 (1kHz)*/
+#define HAL_INS_RATE_LOOP 1
+#else
+#define HAL_INS_RATE_LOOP 0
+#endif
+#endif
+
+#ifndef AP_NOTIFY_TONEALARM_ENABLED
+#define AP_NOTIFY_TONEALARM_ENABLED ((defined(HAL_PWM_ALARM) || HAL_DSHOT_ALARM_ENABLED))
+#endif
+
+#ifndef AP_NOTIFY_BUZZER_ENABLED
+#define AP_NOTIFY_BUZZER_ENABLED 1
+#endif
+
+#ifndef AP_BOARDCONFIG_MCU_MEMPROTECT_ENABLED
+#define AP_BOARDCONFIG_MCU_MEMPROTECT_ENABLED 0
+#endif  // AP_BOARDCONFIG_MCU_MEMPROTECT_ENABLED
+
+/*
+  trap CPU reads and writes to the reserved first 1k of memory with a
+  no-access MPU region, record a backtrace and keep flying. Unlike
+  AP_BOARDCONFIG_MCU_MEMPROTECT_ENABLED this is recoverable. Excluded on
+  external flash boards, which run code from ITCM just above the reserved
+  region. Needs the storage thread to re-arm
+ */
+#ifndef AP_BOARDCONFIG_MCU_MEMPROTECT_TRACE_ENABLED
+#if defined(STM32H7) && !AP_BOARDCONFIG_MCU_MEMPROTECT_ENABLED && \
+    EXT_FLASH_SIZE_MB == 0 && \
+    !defined(HAL_USE_EMPTY_STORAGE) && \
+    !defined(HAL_BUILD_AP_PERIPH) && !defined(HAL_BOOTLOADER_BUILD) && \
+    !defined(IOMCU_FW)
+#define AP_BOARDCONFIG_MCU_MEMPROTECT_TRACE_ENABLED 1
+#else
+#define AP_BOARDCONFIG_MCU_MEMPROTECT_TRACE_ENABLED 0
+#endif
+#endif  // AP_BOARDCONFIG_MCU_MEMPROTECT_TRACE_ENABLED
+
+/*
+  the custom build server can ask for this on any board, so silently ignore it
+  where it cannot work: only H7 has the reserved region at address 0, on
+  external flash boards ITCM holds executable code just above it, and the
+  periph, bootloader and iofirmware builds have no storage thread to re-arm
+  the region (nor the logger and GCS the reporting relies on)
+ */
+#if AP_BOARDCONFIG_MCU_MEMPROTECT_TRACE_ENABLED && \
+    (!defined(STM32H7) || EXT_FLASH_SIZE_MB != 0 || defined(HAL_USE_EMPTY_STORAGE) || \
+     defined(HAL_BUILD_AP_PERIPH) || defined(HAL_BOOTLOADER_BUILD) || defined(IOMCU_FW))
+#undef AP_BOARDCONFIG_MCU_MEMPROTECT_TRACE_ENABLED
+#define AP_BOARDCONFIG_MCU_MEMPROTECT_TRACE_ENABLED 0
+#endif
+
+#if AP_BOARDCONFIG_MCU_MEMPROTECT_TRACE_ENABLED && AP_BOARDCONFIG_MCU_MEMPROTECT_ENABLED
+#error "MEMPROTECT_TRACE and MEMPROTECT both use MPU region 7"
+#endif
+
+#ifndef AP_CPU_IDLE_STATS_ENABLED
+#define AP_CPU_IDLE_STATS_ENABLED HAL_PROGRAM_SIZE_LIMIT_KB > 1024
+#endif
+
+#if defined(STM32H7) && HAL_MEM_CLASS >= HAL_MEM_CLASS_1000
+// 32k gives huge performance improvements on boards that can cope
+// the memory check excludes things like STM32H750 and STM32H730
+#ifndef AP_FATFS_MAX_IO_SIZE
+#define AP_FATFS_MAX_IO_SIZE 32768
+#endif
+#ifndef AP_FATFS_MIN_IO_SIZE
+#define AP_FATFS_MIN_IO_SIZE 4096
+#endif
 #endif

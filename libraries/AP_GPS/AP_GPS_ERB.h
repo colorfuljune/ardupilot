@@ -19,11 +19,10 @@
 
 #pragma once
 
-#include <AP_HAL/AP_HAL.h>
-
 #include "AP_GPS.h"
 #include "GPS_Backend.h"
 
+#if AP_GPS_ERB_ENABLED
 class AP_GPS_ERB : public AP_GPS_Backend
 {
 public:
@@ -33,9 +32,11 @@ public:
     // Methods
     bool read() override;
 
-    AP_GPS::GPS_Status highest_supported_status(void) override { return AP_GPS::GPS_OK_FIX_3D_RTK_FIXED; }
+    AP_GPS_FixType highest_supported_status(void) override { return AP_GPS_FixType::RTK_FIXED; }
 
+#if HAL_GCS_ENABLED
     bool supports_mavlink_gps_rtk_message() const override { return true; }
+#endif
 
     static bool _detect(struct ERB_detect_state &state, uint8_t data);
 
@@ -151,5 +152,6 @@ private:
     bool _parse_gps();
 
     // used to update fix between status and position packets
-    AP_GPS::GPS_Status next_fix = AP_GPS::NO_FIX;
+    AP_GPS_FixType next_fix = AP_GPS_FixType::NONE;
 };
+#endif

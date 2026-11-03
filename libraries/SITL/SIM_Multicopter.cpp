@@ -24,52 +24,60 @@
 using namespace SITL;
 
 MultiCopter::MultiCopter(const char *frame_str) :
-    Aircraft(frame_str),
-    frame(nullptr)
+    Aircraft(frame_str)
 {
-    mass = 1.5f;
-
-    frame = Frame::find_frame(frame_str);
+    frame = Frame::create_frame(frame_str);
     if (frame == nullptr) {
-        printf("Frame '%s' not found", frame_str);
+        printf("Frame '%s' not found or insufficient memory", frame_str);
         exit(1);
     }
-    // initial mass is passed through to Frame for it to calculate a
-    // hover thrust requirement.
-    if (strstr(frame_str, "-fast")) {
-        frame->init(gross_mass(), 0.5, 85, 4*radians(360));
-    } else {
-        frame->init(gross_mass(), 0.51, 15, 4*radians(360));
-    }
+
+    frame->init(frame_str);
+    battery.setup(frame->get_model_batt_capacity_ah(),
+                  frame->get_model_batt_resistance_ohm(),
+                  frame->get_model_batt_max_voltage(),
+                  ambient_outside_temperature_degC());
+
+    mass = frame->get_mass();
     frame_height = 0.1;
-    num_motors = frame->num_motors;
     ground_behavior = GROUND_BEHAVIOR_NO_MOVEMENT;
+    lock_step_scheduled = true;
 }
 
 // calculate rotational and linear accelerations
 void MultiCopter::calculate_forces(const struct sitl_input &input, Vector3f &rot_accel, Vector3f &body_accel)
 {
+    motor_mask |= ((1U<<frame->num_motors)-1U) << frame->motor_offset;
     frame->calculate_forces(*this, input, rot_accel, body_accel, rpm);
 
     add_shove_forces(rot_accel, body_accel);
     add_twist_forces(rot_accel);
+
+    // add forces from slung payload or tether payload
+    add_external_forces(body_accel);
 }
-    
+
 /*
   update the multicopter simulation by one time step
  */
 void MultiCopter::update(const struct sitl_input &input)
 {
+    // refresh mass in case SIM_FRM_ parameters have changed
+    mass = frame->get_mass();
+
     // get wind vector setup
     update_wind(input);
 
     Vector3f rot_accel;
 
     calculate_forces(input, rot_accel, accel_body);
+    // simulated clamp holding vehicle down
+    if (clamp.clamped(*this, input)) {
+        rot_accel.zero();
+        accel_body.zero();
+    }
 
-    // estimate voltage and current
-    frame->current_and_voltage(input, battery_voltage, battery_current);
-
+    update_battery();
     update_dynamics(rot_accel);
     update_external_payload(input);
 
@@ -81,3 +89,19 @@ void MultiCopter::update(const struct sitl_input &input)
     update_mag_field_bf();
 }
 
+void MultiCopter::update_battery() {
+    if (frame->battery_changed()) {
+        // battery model changed via SIM_FRM_ parameters
+        battery.setup(frame->get_model_batt_capacity_ah(),
+                      frame->get_model_batt_resistance_ohm(),
+                      frame->get_model_batt_max_voltage(),
+                      ambient_outside_temperature_degC());
+    }
+    battery.maybe_reset(sitl->batt_voltage, sitl->batt_capacity_ah, sitl->batt_resistance);
+    battery_voltage = battery.get_voltage();
+    battery_current = frame->get_current_amp();
+    battery_temperature_degC = battery.get_temperature_degC();
+
+    const uint64_t now_us = AP_HAL::micros64();
+    battery.consume_energy(battery_current, now_us);
+}

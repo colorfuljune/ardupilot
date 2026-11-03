@@ -26,9 +26,10 @@
 #include <AP_HAL/Util.h>
 #include <limits.h>
 #include <ctype.h>
-#include <GCS_MAVLink/GCS.h>
-#include <AP_RCMapper/AP_RCMapper.h>
+#include <AP_Vehicle/AP_Vehicle_Type.h>
 #include <AP_Arming/AP_Arming.h>
+#include <AP_Vehicle/AP_Vehicle_Type.h>
+#include <GCS_MAVLink/GCS.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -57,148 +58,40 @@ const AP_Param::GroupInfo AP_OSD_ParamScreen::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("CHAN_MAX", 3, AP_OSD_ParamScreen, channel_max, 2100),
 
-    // @Param: PARAM1_EN
-    // @DisplayName: PARAM1_EN
-    // @Description: Enables display of parameter 1
-    // @Values: 0:Disabled,1:Enabled
-
-    // @Param: PARAM1_X
-    // @DisplayName: PARAM1_X
-    // @Description: Horizontal position on screen
-    // @Range: 0 29
-
-    // @Param: PARAM1_Y
-    // @DisplayName: PARAM1_Y
-    // @Description: Vertical position on screen
-    // @Range: 0 15
+    // @Group: PARAM1
+    // @Path: AP_OSD_ParamSetting.cpp
     AP_SUBGROUPINFO(params[0], "PARAM1", 4, AP_OSD_ParamScreen, AP_OSD_ParamSetting),
-    
-    // @Param: PARAM2_EN
-    // @DisplayName: PARAM21_EN
-    // @Description: Enables display of parameter 2
-    // @Values: 0:Disabled,1:Enabled
 
-    // @Param: PARAM2_X
-    // @DisplayName: PARAM2_X
-    // @Description: Horizontal position on screen
-    // @Range: 0 29
-
-    // @Param: PARAM2_Y
-    // @DisplayName: PARAM2_Y
-    // @Description: Vertical position on screen
-    // @Range: 0 15
+    // @Group: PARAM2
+    // @Path: AP_OSD_ParamSetting.cpp
     AP_SUBGROUPINFO(params[1], "PARAM2", 5, AP_OSD_ParamScreen, AP_OSD_ParamSetting),
 
-    // @Param: PARAM3_EN
-    // @DisplayName: PARAM3_EN
-    // @Description: Enables display of parameter 3
-    // @Values: 0:Disabled,1:Enabled
-
-    // @Param: PARAM3_X
-    // @DisplayName: PARAM3_X
-    // @Description: Horizontal position on screen
-    // @Range: 0 29
-
-    // @Param: PARAM3_Y
-    // @DisplayName: PARAM3_Y
-    // @Description: Vertical position on screen
-    // @Range: 0 15
+    // @Group: PARAM3
+    // @Path: AP_OSD_ParamSetting.cpp
     AP_SUBGROUPINFO(params[2], "PARAM3", 6, AP_OSD_ParamScreen, AP_OSD_ParamSetting),
 
-    // @Param: PARAM4_EN
-    // @DisplayName: PARAM4_EN
-    // @Description: Enables display of parameter 4
-    // @Values: 0:Disabled,1:Enabled
-
-    // @Param: PARAM4_X
-    // @DisplayName: PARAM4_X
-    // @Description: Horizontal position on screen
-    // @Range: 0 29
-
-    // @Param: PARAM4_Y
-    // @DisplayName: PARAM4_Y
-    // @Description: Vertical position on screen
-    // @Range: 0 15
+    // @Group: PARAM4
+    // @Path: AP_OSD_ParamSetting.cpp
     AP_SUBGROUPINFO(params[3], "PARAM4", 7, AP_OSD_ParamScreen, AP_OSD_ParamSetting),
 
-    // @Param: PARAM5_EN
-    // @DisplayName: PARAM5_EN
-    // @Description: Enables display of parameter 5
-    // @Values: 0:Disabled,1:Enabled
-
-    // @Param: PARAM5_X
-    // @DisplayName: PARAM5_X
-    // @Description: Horizontal position on screen
-    // @Range: 0 29
-
-    // @Param: PARAM5_Y
-    // @DisplayName: PARAM5_Y
-    // @Description: Vertical position on screen
-    // @Range: 0 15
+    // @Group: PARAM5
+    // @Path: AP_OSD_ParamSetting.cpp
     AP_SUBGROUPINFO(params[4], "PARAM5", 8, AP_OSD_ParamScreen, AP_OSD_ParamSetting),
 
-    // @Param: PARAM6_EN
-    // @DisplayName: PARAM6_EN
-    // @Description: Enables display of parameter 6
-    // @Values: 0:Disabled,1:Enabled
-
-    // @Param: PARAM6_X
-    // @DisplayName: PARAM6_X
-    // @Description: Horizontal position on screen
-    // @Range: 0 29
-
-    // @Param: PARAM6_Y
-    // @DisplayName: PARAM6_Y
-    // @Description: Vertical position on screen
-    // @Range: 0 15
+    // @Group: PARAM6
+    // @Path: AP_OSD_ParamSetting.cpp
     AP_SUBGROUPINFO(params[5], "PARAM6", 9, AP_OSD_ParamScreen, AP_OSD_ParamSetting),
 
-    // @Param: PARAM7_EN
-    // @DisplayName: PARAM7_EN
-    // @Description: Enables display of parameter 7
-    // @Values: 0:Disabled,1:Enabled
-
-    // @Param: PARAM7_X
-    // @DisplayName: PARAM7_X
-    // @Description: Horizontal position on screen
-    // @Range: 0 29
-
-    // @Param: PARAM7_Y
-    // @DisplayName: PARAM7_Y
-    // @Description: Vertical position on screen
-    // @Range: 0 15
+    // @Group: PARAM7
+    // @Path: AP_OSD_ParamSetting.cpp
     AP_SUBGROUPINFO(params[6], "PARAM7", 10, AP_OSD_ParamScreen, AP_OSD_ParamSetting),
 
-    // @Param: PARAM8_EN
-    // @DisplayName: PARAM8_EN
-    // @Description: Enables display of parameter 8
-    // @Values: 0:Disabled,1:Enabled
-
-    // @Param: PARAM8_X
-    // @DisplayName: PARAM8_X
-    // @Description: Horizontal position on screen
-    // @Range: 0 29
-
-    // @Param: PARAM8_Y
-    // @DisplayName: PARAM8_Y
-    // @Description: Vertical position on screen
-    // @Range: 0 15
+    // @Group: PARAM8
+    // @Path: AP_OSD_ParamSetting.cpp
     AP_SUBGROUPINFO(params[7], "PARAM8", 11, AP_OSD_ParamScreen, AP_OSD_ParamSetting),
 
-    // @Param: PARAM9_EN
-    // @DisplayName: PARAM9_EN
-    // @Description: Enables display of parameter 8
-    // @Values: 0:Disabled,1:Enabled
-
-    // @Param: PARAM9_X
-    // @DisplayName: PARAM9_X
-    // @Description: Horizontal position on screen
-    // @Range: 0 29
-
-    // @Param: PARAM9_Y
-    // @DisplayName: PARAM9_Y
-    // @Description: Vertical position on screen
-    // @Range: 0 15
+    // @Group: PARAM9
+    // @Path: AP_OSD_ParamSetting.cpp
     AP_SUBGROUPINFO(params[8], "PARAM9", 12, AP_OSD_ParamScreen, AP_OSD_ParamSetting),
 
     // @Param: SAVE_X
@@ -232,10 +125,81 @@ static const char* event_names[5] = {
 #define debug(fmt, args ...)
 #endif
 
-AP_OSD_ParamScreen::AP_OSD_ParamScreen() {
+static const AP_OSD_ParamSetting::Initializer PARAM_DEFAULTS[AP_OSD_NUM_PARAM_SCREENS][AP_OSD_ParamScreen::NUM_PARAMS] {
+#if APM_BUILD_COPTER_OR_HELI
+    {
+        { 1, { 102, 0, 4033 }, AP_OSD_ParamSetting::Type::NONE },            // ATC_RAT_RLL_P
+        { 2, { 102, 0, 129  }, AP_OSD_ParamSetting::Type::NONE },            // ATC_RAT_RLL_D
+        { 3, { 102, 0, 705  }, AP_OSD_ParamSetting::Type::NONE },            // ATC_RAT_RLL_FLTD
+        { 4, { 102, 0, 4034 }, AP_OSD_ParamSetting::Type::NONE },            // ATC_RAT_PIT_P
+        { 5, { 102, 0, 130  }, AP_OSD_ParamSetting::Type::NONE },            // ATC_RAT_PIT_D
+        { 6, { 102, 0, 706  }, AP_OSD_ParamSetting::Type::NONE },            // ATC_RAT_PIT_FLTD
+        { 7, { 102, 0, 4035 }, AP_OSD_ParamSetting::Type::NONE },            // ATC_RAT_YAW_P
+        { 8, { 102, 0, 131  }, AP_OSD_ParamSetting::Type::NONE },            // ATC_RAT_YAW_D
+        { 9, { 102, 0, 643  }, AP_OSD_ParamSetting::Type::NONE }             // ATC_RAT_YAW_FLTE
+    },
+    {
+        { 1, { 3, 0, 231 }, AP_OSD_ParamSetting::Type::NONE },               // INS_LOG_BAT_OPT
+        { 2, { 3, 0, 167 }, AP_OSD_ParamSetting::Type::NONE },               // INS_LOG_BAT_MASK
+        { 3, { 60, 0, 0  }, AP_OSD_ParamSetting::Type::NONE },               // LOG_BITMASK
+        { 4, { 3, 0, 18  }, AP_OSD_ParamSetting::Type::NONE },               // INS_GYRO_FILT
+        { 5, { 102, 0, 6 }, AP_OSD_ParamSetting::Type::NONE },               // ATC_THR_MIX_MAN
+        { 6, { 102, 0, 5 }, AP_OSD_ParamSetting::Type::NONE },               // ATC_THR_MIX_MAX
+        { 7, { 6, 0, 25041 }, AP_OSD_ParamSetting::Type::AUX_FUNCTION },     // RC7_OPTION
+        { 8, { 6, 0, 25105 }, AP_OSD_ParamSetting::Type::AUX_FUNCTION },     // RC8_OPTION
+        { 9, { 36, 0, 1047 }, AP_OSD_ParamSetting::Type::FAILSAFE_ACTION_2 } // BATT_FS_LOW_ACT
+    }
+#elif APM_BUILD_TYPE(APM_BUILD_ArduPlane)
+    {
+        { 1, { 232, 0, 265 }, AP_OSD_ParamSetting::Type::NONE },             // RLL_RATE_FF
+        { 2, { 232, 0, 4041 }, AP_OSD_ParamSetting::Type::NONE },            // RLL_RATE_P
+        { 3, { 232, 0, 73 }, AP_OSD_ParamSetting::Type::NONE },              // RLL_RATE_I
+        { 4, { 233, 0, 267 }, AP_OSD_ParamSetting::Type::NONE },             // PTCH_RATE_FF
+        { 5, { 233, 0, 4043 }, AP_OSD_ParamSetting::Type::NONE },            // PTCH_RATE_P
+        { 6, { 233, 0, 75 }, AP_OSD_ParamSetting::Type::NONE },              // PTCH_RATE_I
+        { 7, { 233, 0, 6 }, AP_OSD_ParamSetting::Type::NONE },               // PTCH2SRV_RLL
+        { 8, { 199, 0, 1 }, AP_OSD_ParamSetting::Type::NONE },               // TUNE_PARAM
+        { 9, { 199, 0, 320 }, AP_OSD_ParamSetting::Type::NONE }              // TUNE_RANGE
+    },
+    {
+        { 1, { 185, 0, 0 }, AP_OSD_ParamSetting::Type::NONE },               // TRIM_THROTTLE
+        { 2, { 155, 0, 0 }, AP_OSD_ParamSetting::Type::NONE },               // AIRSPEED_CRUISE
+        { 3, { 4, 0, 1094 }, AP_OSD_ParamSetting::Type::NONE },              // SERVO_AUTO_TRIM
+        { 4, { 120, 0, 0 }, AP_OSD_ParamSetting::Type::NONE},                // AIRSPEED_MIN
+        { 5, { 121, 0, 0 }, AP_OSD_ParamSetting::Type::NONE },               // AIRSPEED_MAX
+        { 6, { 156, 0, 0 }, AP_OSD_ParamSetting::Type::NONE },               // RTL_ALTITUDE
+        { 7, { 140, 2, 8 }, AP_OSD_ParamSetting::Type::NONE },               // AHRS_TRIM_Y
+        { 8, { 182, 0, 0 }, AP_OSD_ParamSetting::Type::NONE },               // THR_MAX
+        { 9, { 189, 0, 0 }, AP_OSD_ParamSetting::Type::NONE }                // THR_SLEWRATE
+    }
+#else
+    {
+        { 1 }, { 2 }, { 3 }, { 4 }, { 5 }, { 6 }, { 7 }, { 8 }, { 9 },
+    },
+    {
+        { 1 }, { 2 }, { 3 }, { 4 }, { 5 }, { 6 }, { 7 }, { 8 }, { 9 }
+    }
+#endif
+};
+
+AP_OSD_ParamScreen::AP_OSD_ParamScreen(uint8_t index)
+{
+    for (uint8_t i = 0; i < NUM_PARAMS; i++) {
+        params[i].set_defaults(PARAM_DEFAULTS[index][i]);
+    }
     AP_Param::setup_object_defaults(this, var_info);
 }
 
+AP_OSD_ParamSetting* AP_OSD_ParamScreen::get_setting(uint8_t param_idx)
+{
+    if (param_idx >= NUM_PARAMS) {
+        return nullptr;
+    }
+    params[param_idx].update(); // make sure we are fresh
+    return &params[param_idx];
+}
+
+#if OSD_ENABLED
 void AP_OSD_ParamScreen::draw_parameter(uint8_t number, uint8_t x, uint8_t y)
 {
     bool param_blink = false;
@@ -267,8 +231,7 @@ void AP_OSD_ParamScreen::draw_parameter(uint8_t number, uint8_t x, uint8_t y)
     if (p != nullptr) {
         // grab the name of the parameter
         char name[17];
-        p->copy_name_token(setting._current_token, name, 16);
-        name[16] = 0;
+        setting.copy_name(name, 17);
 
         const AP_OSD_ParamSetting::ParamMetadata* metadata = setting.get_custom_metadata();
 
@@ -295,11 +258,11 @@ void AP_OSD_ParamScreen::draw_parameter(uint8_t number, uint8_t x, uint8_t y)
             break;
         }
         case AP_PARAM_INT32: {
-           int32_t val = ((AP_Int16*)p)->get();
+           int32_t val = ((AP_Int32*)p)->get();
             if (metadata != nullptr && val >= 0 && val < metadata->values_max) {
                 backend->write(value_pos, y, value_blink, "%s", metadata->values[val]);
             } else {
-                backend->write(value_pos, y, value_blink, "%d", val);
+                backend->write(value_pos, y, value_blink, "%d", (signed)val);
             }
             break;
         }
@@ -333,19 +296,18 @@ void AP_OSD_ParamScreen::modify_parameter(uint8_t number, Event ev)
     const AP_OSD_ParamSetting& setting = params[number-1];
     AP_Param* p = setting._param;
 
-    if (p->is_read_only()) {
+    if (p == nullptr || p->is_read_only()) {
         return;
     }
 
     _requires_save |= 1 << (number-1);
 
-    float incr = setting._param_incr * ((ev == Event::MENU_DOWN) ? -1.0f : 1.0f);
-    int32_t incr_int = int32_t(roundf(incr));
-    int32_t max_int = int32_t(roundf(setting._param_max));
-    int32_t min_int = int32_t(roundf(setting._param_min));
+    const float incr = setting._param_incr * ((ev == Event::MENU_DOWN) ? -1.0f : 1.0f);
+    const int32_t incr_int = int32_t(roundf(incr));
+    const int32_t max_int = int32_t(roundf(setting._param_max));
+    const int32_t min_int = int32_t(roundf(setting._param_min));
 
-    if (p != nullptr) {
-        switch (setting._param_type) {
+    switch (setting._param_type) {
         // there is no way to validate the ranges, so as a rough guess prevent
         // integer types going below -1;
         case AP_PARAM_INT8: {
@@ -372,11 +334,11 @@ void AP_OSD_ParamScreen::modify_parameter(uint8_t number, Event ev)
         case AP_PARAM_NONE:
         case AP_PARAM_GROUP:
             break;
-        }
     }
+
 }
 
-// modify which parameter is configued for the given selection
+// modify which parameter is configured for the given selection
 void AP_OSD_ParamScreen::modify_configured_parameter(uint8_t number, Event ev)
 {
     if (number > NUM_PARAMS) {
@@ -392,8 +354,12 @@ void AP_OSD_ParamScreen::modify_configured_parameter(uint8_t number, Event ev)
         param = AP_Param::next_scalar(&setting._current_token, &setting._param_type);
     } else {
         // going backwards is somewhat convoluted as the param code is geared for going forward
-        ap_var_type type = AP_PARAM_NONE, prev_type = AP_PARAM_NONE, prev_prev_type = AP_PARAM_NONE;
-        AP_Param::ParamToken token, prev_token, prev_prev_token;
+        ap_var_type type = AP_PARAM_NONE;
+        ap_var_type prev_type = AP_PARAM_NONE;
+        ap_var_type prev_prev_type = AP_PARAM_NONE;
+        AP_Param::ParamToken token {};
+        AP_Param::ParamToken prev_token {};
+        AP_Param::ParamToken prev_prev_token {};
 
         for (param = AP_Param::first(&token, &type);
             param && (setting._current_token.key != token.key
@@ -414,11 +380,11 @@ void AP_OSD_ParamScreen::modify_configured_parameter(uint8_t number, Event ev)
 
     if (param != nullptr) {
         // update the stored index
-        setting._param_group = setting._current_token.group_element;
-        setting._param_key = AP_Param::get_persistent_key(setting._current_token.key);
-        setting._param_idx = setting._current_token.idx;
+        setting._param_group.set(setting._current_token.group_element);
+        setting._param_key.set(AP_Param::get_persistent_key(setting._current_token.key));
+        setting._param_idx.set(setting._current_token.idx);
         setting._param = param;
-        setting._type = OSD_PARAM_NONE;
+        setting._type.set(AP_OSD_ParamSetting::Type::NONE);
         // force update() to refresh the token
         setting._current_token.key = 0;
         setting._current_token.idx = 0;
@@ -426,59 +392,13 @@ void AP_OSD_ParamScreen::modify_configured_parameter(uint8_t number, Event ev)
     }
 }
 
-// save all of the parameters
-void AP_OSD_ParamScreen::save_parameters()
-{
-    if (!_requires_save) {
-        return;
-    }
-
-    for (uint8_t i = 0; i < NUM_PARAMS; i++) {
-        if (params[i].enabled && (_requires_save & (1 << i))) {
-            AP_Param* p = params[i]._param;
-            if (p != nullptr) {
-                p->save();
-            }
-            params[i].save_as_new();
-        }
-    }
-    _requires_save = 0;
-}
-
-// return radio values as LOW, MIDDLE, HIGH
-// this function uses different threshold values to RC_Chanel::get_channel_pos()
-// to avoid glitching on the stick travel
-RC_Channel::AuxSwitchPos AP_OSD_ParamScreen::get_channel_pos(uint8_t rcmapchan) const
-{
-    const RC_Channel* chan = rc().channel(rcmapchan-1);
-    if (chan == nullptr) {
-        return RC_Channel::AuxSwitchPos::LOW;
-    }
-
-    const uint16_t in = chan->get_radio_in();
-    if (in <= 900 || in >= 2200) {
-        return RC_Channel::AuxSwitchPos::LOW;
-    }
-
-    // switch is reversed if 'reversed' option set on channel and switches reverse is allowed by RC_OPTIONS
-    bool switch_reversed = chan->get_reverse() && rc().switch_reverse_allowed();
-
-    if (in < 1300) {
-        return switch_reversed ? RC_Channel::AuxSwitchPos::HIGH : RC_Channel::AuxSwitchPos::LOW;
-    } else if (in > 1700) {
-        return switch_reversed ? RC_Channel::AuxSwitchPos::LOW : RC_Channel::AuxSwitchPos::HIGH;
-    } else {
-        return RC_Channel::AuxSwitchPos::MIDDLE;
-    }
-}
-
 // map rc input to an event
 AP_OSD_ParamScreen::Event AP_OSD_ParamScreen::map_rc_input_to_event() const
 {
-    const RC_Channel::AuxSwitchPos throttle = get_channel_pos(AP::rcmap()->throttle());
-    const RC_Channel::AuxSwitchPos yaw = get_channel_pos(AP::rcmap()->yaw());
-    const RC_Channel::AuxSwitchPos roll = get_channel_pos(AP::rcmap()->roll());
-    const RC_Channel::AuxSwitchPos pitch = get_channel_pos(AP::rcmap()->pitch());
+    const RC_Channel::AuxSwitchPos throttle = rc().get_throttle_channel().get_stick_gesture_pos();
+    const RC_Channel::AuxSwitchPos yaw = rc().get_yaw_channel().get_stick_gesture_pos();
+    const RC_Channel::AuxSwitchPos roll = rc().get_roll_channel().get_stick_gesture_pos();
+    const RC_Channel::AuxSwitchPos pitch = rc().get_pitch_channel().get_stick_gesture_pos();
 
     Event result = Event::NONE;
 
@@ -542,7 +462,7 @@ void AP_OSD_ParamScreen::update_state_machine()
             if (_selected_param == SAVE_PARAM) {
                 if (_transition_count >= OSD_HOLD_BUTTON_PRESS_COUNT) {
                     save_parameters();
-                    hal.scheduler->reboot(false);
+                    hal.scheduler->reboot();
                 } else {
                     save_parameters();
                 }
@@ -626,6 +546,7 @@ void AP_OSD_ParamScreen::update_state_machine()
     }
 }
 
+#if HAL_WITH_OSD_BITMAP || HAL_WITH_MSP_DISPLAYPORT
 void AP_OSD_ParamScreen::draw(void)
 {
     if (!enabled || !backend) {
@@ -648,9 +569,32 @@ void AP_OSD_ParamScreen::draw(void)
     // the save button
     draw_parameter(SAVE_PARAM, save_x, save_y);
 }
+#endif
+
+#endif // OSD_ENABLED
+
+// save all of the parameters
+void AP_OSD_ParamScreen::save_parameters()
+{
+    if (!_requires_save) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < NUM_PARAMS; i++) {
+        if (params[i].enabled && (_requires_save & (1 << i))) {
+            AP_Param* p = params[i]._param;
+            if (p != nullptr) {
+                p->save();
+            }
+            params[i].save_as_new();
+        }
+    }
+    _requires_save = 0;
+}
 
 // handle OSD configuration messages
-void AP_OSD_ParamScreen::handle_write_msg(const mavlink_osd_param_config_t& packet, const GCS_MAVLINK& link)
+#if HAL_GCS_ENABLED
+void AP_OSD_ParamScreen::handle_write_msg(const mavlink_osd_param_config_t& packet, const class GCS_MAVLINK& link)
 {
     // request out of range - return an error
     if (packet.osd_index < 1 || packet.osd_index > AP_OSD_ParamScreen::NUM_PARAMS) {
@@ -663,12 +607,12 @@ void AP_OSD_ParamScreen::handle_write_msg(const mavlink_osd_param_config_t& pack
 }
 
 // handle OSD show configuration messages
-void AP_OSD_ParamScreen::handle_read_msg(const mavlink_osd_param_show_config_t& packet, const GCS_MAVLINK& link)
+void AP_OSD_ParamScreen::handle_read_msg(const mavlink_osd_param_show_config_t& packet, const class GCS_MAVLINK& link)
 {
     // request out of range - return an error
     if (packet.osd_index < 1 || packet.osd_index > AP_OSD_ParamScreen::NUM_PARAMS) {
         mavlink_msg_osd_param_show_config_reply_send(link.get_chan(), packet.request_id, OSD_PARAM_INVALID_PARAMETER_INDEX,
-            nullptr, OSD_PARAM_NONE, 0, 0, 0);
+            nullptr, uint8_t(AP_OSD_ParamSetting::Type::NONE), 0, 0, 0);
         return;
     }
     // get the parameter and make sure it is fresh
@@ -678,7 +622,7 @@ void AP_OSD_ParamScreen::handle_read_msg(const mavlink_osd_param_show_config_t& 
     // check for bad things
     if (param._param == nullptr) {
         mavlink_msg_osd_param_show_config_reply_send(link.get_chan(), packet.request_id, OSD_PARAM_INVALID_PARAMETER_INDEX,
-            nullptr, OSD_PARAM_NONE, 0, 0, 0);
+            nullptr, uint8_t(AP_OSD_ParamSetting::Type::NONE), 0, 0, 0);
         return;
     }
     // get the name and send back the details
@@ -688,19 +632,6 @@ void AP_OSD_ParamScreen::handle_read_msg(const mavlink_osd_param_show_config_t& 
     mavlink_msg_osd_param_show_config_reply_send(link.get_chan(), packet.request_id, OSD_PARAM_SUCCESS,
         buf, param._type, param._param_min, param._param_max, param._param_incr);
 }
+#endif
 
 #endif // OSD_PARAM_ENABLED
-
-// pre_arm_check - returns true if all pre-takeoff checks have completed successfully
-bool AP_OSD::pre_arm_check(char *failure_msg, const uint8_t failure_msg_len) const
-{
-    // currently in the OSD menu, do not allow arming
-    if (!is_readonly_screen()) {
-        hal.util->snprintf(failure_msg, failure_msg_len, "In OSD menu");
-        return false;
-    }
-
-    // if we got this far everything must be ok
-    return true;
-}
-

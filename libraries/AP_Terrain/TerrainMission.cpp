@@ -16,16 +16,16 @@
   handle checking mission points for terrain data
  */
 
+#include "AP_Terrain.h"
+
+#if AP_TERRAIN_AVAILABLE
+
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Common/AP_Common.h>
 #include <AP_Math/AP_Math.h>
+#include <AP_Mission/AP_Mission.h>
 #include <AP_Rally/AP_Rally.h>
-#include <GCS_MAVLink/GCS_MAVLink.h>
-#include <GCS_MAVLink/GCS.h>
-#include "AP_Terrain.h"
 #include <AP_GPS/AP_GPS.h>
-
-#if AP_TERRAIN_AVAILABLE
 
 extern const AP_HAL::HAL& hal;
 
@@ -34,6 +34,9 @@ extern const AP_HAL::HAL& hal;
  */
 void AP_Terrain::update_mission_data(void)
 {
+#if AP_MISSION_ENABLED
+    const AP_Mission &mission = AP::mission();
+
     if (last_mission_change_ms != mission.last_change_time_ms() ||
         last_mission_spacing != grid_spacing) {
         // the mission has changed - start again
@@ -49,7 +52,7 @@ void AP_Terrain::update_mission_data(void)
 
     uint16_t pending, loaded;
     get_statistics(pending, loaded);
-    if (pending && AP::gps().status() >= AP_GPS::GPS_OK_FIX_3D) {
+    if (pending && AP::gps().status() >= AP_GPS_FixType::FIX_3D) {
         // wait till we have fully filled the current set of grids
         return;
     }
@@ -88,7 +91,7 @@ void AP_Terrain::update_mission_data(void)
 
         // we have a mission command to check
         float height;
-        if (!height_amsl(cmd.content.location, height, false)) {
+        if (!height_amsl(cmd.content.location, height)) {
             // if we can't get data for a mission item then return and
             // check again next time
             return;
@@ -105,8 +108,10 @@ void AP_Terrain::update_mission_data(void)
             next_mission_pos = 0;
         }
     }
+#endif  // AP_MISSION_ENABLED
 }
 
+#if HAL_RALLY_ENABLED
 /*
   check that we have fetched all rally terrain data
  */
@@ -131,7 +136,7 @@ void AP_Terrain::update_rally_data(void)
 
     uint16_t pending, loaded;
     get_statistics(pending, loaded);
-    if (pending && AP::gps().status() >= AP_GPS::GPS_OK_FIX_3D) {
+    if (pending && AP::gps().status() >= AP_GPS_FixType::FIX_3D) {
         // wait till we have fully filled the current set of grids
         return;
     }
@@ -149,7 +154,7 @@ void AP_Terrain::update_rally_data(void)
         loc.lat = rp.lat;
         loc.lng = rp.lng;
         float height;
-        if (!height_amsl(loc, height, false)) {
+        if (!height_amsl(loc, height)) {
             // if we can't get data for a rally item then return and
             // check again next time
             return;
@@ -163,5 +168,6 @@ void AP_Terrain::update_rally_data(void)
         next_rally_index++;
     }
 }
+#endif
 
 #endif // AP_TERRAIN_AVAILABLE

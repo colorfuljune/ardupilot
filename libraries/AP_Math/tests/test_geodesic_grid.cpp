@@ -20,6 +20,8 @@
 #include "math_test.h"
 #include <AP_Math/AP_GeodesicGrid.h>
 
+const AP_HAL::HAL& hal = AP_HAL::get_HAL();
+
 class TestParam {
 public:
     /**
@@ -100,7 +102,7 @@ static bool section_triangle(unsigned int section_index,
                              Vector3f &b,
                              Vector3f &c) {
     if (section_index >= 80) {
-        return false;
+        return false;  // LCOV_EXCL_LINE
     }
 
     unsigned int i = section_index / 4;
@@ -153,7 +155,7 @@ TEST_P(GeodesicGridTest, Sections)
             }
         }
         if (p.inclusive_sections[i] < 0) {
-            ADD_FAILURE() << "section " << s << " with inclusive=true not found in inclusive_sections";
+            ADD_FAILURE() << "section " << s << " with inclusive=true not found in inclusive_sections";  // LCOV_EXCL_LINE
         }
     }
 }
@@ -220,13 +222,13 @@ INSTANTIATE_TEST_CASE_P(GeneralVectors,
  */
 static TestParam hardcoded_vectors[] = {
     /* a + 2 * m_a + .5 * m_c for T_4 */
-    {{.25f * M_GOLDEN, -.25f * (13.0f * M_GOLDEN + 1.0f), - 1.25f}, 17},
+    {{0.25f * M_GOLDEN, -0.25f * (13.0f * M_GOLDEN + 1.0f), - 1.25f}, 17},
     /* 3 * m_a + 2 * m_b 0 * m_c for T_4 */
     {{M_GOLDEN, -4.0f * M_GOLDEN -1.0f, 1.0f}, -1, {16, 18, -1}},
     /* 2 * m_c + (1 / 3) * m_b + .1 * c for T_13 */
-    {{-.2667f, .1667f * M_GOLDEN, 2.2667f * M_GOLDEN + .1667f}, 55},
+    {{-0.2667f, 0.1667f * M_GOLDEN, 2.2667f * M_GOLDEN + 0.1667f}, 55},
     /* .25 * m_a + 5 * b + 2 * m_b for T_8 */
-    {{-.875f, 6.125f * M_GOLDEN, -1.125f * M_GOLDEN - 6.125f}, 34},
+    {{-0.875f, 6.125f * M_GOLDEN, -1.125f * M_GOLDEN - 6.125f}, 34},
 };
 INSTANTIATE_TEST_CASE_P(HardcodedVectors,
                         GeodesicGridTest,

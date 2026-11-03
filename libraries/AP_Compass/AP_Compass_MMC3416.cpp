@@ -17,6 +17,8 @@
  */
 #include "AP_Compass_MMC3416.h"
 
+#if AP_COMPASS_MMC3416_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include <utility>
 #include <AP_Math/AP_Math.h>
@@ -41,14 +43,14 @@ extern const AP_HAL::HAL &hal;
 // datasheet says 50ms min for refill
 #define MIN_DELAY_SET_RESET 50
 
-AP_Compass_Backend *AP_Compass_MMC3416::probe(AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev,
+AP_Compass_Backend *AP_Compass_MMC3416::probe(AP_HAL::OwnPtr<AP_HAL::Device> dev,
                                               bool force_external,
                                               enum Rotation rotation)
 {
     if (!dev) {
         return nullptr;
     }
-    AP_Compass_MMC3416 *sensor = new AP_Compass_MMC3416(std::move(dev), force_external, rotation);
+    AP_Compass_MMC3416 *sensor = NEW_NOTHROW AP_Compass_MMC3416(std::move(dev), force_external, rotation);
     if (!sensor || !sensor->init()) {
         delete sensor;
         return nullptr;
@@ -71,7 +73,11 @@ bool AP_Compass_MMC3416::init()
     dev->get_semaphore()->take_blocking();
 
     dev->set_retries(10);
-    
+
+    // reset sensor. This seems to solve some unreliablity on boot reading WHOAMI
+    dev->write_register(REG_CONTROL1, 0x80);
+    hal.scheduler->delay(10);
+
     uint8_t whoami;
     if (!dev->read_registers(REG_PRODUCT_ID, &whoami, 1) ||
         whoami != 0x06) {
@@ -91,18 +97,16 @@ bool AP_Compass_MMC3416::init()
 
     /* register the compass instance in the frontend */
     dev->set_device_type(DEVTYPE_MMC3416);
-    if (!register_compass(dev->get_bus_id(), compass_instance)) {
+    if (!register_compass(dev->get_bus_id())) {
         return false;
     }
-    
-    set_dev_id(compass_instance, dev->get_bus_id());
 
-    printf("Found a MMC3416 on 0x%x as compass %u\n", dev->get_bus_id(), compass_instance);
-    
-    set_rotation(compass_instance, rotation);
+    printf("Found a MMC3416 on 0x%x as compass %u\n", unsigned(dev->get_bus_id()), instance);
+
+    set_rotation(rotation);
 
     if (force_external) {
-        set_external(compass_instance, true);
+        set_external(true);
     }
     
     dev->set_retries(1);
@@ -247,7 +251,11 @@ void AP_Compass_MMC3416::timer()
 #endif
 
         last_sample_ms = AP_HAL::millis();
-        accumulate_sample(field, compass_instance);
+
+        // sensor is not FRD
+        field.y = -field.y;
+
+        accumulate_sample(field);
 
         if (!dev->write_register(REG_CONTROL0, REG_CONTROL0_TM)) {
             state = STATE_REFILL1;
@@ -273,8 +281,11 @@ void AP_Compass_MMC3416::timer()
         field *= -counts_to_milliGauss;
         field += offset;
 
+        // sensor is not FRD
+        field.y = -field.y;
+
         last_sample_ms = AP_HAL::millis();
-        accumulate_sample(field, compass_instance);
+        accumulate_sample(field);
 
         // we stay in STATE_MEASURE_WAIT3 for measure_count_limit cycles
         if (measure_count++ >= measure_count_limit) {
@@ -290,7 +301,4 @@ void AP_Compass_MMC3416::timer()
     }
 }
 
-void AP_Compass_MMC3416::read()
-{
-    drain_accumulated_samples(compass_instance);
-}
+#endif  // AP_COMPASS_MMC3416_ENABLED

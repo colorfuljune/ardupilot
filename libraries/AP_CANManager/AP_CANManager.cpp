@@ -20,26 +20,27 @@
 #include <AP_Common/AP_Common.h>
 #include "AP_CANManager.h"
 
-#if HAL_MAX_CAN_PROTOCOL_DRIVERS
+#if HAL_CANMANAGER_ENABLED
 
-#include <AP_Vehicle/AP_Vehicle.h>
-#include <AP_UAVCAN/AP_UAVCAN.h>
+#include <AP_BoardConfig/AP_BoardConfig.h>
+#include <AP_Vehicle/AP_Vehicle_Type.h>
+#include <AP_DroneCAN/AP_DroneCAN.h>
 #include <AP_KDECAN/AP_KDECAN.h>
-#include <AP_ToshibaCAN/AP_ToshibaCAN.h>
 #include <AP_SerialManager/AP_SerialManager.h>
 #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
-#include "AP_CANTester.h"
-#include <GCS_MAVLink/GCS_MAVLink.h>
+#include <AP_EFI/AP_EFI_NWPMU.h>
+#include <GCS_MAVLink/GCS.h>
 #if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
 #include <AP_HAL_Linux/CANSocketIface.h>
 #elif CONFIG_HAL_BOARD == HAL_BOARD_SITL
 #include <AP_HAL_SITL/CANSocketIface.h>
 #elif CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS
+#include <hal.h>
 #include <AP_HAL_ChibiOS/CANIface.h>
 #endif
 
-#define LOG_TAG "CANMGR"
-#define LOG_BUFFER_SIZE 1024
+#include <AP_Common/sorting.h>
+#include <AP_Logger/AP_Logger.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -66,25 +67,27 @@ const AP_Param::GroupInfo AP_CANManager::var_info[] = {
 
 #if HAL_MAX_CAN_PROTOCOL_DRIVERS > 0
     // @Group: D1_
-    // @Path: ../AP_CANManager/AP_CANDriver.cpp
+    // @Path: ../AP_CANManager/AP_CANManager_CANDriver_Params.cpp
     AP_SUBGROUPINFO(_drv_param[0], "D1_", 4, AP_CANManager, AP_CANManager::CANDriver_Params),
 #endif
 
 #if HAL_MAX_CAN_PROTOCOL_DRIVERS > 1
     // @Group: D2_
-    // @Path: ../AP_CANManager/AP_CANDriver.cpp
+    // @Path: ../AP_CANManager/AP_CANManager_CANDriver_Params.cpp
     AP_SUBGROUPINFO(_drv_param[1], "D2_", 5, AP_CANManager, AP_CANManager::CANDriver_Params),
 #endif
 
 #if HAL_MAX_CAN_PROTOCOL_DRIVERS > 2
     // @Group: D3_
-    // @Path: ../AP_CANManager/AP_CANDriver.cpp
+    // @Path: ../AP_CANManager/AP_CANManager_CANDriver_Params.cpp
     AP_SUBGROUPINFO(_drv_param[2], "D3_", 6, AP_CANManager, AP_CANManager::CANDriver_Params),
 #endif
 
+#if AP_CAN_SLCAN_ENABLED
     // @Group: SLCAN_
     // @Path: ../AP_CANManager/AP_SLCANIface.cpp
     AP_SUBGROUPINFO(_slcan_interface, "SLCAN_", 7, AP_CANManager, SLCAN::CANIface),
+#endif
 
     // @Param: LOGLEVEL
     // @DisplayName: Loglevel
@@ -108,28 +111,26 @@ AP_CANManager::AP_CANManager()
     _singleton = this;
 }
 
+#if !AP_TEST_DRONECAN_DRIVERS
 void AP_CANManager::init()
 {
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-    if (AP::sitl() != nullptr) {
-        if (AP::sitl()->speedup > 1) {
-            log_text(AP_CANManager::LOG_ERROR, LOG_TAG, "CAN is not supported under speedup.");
+    WITH_SEMAPHORE(_sem);
 
-            return;
-        }
-    } else {
+    // we need to mutate the HAL to install new CAN interfaces
+    AP_HAL::HAL& hal_mutable = AP_HAL::get_HAL_mutable();
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    if (AP::sitl() == nullptr) {
         AP_HAL::panic("CANManager: SITL not initialised!");
     }
 #endif
-    // We only allocate log buffer only when under debug
-    if (_loglevel != AP_CANManager::LOG_NONE) {
-        _log_buf = new char[LOG_BUFFER_SIZE];
-        _log_pos = 0;
-    }
 
+#if AP_CAN_SLCAN_ENABLED
     //Reset all SLCAN related params that needs resetting at boot
     _slcan_interface.reset_params();
+#endif
 
+    AP_CAN::Protocol drv_type[HAL_MAX_CAN_PROTOCOL_DRIVERS] = {};
     // loop through interfaces and allocate and initialise Iface,
     // Also allocate Driver objects, and add interfaces to them
     for (uint8_t i = 0; i < HAL_NUM_CAN_IFACES; i++) {
@@ -140,177 +141,260 @@ void AP_CANManager::init()
         }
         drv_num--;
 
-        if (hal.can[i] == nullptr) {
+        if (hal_mutable.can[i] == nullptr) {
             // So if this interface is not allocated allocate it here,
             // also pass the index of the CANBus
-            const_cast <AP_HAL::HAL&> (hal).can[i] = new HAL_CANIface(i);
+            hal_mutable.can[i] = NEW_NOTHROW HAL_CANIface(i);
         }
 
         // Initialise the interface we just allocated
-        if (hal.can[i] != nullptr) {
-            if (!hal.can[i]->init(_interfaces[i]._bitrate, AP_HAL::CANIface::NormalMode)) {
-                log_text(AP_CANManager::LOG_ERROR, LOG_TAG, "Failed to initialise CAN Interface %d", i+1);
-                continue;
-            }
-        } else {
+        if (hal_mutable.can[i] == nullptr) {
             continue;
         }
-        AP_HAL::CANIface* iface = hal.can[i];
-        // Check if this interface need hooking up to slcan passthrough
-        // instead of a driver
-        if (_slcan_interface.init_passthrough(i)) {
-            // we have slcan bridge setup pass that on as can iface
-            iface = &_slcan_interface;
-        }
+        AP_HAL::CANIface* iface = hal_mutable.can[i];
 
         // Find the driver type that we need to allocate and register this interface with
-        Driver_Type drv_type = _driver_type_cache[drv_num] = (Driver_Type) _drv_param[drv_num]._driver_type.get();
+        drv_type[drv_num] = (AP_CAN::Protocol) _drv_param[drv_num]._driver_type.get();
+        bool can_initialised = false;
+        // Check if this interface need hooking up to slcan passthrough
+        // instead of a driver
+#if AP_CAN_SLCAN_ENABLED
+        if (_slcan_interface.init_passthrough(i)) {
+            // we have slcan bridge setup pass that on as can iface
+            can_initialised = hal_mutable.can[i]->init(_interfaces[i]._bitrate, _interfaces[i]._fdbitrate*1000000);
+            iface = &_slcan_interface;
+        } else {
+#else
+        if (true) {
+#endif
+            can_initialised = hal_mutable.can[i]->init(_interfaces[i]._bitrate, _interfaces[i]._fdbitrate*1000000);
+        }
 
-        log_text(AP_CANManager::LOG_INFO, LOG_TAG, "CAN Interface %d initialized well", i + 1);
+        if (!can_initialised) {
+            continue;
+        }
+
 
         if (_drivers[drv_num] != nullptr) {
             //We already initialised the driver just add interface and move on
-            log_text(AP_CANManager::LOG_INFO, LOG_TAG, "Adding Interface %d to Driver %d", i + 1, drv_num + 1);
             _drivers[drv_num]->add_interface(iface);
             continue;
         }
 
-        _num_drivers++;
-        if (_num_drivers > HAL_MAX_CAN_PROTOCOL_DRIVERS) {
+        if (_num_drivers >= HAL_MAX_CAN_PROTOCOL_DRIVERS) {
             // We are exceeding number of drivers,
             // this can't be happening time to panic
             AP_BoardConfig::config_error("Max number of CAN Drivers exceeded\n\r");
         }
 
         // Allocate the set type of Driver
-        if (drv_type == Driver_Type_UAVCAN) {
-            _drivers[drv_num] = _drv_param[drv_num]._uavcan = new AP_UAVCAN;
+        switch (drv_type[drv_num]) {
+#if HAL_ENABLE_DRONECAN_DRIVERS
+        case AP_CAN::Protocol::DroneCAN:
+            _drivers[drv_num] = _drv_param[drv_num]._uavcan = NEW_NOTHROW AP_DroneCAN(drv_num);
 
             if (_drivers[drv_num] == nullptr) {
-                AP_BoardConfig::config_error("Failed to allocate uavcan %d\n\r", i + 1);
+                AP_BoardConfig::allocation_error("uavcan %d", i + 1);
                 continue;
             }
 
-            AP_Param::load_object_from_eeprom((AP_UAVCAN*)_drivers[drv_num], AP_UAVCAN::var_info);
-        } else if (drv_type == Driver_Type_KDECAN) {
-#if (APM_BUILD_TYPE(APM_BUILD_ArduCopter) || APM_BUILD_TYPE(APM_BUILD_ArduPlane) || APM_BUILD_TYPE(APM_BUILD_ArduSub))
-            // To be replaced with macro saying if KDECAN library is included
-            _drivers[drv_num] = _drv_param[drv_num]._kdecan = new AP_KDECAN;
-
-            if (_drivers[drv_num] == nullptr) {
-                AP_BoardConfig::config_error("Failed to allocate KDECAN %d\n\r", drv_num + 1);
-                continue;
-            }
-
-            AP_Param::load_object_from_eeprom((AP_KDECAN*)_drivers[drv_num], AP_KDECAN::var_info);
+            AP_Param::load_object_from_eeprom((AP_DroneCAN*)_drivers[drv_num], AP_DroneCAN::var_info);
+            break;
 #endif
-        } else if (drv_type == Driver_Type_ToshibaCAN) {
-            _drivers[drv_num] = new AP_ToshibaCAN;
+#if AP_PICCOLOCAN_ENABLED
+        case AP_CAN::Protocol::PiccoloCAN:
+            _drivers[drv_num] = _drv_param[drv_num]._piccolocan = NEW_NOTHROW AP_PiccoloCAN;
 
             if (_drivers[drv_num] == nullptr) {
-                AP_BoardConfig::config_error("Failed to allocate ToshibaCAN %d\n\r", drv_num + 1);
-                continue;
-            }
-        } else if (drv_type == Driver_Type_PiccoloCAN) {
-#if HAL_PICCOLO_CAN_ENABLE
-            _drivers[drv_num] = _drv_param[drv_num]._piccolocan = new AP_PiccoloCAN;
-
-            if (_drivers[drv_num] == nullptr) {
-                AP_BoardConfig::config_error("Failed to allocate PiccoloCAN %d\n\r", drv_num + 1);
+                AP_BoardConfig::allocation_error("PiccoloCAN %d", drv_num + 1);
                 continue;
             }
 
             AP_Param::load_object_from_eeprom((AP_PiccoloCAN*)_drivers[drv_num], AP_PiccoloCAN::var_info);
+            break;
 #endif
-        } else if (drv_type == Driver_Type_CANTester) {
-#if HAL_NUM_CAN_IFACES > 1 && !HAL_MINIMIZE_FEATURES
-            _drivers[drv_num] = _drv_param[drv_num]._testcan = new CANTester;
-
-            if (_drivers[drv_num] == nullptr) {
-                AP_BoardConfig::config_error("Failed to allocate CANTester %d\n\r", drv_num + 1);
-                continue;
-            }
-            AP_Param::load_object_from_eeprom((CANTester*)_drivers[drv_num], CANTester::var_info);
-#endif
-        } else {
+        default:
             continue;
         }
 
+        _num_drivers++;
+
         // Hook this interface to the selected Driver Type
         _drivers[drv_num]->add_interface(iface);
-        log_text(AP_CANManager::LOG_INFO, LOG_TAG, "Adding Interface %d to Driver %d", i + 1, drv_num + 1);
-
     }
 
     for (uint8_t drv_num = 0; drv_num < HAL_MAX_CAN_PROTOCOL_DRIVERS; drv_num++) {
         //initialise all the Drivers
+
+        // Cache the driver type, initialized or not, so we can detect that it is in the params at boot via get_driver_type().
+        // This allows drivers that are initialized by CANSensor instead of CANManager to know if they should init or not
+        _driver_type_cache[drv_num] = drv_type[drv_num];
+
         if (_drivers[drv_num] == nullptr) {
             continue;
         }
-        if ((_slcan_interface.get_iface_num() >= HAL_NUM_CAN_IFACES ||
-            _slcan_interface.get_iface_num() < 0) ||
-            (_interfaces[_slcan_interface.get_iface_num()]._driver_number != drv_num + 1)) {
-            _drivers[drv_num]->init(drv_num, true);
-        } else {
-            _drivers[drv_num]->init(drv_num, false);
+
+        _drivers[drv_num]->init(drv_num);
+    }
+
+#if AP_CAN_LOGGING_ENABLED
+    hal.scheduler->register_io_process(FUNCTOR_BIND_MEMBER(&AP_CANManager::check_logging_enable, void));
+#endif
+}
+#else
+void AP_CANManager::init()
+{
+    WITH_SEMAPHORE(_sem);
+    for (uint8_t i = 0; i < HAL_NUM_CAN_IFACES; i++) {
+        if ((AP_CAN::Protocol) _drv_param[i]._driver_type.get() == AP_CAN::Protocol::DroneCAN) {
+            _drivers[i] = _drv_param[i]._uavcan = NEW_NOTHROW AP_DroneCAN(i);
+
+            if (_drivers[i] == nullptr) {
+                AP_BoardConfig::allocation_error("uavcan %d", i + 1);
+                continue;
+            }
+
+            AP_Param::load_object_from_eeprom((AP_DroneCAN*)_drivers[i], AP_DroneCAN::var_info);
+            _drivers[i]->init(i);
+            _driver_type_cache[i] = (AP_CAN::Protocol) _drv_param[i]._driver_type.get();
+        }
+    }
+}
+#endif
+
+/*
+  register a new CAN driver
+ */
+bool AP_CANManager::register_driver(AP_CAN::Protocol dtype, AP_CANDriver *driver)
+{
+    WITH_SEMAPHORE(_sem);
+
+    // we need to mutate the HAL to install new CAN interfaces
+    AP_HAL::HAL& hal_mutable = AP_HAL::get_HAL_mutable();
+
+    for (uint8_t i = 0; i < HAL_NUM_CAN_IFACES; i++) {
+        uint8_t drv_num = _interfaces[i]._driver_number;
+        if (drv_num == 0 || drv_num > HAL_MAX_CAN_PROTOCOL_DRIVERS) {
+            continue;
+        }
+        // from 1 based to 0 based
+        drv_num--;
+
+        if (dtype != (AP_CAN::Protocol)_drv_param[drv_num]._driver_type.get()) {
+            continue;
+        }
+        if (_drivers[drv_num] != nullptr) {
+            continue;
+        }
+        if (_num_drivers >= HAL_MAX_CAN_PROTOCOL_DRIVERS) {
+            continue;
+        }
+
+        if (hal_mutable.can[i] == nullptr) {
+            // if this interface is not allocated allocate it here,
+            // also pass the index of the CANBus
+            hal_mutable.can[i] = NEW_NOTHROW HAL_CANIface(i);
+        }
+
+        // Initialise the interface we just allocated
+        if (hal_mutable.can[i] == nullptr) {
+            continue;
+        }
+        AP_HAL::CANIface* iface = hal_mutable.can[i];
+
+        _drivers[drv_num] = driver;
+        _drivers[drv_num]->add_interface(iface);
+
+        _drivers[drv_num]->init(drv_num);
+        _driver_type_cache[drv_num] = dtype;
+
+        _num_drivers++;
+
+        return true;
+    }
+    return false;
+}
+
+// register a new auxillary sensor driver for 11 bit address frames
+bool AP_CANManager::register_11bit_driver(AP_CAN::Protocol dtype, CANSensor *sensor, uint8_t &driver_index)
+{
+    WITH_SEMAPHORE(_sem);
+
+    for (uint8_t i = 0; i < HAL_NUM_CAN_IFACES; i++) {
+        uint8_t drv_num = _interfaces[i]._driver_number;
+        if (drv_num == 0 || drv_num > HAL_MAX_CAN_PROTOCOL_DRIVERS) {
+            continue;
+        }
+        // from 1 based to 0 based
+        drv_num--;
+
+        if (dtype != (AP_CAN::Protocol)_drv_param[drv_num]._driver_type_11bit.get()) {
+            continue;
+        }
+        if (_drivers[drv_num] != nullptr &&
+            _drivers[drv_num]->add_11bit_driver(sensor)) {
+            driver_index = drv_num;
+            return true;
+        }
+    }
+    return false;
+
+}
+
+#if AP_CAN_LOGGING_ENABLED
+/*
+  handler for CAN frames for frame logging
+ */
+void AP_CANManager::can_logging_callback(uint8_t bus, const AP_HAL::CANFrame &frame, AP_HAL::CANIface::CanIOFlags flags)
+{
+#if HAL_CANFD_SUPPORTED
+    if (frame.canfd) {
+        struct log_CAFD pkt {
+            LOG_PACKET_HEADER_INIT(LOG_CAFD_MSG),
+            time_us : AP_HAL::micros64(),
+            bus     : bus,
+            id      : frame.id,
+            dlc     : frame.dlc
+        };
+        memcpy(pkt.data, frame.data, frame.dlcToDataLength(frame.dlc));
+        AP::logger().WriteBlock(&pkt, sizeof(pkt));
+        return;
+    }
+#endif
+    struct log_CANF pkt {
+        LOG_PACKET_HEADER_INIT(LOG_CANF_MSG),
+        time_us : AP_HAL::micros64(),
+        bus     : bus,
+        id      : frame.id,
+        dlc     : frame.dlc
+    };
+    memcpy(pkt.data, frame.data, frame.dlc);
+    AP::logger().WriteBlock(&pkt, sizeof(pkt));
+}
+
+/*
+  see if we need to enable/disable the CAN logging callback
+ */
+void AP_CANManager::check_logging_enable(void)
+{
+    for (uint8_t i = 0; i < HAL_NUM_CAN_IFACES; i++) {
+        const bool enabled = _interfaces[i].option_is_set(CANIface_Params::Options::LOG_ALL_FRAMES);
+        uint8_t &logging_id = _interfaces[i].logging_id;
+        auto *can = hal.can[i];
+        if (can == nullptr) {
+            continue;
+        }
+        if (enabled && logging_id == 0) {
+            can->register_frame_callback(
+                FUNCTOR_BIND_MEMBER(&AP_CANManager::can_logging_callback, void, uint8_t, const AP_HAL::CANFrame &, AP_HAL::CANIface::CanIOFlags),
+                logging_id);
+        } else if (!enabled && logging_id != 0) {
+            can->unregister_frame_callback(logging_id);
         }
     }
 }
 
-// Method used by CAN related library methods to report status and debug info
-// The result of this method can be accessed via ftp get @SYS/can_log.txt
-void AP_CANManager::log_text(AP_CANManager::LogLevel loglevel, const char *tag, const char *fmt, ...)
-{
-    if (_log_buf == nullptr) {
-        return;
-    }
-    if (loglevel > _loglevel) {
-        return;
-    }
-
-    if ((LOG_BUFFER_SIZE - _log_pos) < (10 + strlen(tag) + strlen(fmt))) {
-        // reset log pos
-        _log_pos = 0;
-    }
-    //Tag Log Message
-    switch (loglevel) {
-    case AP_CANManager::LOG_DEBUG :
-        _log_pos += hal.util->snprintf(&_log_buf[_log_pos], LOG_BUFFER_SIZE - _log_pos, "\n%s DEBUG :", tag);
-        break;
-
-    case AP_CANManager::LOG_INFO :
-        _log_pos += hal.util->snprintf(&_log_buf[_log_pos], LOG_BUFFER_SIZE - _log_pos, "\n%s INFO :", tag);
-        break;
-
-    case AP_CANManager::LOG_WARNING :
-        _log_pos += hal.util->snprintf(&_log_buf[_log_pos], LOG_BUFFER_SIZE - _log_pos, "\n%s WARN :", tag);
-        break;
-
-    case AP_CANManager::LOG_ERROR :
-        _log_pos += hal.util->snprintf(&_log_buf[_log_pos], LOG_BUFFER_SIZE - _log_pos, "\n%s ERROR :", tag);
-        break;
-
-    default :
-        return;
-    }
-
-    va_list arg_list;
-    va_start(arg_list, fmt);
-    _log_pos += hal.util->vsnprintf(&_log_buf[_log_pos], LOG_BUFFER_SIZE - _log_pos, fmt, arg_list);
-    va_end(arg_list);
-}
-
-// log retrieve method used by file sys method to report can log
-uint32_t AP_CANManager::log_retrieve(char* data, uint32_t max_size) const
-{
-    if (_log_buf == nullptr) {
-        gcs().send_text(MAV_SEVERITY_ERROR, "Log buffer not available");
-        return 0;
-    }
-    uint32_t read_len = MIN(max_size, _log_pos);
-    memcpy(data, _log_buf, read_len);
-    return read_len;
-}
+#endif // AP_CAN_LOGGING_ENABLED
 
 AP_CANManager& AP::can()
 {

@@ -14,28 +14,56 @@
  */
 /*
   gimbal simulator class
+
+./Tools/autotest/sim_vehicle.py -v Copter --gdb --debug --console --map --mavproxy-args=--load-module=gimbal --mavlink-gimbal
+param load Tools/autotest/default_params/copter-solo-gimbal.parm
+
+graph degrees(Quaternion(GIMBAL_DEVICE_ATTITUDE_STATUS.q).euler[0]) degrees(Quaternion(GIMBAL_DEVICE_ATTITUDE_STATUS.q).euler[1]) degrees(Quaternion(GIMBAL_DEVICE_ATTITUDE_STATUS.q).euler[2])
+
+reboot
+
+rc 6 1400
 */
 
 #pragma once
 
-#include <AP_HAL/utility/Socket.h>
+#include "SIM_config.h"
 
-#include "SIM_Aircraft.h"
+#if AP_SIM_GIMBAL_ENABLED
+
+#include <AP_Math/AP_Math.h>
+#include <GCS_MAVLink/GCS.h>
 
 namespace SITL {
 
 class Gimbal {
 public:
-    Gimbal(const struct sitl_fdm &_fdm);
-    void update(void);
+
+    void update(const class Aircraft &aircraft);
+    void set_demanded_rates(const Vector3f &rates) {
+        demanded_angular_rate = rates;
+    }
+
+    void get_deltas(Vector3f &_delta_angle, Vector3f &_delta_velocity, uint32_t &_delta_time_us);
+    void get_joint_angles(Vector3f &_angles) const { _angles = joint_angles; }
+
+    // copy the gimbal body-to-earth rotation matrix
+    void get_dcm(Matrix3f &out) const { out = dcm; }
+
+    // override the physical joint angle limits (roll, pitch, azimuth) in radians
+    void set_joint_limits(const Vector3f &lower_limits, const Vector3f &upper_limits) {
+        lower_joint_limits = lower_limits;
+        upper_joint_limits = upper_limits;
+    }
+
+    // force the gimbal body-to-earth rotation matrix to a specific value
+    void set_dcm(const Matrix3f &m) { dcm = m; init_done = true; }
 
 private:
-    const struct sitl_fdm &fdm;
-    const char *target_address;
-    const uint16_t target_port;
 
     // rotation matrix (gimbal body -> earth)
     Matrix3f dcm;
+    bool init_done;
 
     // time of last update
     uint32_t last_update_us;
@@ -55,19 +83,24 @@ private:
     Vector3f joint_angles;
 
     // physical constraints on joint angles in (roll, pitch, azimuth) order
-    Vector3f lower_joint_limits;
-    Vector3f upper_joint_limits;
+    Vector3f lower_joint_limits{
+        float(radians(-40)),
+        float(radians(-135)),
+        float(radians(-7.5))
+    };
+    Vector3f upper_joint_limits{
+        float(radians(40)),
+        float(radians(45)),
+        float(radians(7.5))
+    };
 
-    const float travelLimitGain;
+    const float travelLimitGain = 20;
 
     // true gyro bias
     Vector3f true_gyro_bias;
 
-    // reporting variables. gimbal pushes these to vehicle code over
-    // MAVLink at approx 100Hz
-
-    // reporting period in ms
-    const float reporting_period_ms;
+    // time since delta angles/velocities returned
+    uint32_t delta_start_us;
 
     // integral of gyro vector over last time interval. In radians
     Vector3f delta_angle;
@@ -84,30 +117,9 @@ private:
     // gyro bias provided by EKF on vehicle. In rad/s.
     // Should be subtracted from the gyro readings to get true body
     // rotatation rates
-    Vector3f supplied_gyro_bias;
-
-    uint32_t last_report_us;
-    uint32_t last_heartbeat_ms;
-    bool seen_heartbeat;
-    bool seen_gimbal_control;
-    uint8_t vehicle_system_id;
-    uint8_t vehicle_component_id;
-
-    SocketAPM mav_socket;
-    struct {
-        // socket to telem2 on aircraft
-        bool connected;
-        mavlink_message_t rxmsg;
-        mavlink_status_t status;
-        uint8_t seq;
-    } mavlink;
-
-    uint32_t param_send_last_ms;
-    uint8_t param_send_idx;
-
-    void send_report(void);
-    void param_send(const struct gimbal_param *p);
-    struct gimbal_param *param_find(const char *name);
+    // Vector3f supplied_gyro_bias;
 };
 
 }  // namespace SITL
+
+#endif  // AP_SIM_GIMBAL_ENABLED

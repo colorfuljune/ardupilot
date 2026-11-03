@@ -2,6 +2,8 @@
 
 #include "AP_Baro_Backend.h"
 
+#if AP_BARO_ICM20789_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include <AP_HAL/Semaphores.h>
 #include <AP_HAL/Device.h>
@@ -17,10 +19,10 @@ class AP_Baro_ICM20789 : public AP_Baro_Backend
 public:
     void update() override;
 
-    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev, AP_HAL::OwnPtr<AP_HAL::Device> dev_imu);
-    
+    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::Device &dev, AP_HAL::Device &dev_imu);
+
 private:
-    AP_Baro_ICM20789(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev, AP_HAL::OwnPtr<AP_HAL::Device> dev_imu);
+    AP_Baro_ICM20789(AP_Baro &baro, AP_HAL::Device &dev, AP_HAL::Device &dev_imu);
 
     bool init();
     bool send_cmd16(uint16_t cmd);
@@ -43,8 +45,8 @@ private:
 
     uint8_t instance;
 
-    AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev;
-    AP_HAL::OwnPtr<AP_HAL::Device> dev_imu;
+    AP_HAL::Device *dev;
+    AP_HAL::Device *dev_imu;
 
     // time last read command was sent
     uint32_t last_measure_us;
@@ -64,3 +66,5 @@ private:
     const float quadr_factor = 1 / 16777216.0;
     const float offst_factor = 2048.0;
 };
+
+#endif  // AP_BARO_ICM20789_ENABLED

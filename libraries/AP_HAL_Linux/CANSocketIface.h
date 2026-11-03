@@ -52,20 +52,19 @@ enum class SocketCanError
 
 #define CAN_MAX_POLL_ITERATIONS_COUNT 100
 #define CAN_MAX_INIT_TRIES_COUNT 100
-#define CAN_FILTER_NUMBER 8
 
 class CANIface: public AP_HAL::CANIface {
 public:
     CANIface(int index)
       : _self_index(index)
-      , _frames_in_socket_tx_queue(0)
       , _max_frames_in_socket_tx_queue(2)
+      , _frames_in_socket_tx_queue(0)
     { }
 
     ~CANIface() { }
 
     // Initialise CAN Peripheral
-    bool init(const uint32_t bitrate, const OperatingMode mode) override;
+    bool init(const uint32_t bitrate) override;
 
     // Put frame into Tx FIFO returns negative on error, 0 on buffer full, 
     // 1 on successfully pushing a frame into FIFO
@@ -77,10 +76,6 @@ public:
     int16_t receive(AP_HAL::CANFrame& out_frame, uint64_t& out_timestamp_us,
                     CanIOFlags& out_flags) override;
 
-    // Set Filters to ignore frames not to be handled by us
-    bool configureFilters(const CanFilterConfig* filter_configs,
-                          uint16_t num_configs) override;
-
     // Always return false, there's no busoff condition in Linux CAN
     bool is_busoff() const override
     {
@@ -90,9 +85,6 @@ public:
     void flush_tx() override;
 
     void clear_rx() override;
-
-    // Get number of Filter configurations
-    uint16_t getNumFilters() const override;
 
     // Get total number of Errors discovered
     uint32_t getErrorCount() const override;
@@ -109,21 +101,11 @@ public:
                 uint64_t blocking_deadline) override;
     
     // setup event handle for waiting on events
-    bool set_event_handle(AP_HAL::EventHandle* handle) override;
+    bool set_event_handle(AP_HAL::BinarySemaphore *handle) override;
 
     // fetch stats text and return the size of the same,
     // results available via @SYS/can0_stats.txt or @SYS/can1_stats.txt 
-    uint32_t get_stats(char* data, uint32_t max_size) override;
-
-    class CANSocketEventSource : public AP_HAL::EventSource {
-        friend class CANIface;
-        CANIface *_ifaces[HAL_NUM_CAN_IFACES];
-        
-    public:
-        // we just poll fd, no signaling is done
-        void signal(uint32_t evt_mask) override { return; }
-        bool wait(uint64_t duration, AP_HAL::EventHandle* evt_handle) override;
-    };
+    void get_stats(ExpandingString &str) override;
 
 private:
     void _pollWrite();
@@ -140,11 +122,9 @@ private:
 
     bool _wasInPendingLoopbackSet(const AP_HAL::CANFrame& frame);
 
-    bool _checkHWFilters(const can_frame& frame) const;
+    bool _hasReadyTx();
 
-    bool _hasReadyTx() const;
-
-    bool _hasReadyRx() const;
+    bool _hasReadyRx();
 
     void _poll(bool read, bool write);
 
@@ -164,25 +144,16 @@ private:
     const unsigned _max_frames_in_socket_tx_queue;
     unsigned _frames_in_socket_tx_queue;
     uint32_t _tx_frame_counter;
-    AP_HAL::EventHandle *_evt_handle;
-    static CANSocketEventSource evt_can_socket[HAL_NUM_CAN_IFACES];
+    AP_HAL::BinarySemaphore *sem_handle;
 
     pollfd _pollfd;
     std::map<SocketCanError, uint64_t> _errors;
     std::priority_queue<CanTxItem> _tx_queue;
     std::queue<CanRxItem> _rx_queue;
     std::unordered_multiset<uint32_t> _pending_loopback_ids;
-    std::vector<can_filter> _hw_filters_container;
 
-    struct {
-        uint32_t tx_requests;
-        uint32_t tx_full;
+    struct bus_stats : public AP_HAL::CANIface::bus_stats_t {
         uint32_t tx_confirmed;
-        uint32_t tx_write_fail;
-        uint32_t tx_success;
-        uint32_t tx_timedout;
-        uint32_t rx_received;
-        uint32_t rx_errors;
         uint32_t num_downs;
         uint32_t num_rx_poll_req;
         uint32_t num_tx_poll_req;
@@ -190,6 +161,17 @@ private:
         uint32_t num_poll_tx_events;
         uint32_t num_poll_rx_events;
     } stats;
+
+protected:
+    bool add_to_rx_queue(const CanRxItem &rx_item) override {
+        _rx_queue.push(rx_item);
+        return true;
+    }
+
+    int8_t get_iface_num(void) const override {
+        return _self_index;
+    }
+    HAL_Semaphore sem;
 };
 
 }

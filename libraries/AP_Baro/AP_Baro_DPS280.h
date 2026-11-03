@@ -1,10 +1,11 @@
 #pragma once
 
+#include "AP_Baro_Backend.h"
+
+#if AP_BARO_DPS280_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include <AP_HAL/Device.h>
-#include <AP_HAL/utility/OwnPtr.h>
-
-#include "AP_Baro_Backend.h"
 
 #ifndef HAL_BARO_DPS280_I2C_ADDR
  #define HAL_BARO_DPS280_I2C_ADDR  0x76
@@ -15,25 +16,26 @@
 
 class AP_Baro_DPS280 : public AP_Baro_Backend {
 public:
-    AP_Baro_DPS280(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::Device> dev);
+    AP_Baro_DPS280(AP_Baro &baro, AP_HAL::Device &dev);
 
     /* AP_Baro public interface: */
     void update() override;
 
-    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::Device> dev);
+    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::Device &dev);
 
-private:
-    bool init(void);
+protected:
+    bool init();
     bool read_calibration(void);
     void timer(void);
     void calculate_PT(int32_t UT, int32_t UP, float &pressure, float &temperature);
 
     void fix_config_bits16(int16_t &v, uint8_t bits) const;
     void fix_config_bits32(int32_t &v, uint8_t bits) const;
-    void set_config_registers(void);
+    virtual void set_config_registers(void);
     void check_health();
+    virtual DevTypes device_type(void) const { return DEVTYPE_BARO_DPS280; }
 
-    AP_HAL::OwnPtr<AP_HAL::Device> dev;
+    AP_HAL::Device *dev;
 
     uint8_t instance;
 
@@ -57,3 +59,15 @@ private:
         uint8_t temp_source;
     } calibration;
 };
+
+class AP_Baro_DPS310 : public AP_Baro_DPS280 {
+    // like DPS280 but workaround for temperature bug
+public:
+    using AP_Baro_DPS280::AP_Baro_DPS280;
+    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::Device &dev);
+    DevTypes device_type(void) const override { return DEVTYPE_BARO_DPS310; }
+    void set_config_registers() override;
+};
+
+
+#endif  // AP_BARO_DPS280_ENABLED

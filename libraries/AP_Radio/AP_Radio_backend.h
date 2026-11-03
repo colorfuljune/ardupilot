@@ -14,12 +14,18 @@
  */
 #pragma once
 
+#include "AP_Radio_config.h"
+
+#if AP_RADIO_ENABLED
+
 /*
  * backend class for direct attached radios
  */
 
 #include <AP_HAL/AP_HAL.h>
 #include "AP_Radio.h"
+
+#include <AP_Math/AP_Math.h>
 
 class AP_Radio_backend
 {
@@ -84,22 +90,22 @@ protected:
 
     uint8_t get_rssi_chan(void) const
     {
-        return (uint8_t)radio.rssi_chan.get();
+        return radio.rssi_chan;
     }
 
     uint8_t get_pps_chan(void) const
     {
-        return (uint8_t)radio.pps_chan.get();
+        return radio.pps_chan;
     }
 
     uint8_t get_tx_rssi_chan(void) const
     {
-        return (uint8_t)radio.tx_rssi_chan.get();
+        return radio.tx_rssi_chan;
     }
 
     uint8_t get_tx_pps_chan(void) const
     {
-        return (uint8_t)radio.tx_pps_chan.get();
+        return radio.tx_pps_chan;
     }
 
     bool get_telem_enable(void) const
@@ -154,3 +160,5 @@ protected:
 
     AP_Radio &radio;
 };
+
+#endif  // AP_RADIO_ENABLED

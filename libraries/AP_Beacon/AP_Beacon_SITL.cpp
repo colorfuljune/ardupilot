@@ -13,11 +13,12 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "AP_Beacon_SITL.h"
+
+#if AP_BEACON_SITL_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-
-#include "AP_Beacon_SITL.h"
 #include <stdio.h>
 
 extern const AP_HAL::HAL& hal;
@@ -65,16 +66,20 @@ void AP_Beacon_SITL::update(void)
     next_beacon = (next_beacon+1) % NUM_BEACONS;
 
     // truth location of the flight vehicle
-    Location current_loc;
-    current_loc.lat = sitl->state.latitude * 1.0e7f;
-    current_loc.lng = sitl->state.longitude * 1.0e7f;
-    current_loc.alt = sitl->state.altitude * 1.0e2;
+    const Location current_loc {
+        int32_t(sitl->state.latitude * 1.0e7f),
+        int32_t(sitl->state.longitude * 1.0e7f),
+        int32_t(sitl->state.altitude * 1.0e2f),
+        Location::AltFrame::ABSOLUTE
+    };
 
     // where the beacon system origin is located
-    Location beacon_origin;
-    beacon_origin.lat = get_beacon_origin_lat() * 1.0e7f;
-    beacon_origin.lng = get_beacon_origin_lon() * 1.0e7f;
-    beacon_origin.alt = get_beacon_origin_alt() * 1.0e2;
+    const Location beacon_origin {
+        int32_t(get_beacon_origin_lat() * 1.0e7f),
+        int32_t(get_beacon_origin_lon() * 1.0e7f),
+        int32_t(get_beacon_origin_alt() * 1.0e2f),
+        Location::AltFrame::ABSOLUTE
+    };
 
     // position of each beacon
     Location beacon_loc = beacon_origin;
@@ -110,4 +115,4 @@ void AP_Beacon_SITL::update(void)
     last_update_ms = now;
 }
 
-#endif // CONFIG_HAL_BOARD
+#endif // AP_BEACON_SITL_ENABLED

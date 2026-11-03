@@ -15,6 +15,11 @@
 /*
   handle device operations over MAVLink
  */
+
+#include "GCS_config.h"
+
+#if AP_MAVLINK_MSG_DEVICE_OP_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include <AP_HAL/Device.h>
 #include <AP_HAL/I2CDevice.h>
@@ -30,22 +35,26 @@ void GCS_MAVLINK::handle_device_op_read(const mavlink_message_t &msg)
 {
     mavlink_device_op_read_t packet;
     mavlink_msg_device_op_read_decode(&msg, &packet);
-    AP_HAL::OwnPtr<AP_HAL::Device> dev = nullptr;
+    AP_HAL::Device *dev = nullptr;
     uint8_t retcode = 0;
     uint8_t data[sizeof(mavlink_device_op_read_reply_t::data)] {};
     bool ret = false;
     uint8_t regstart = packet.regstart;
 
     if (packet.bustype == DEVICE_OP_BUSTYPE_I2C) {
-        dev = hal.i2c_mgr->get_device(packet.bus, packet.address);
+        dev = hal.i2c_mgr->get_device_ptr(packet.bus, packet.address);
     } else if (packet.bustype == DEVICE_OP_BUSTYPE_SPI) {
-        dev = hal.spi->get_device(packet.busname);
+        dev = hal.spi->get_device_ptr(packet.busname);
     } else {
         retcode = 1;
         goto fail;
     }
     if (!dev) {
         retcode = 2;
+        goto fail;
+    }
+    if (packet.count > sizeof(data)) {
+        retcode = 5;
         goto fail;
     }
     if (!dev->get_semaphore()->take(10)) {
@@ -73,6 +82,7 @@ void GCS_MAVLINK::handle_device_op_read(const mavlink_message_t &msg)
         packet.count,
         data,
         packet.bank);
+    delete dev;
     return;
 
 fail:
@@ -84,6 +94,7 @@ fail:
         0,
         nullptr,
         packet.bank);
+    delete dev;
 }
 
 /*
@@ -93,19 +104,26 @@ void GCS_MAVLINK::handle_device_op_write(const mavlink_message_t &msg)
 {
     mavlink_device_op_write_t packet;
     mavlink_msg_device_op_write_decode(&msg, &packet);
-    AP_HAL::OwnPtr<AP_HAL::Device> dev = nullptr;
+    AP_HAL::Device *dev = nullptr;
     uint8_t retcode = 0;
     
     if (packet.bustype == DEVICE_OP_BUSTYPE_I2C) {
-        dev = hal.i2c_mgr->get_device(packet.bus, packet.address);
+        dev = hal.i2c_mgr->get_device_ptr(packet.bus, packet.address);
     } else if (packet.bustype == DEVICE_OP_BUSTYPE_SPI) {
-        dev = hal.spi->get_device(packet.busname);
+        dev = hal.spi->get_device_ptr(packet.busname);
     } else {
         retcode = 1;
         goto fail;
     }
     if (!dev) {
         retcode = 2;
+        goto fail;
+    }
+    if (packet.count > sizeof(packet.data)) {
+        // bound count against the payload buffer to prevent OOB read
+        // from packet.data[i] in the register write loop and OOB read
+        // in the raw transfer_bank() path below.
+        retcode = 5;
         goto fail;
     }
     if (!dev->get_semaphore()->take(10)) {
@@ -132,4 +150,8 @@ fail:
         chan,
         packet.request_id,
         retcode);
+
+    delete dev;
 }
+
+#endif  // AP_MAVLINK_MSG_DEVICE_OP_ENABLED

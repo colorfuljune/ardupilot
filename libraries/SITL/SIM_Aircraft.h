@@ -18,20 +18,31 @@
 
 #pragma once
 
+#if AP_SIM_ENABLED
+
 #include <AP_Math/AP_Math.h>
 
 #include "SITL.h"
 #include "SITL_Input.h"
-#include <AP_Terrain/AP_Terrain.h>
-#include "SIM_Sprayer.h"
-#include "SIM_Gripper_Servo.h"
-#include "SIM_Gripper_EPM.h"
-#include "SIM_Parachute.h"
-#include "SIM_Precland.h"
 #include "SIM_RichenPower.h"
+#include "SIM_Loweheiser.h"
+#include "SIM_FETtecOneWireESC.h"
+#include "SIM_Volz.h"
 #include "SIM_I2C.h"
-#include "SIM_Buzzer.h"
+#include "SIM_Battery.h"
 #include <Filter/Filter.h>
+#include "SIM_JSON_Master.h"
+#include "ServoModel.h"
+#include "SIM_GPIO_LED_1.h"
+#include "SIM_GPIO_LED_2.h"
+#include "SIM_GPIO_LED_3.h"
+#include "SIM_GPIO_LED_RGB.h"
+#include "SIM_Siyi.h"
+#include "SIM_Topotek.h"
+#include "SIM_Viewpro.h"
+#include "SIM_Mount.h"
+
+#define MAX_SIM_INSTANCES 16
 
 namespace SITL {
 
@@ -49,14 +60,26 @@ public:
       set simulation speedup
      */
     void set_speedup(float speedup);
-    float get_speedup() { return target_speedup; }
+    float get_speedup() const { return target_speedup; }
+
+    /* return a monotonic wall clock time in microseconds */
+    uint64_t get_wall_time_us(void) const;
 
     /*
       set instance number
      */
     void set_instance(uint8_t _instance) {
         instance = _instance;
+        // register at 0 whatever our instance number is: there is only
+        // ever one Aircraft in a SITL process, and _instance is the -I
+        // number, which separates the ports and directories of separate
+        // processes rather than indexing aircraft within one.  Indexing
+        // by it left instances[0] empty for every -I but zero, so
+        // scripts calling sim:set_pose(0, ...) - as the shipped
+        // sim_arming_pos.lua example does - silently did nothing.
+        instances[0] = this;
     }
+    uint8_t get_instance() const { return instance; }
 
     /*
       set directory for additional files such as aircraft models
@@ -69,11 +92,20 @@ public:
     virtual void set_interface_ports(const char* address, const int port_in, const int port_out) {};
 
     /*
+      Start the external simulator process, for backends that manage one. Called
+      once the model is fully configured, so the child's command line can depend
+      on anything the setters above supply.
+     */
+    virtual void launch_external_sim(void) {};
+
+    /*
       step the FDM by one time step
      */
     virtual void update(const struct sitl_input &input) = 0;
 
     void update_model(const struct sitl_input &input);
+
+    void update_home();
 
     /* fill a sitl_fdm structure from the simulator state */
     void fill_fdm(struct sitl_fdm &fdm);
@@ -87,16 +119,6 @@ public:
     // get frame rate of model in Hz
     float get_rate_hz(void) const { return rate_hz; }
 
-    // get number of motors for model
-    uint16_t get_num_motors() const {
-        return num_motors;
-    }
-
-    // get motor offset for model
-    virtual uint16_t get_motors_offset() const {
-        return 0;
-    }
-
     const Vector3f &get_gyro(void) const {
         return gyro;
     }
@@ -105,6 +127,7 @@ public:
         return velocity_ef;
     }
 
+    // return TAS airspeed in earth frame
     const Vector3f &get_velocity_air_ef(void) const {
         return velocity_air_ef;
     }
@@ -123,10 +146,16 @@ public:
         config_ = config;
     }
 
+    // return simulation origin:
+    const Location &get_origin() const { return origin; }
 
     const Location &get_location() const { return location; }
 
-    const Vector3f &get_position() const { return position; }
+    // get position relative to home
+    Vector3d get_position_relhome() const;
+
+    // get air density in kg/m^3
+    float get_air_density(float alt_amsl) const;
 
     // distance the rangefinder is perceiving
     float rangefinder_range() const;
@@ -138,17 +167,59 @@ public:
     const Location &get_home() const { return home; }
     float get_home_yaw() const { return home_yaw; }
 
-    void set_buzzer(Buzzer *_buzzer) { buzzer = _buzzer; }
-    void set_sprayer(Sprayer *_sprayer) { sprayer = _sprayer; }
-    void set_parachute(Parachute *_parachute) { parachute = _parachute; }
     void set_richenpower(RichenPower *_richenpower) { richenpower = _richenpower; }
-    void set_gripper_servo(Gripper_Servo *_gripper) { gripper = _gripper; }
-    void set_gripper_epm(Gripper_EPM *_gripper_epm) { gripper_epm = _gripper_epm; }
-    void set_precland(SIM_Precland *_precland);
-    void set_i2c(class I2C *_i2c) { i2c = _i2c; }
+    void set_adsb(class ADSB *_adsb) { adsb = _adsb; }
+#if AP_SIM_LOWEHEISER_ENABLED
+    void set_loweheiser(Loweheiser *_loweheiser) { loweheiser = _loweheiser; }
+#endif
+    void set_fetteconewireesc(FETtecOneWireESC *_fetteconewireesc) { fetteconewireesc = _fetteconewireesc; }
+#if AP_SIM_VOLZ_ENABLED
+    void set_volz(Volz *_volz) { volz = _volz; }
+#endif
+    void set_ie24(IntelligentEnergy24 *_ie24) { ie24 = _ie24; }
+    float get_battery_voltage() const { return battery_voltage; }
+    float get_battery_temperature_degC() const { return battery_temperature_degC; }
+    float get_battery_current() const { return battery_current; }
+
+    float ambient_outside_temperature_degC() const;
+    float ambient_outside_pressure_Pascal() const;
+    float baro_temperature_degC() const;
+
+#if AP_SIM_MOUNT_ENABLED
+    void add_gimbal_sim(Mount &sim) {
+        for (uint8_t i = 0; i < GIMBAL_SIM_MAX; i++) {
+            if (gimbal_sims[i] == nullptr) {
+                gimbal_sims[i] = &sim;
+                return;
+            }
+        }
+        AP_HAL::panic("Too many gimbal simulators");
+    }
+#endif  // AP_SIM_MOUNT_ENABLED
+
+    ADSB *adsb;
+
+    // takes a PWM range between 1000 and 2000 and returns a floating
+    // point value between -1 and 1
+    float normalise_servo_input(uint16_t input) const {
+        return 2*((input-1000)/1000.0f - 0.5f);
+    }
+
+    ServoModel servo_filter[16];
+
+    float get_airspeed_pitot() const { return airspeed_pitot; }
+
+    /*
+      used by scripting to control simulated aircraft position
+     */
+    static bool set_pose(uint8_t instance, const Location &loc, const Quaternion &quat,
+                         const Vector3f &velocity_ef, const Vector3f &gyro_rads);
 
 protected:
-    SITL *sitl;
+    SIM *sitl;
+    // origin of position vector
+    Location origin;
+    // home location
     Location home;
     bool home_is_set;
     Location location;
@@ -160,21 +231,34 @@ protected:
     Vector3f gyro;                       // rad/s
     Vector3f velocity_ef;                // m/s, earth frame
     Vector3f wind_ef;                    // m/s, earth frame
-    Vector3f velocity_air_ef;            // velocity relative to airmass, earth frame
+    Vector3f velocity_air_ef;            // velocity relative to airmass, earth frame (true airspeed)
     Vector3f velocity_air_bf;            // velocity relative to airmass, body frame
-    Vector3f position;                   // meters, NED from origin
+    Vector3d position;                   // meters, NED from origin
     float mass;                          // kg
-    float external_payload_mass = 0.0f;  // kg
-    Vector3f accel_body;                 // m/s/s NED, body frame
-    float airspeed;                      // m/s, apparent airspeed
-    float airspeed_pitot;                // m/s, apparent airspeed, as seen by fwd pitot tube
-    float battery_voltage = -1.0f;
-    float battery_current = 0.0f;
-    uint8_t num_motors = 1;
-    float rpm[12];
-    uint8_t rcin_chan_count = 0;
+    float external_payload_mass;         // kg
+    Vector3f accel_body{0.0f, 0.0f, -GRAVITY_MSS}; // m/s/s NED, body frame
+    float airspeed;                      // m/s, EAS airspeed
+    float airspeed_pitot;                // m/s, EAS airspeed, as seen by fwd pitot tube
+    float battery_voltage;
+    float battery_current;
+    float battery_temperature_degC;
+    float local_ground_level;            // ground level at local position
+    bool lock_step_scheduled;
+    bool flightaxis_sync_imus_to_frames; // causes the frame counter to be incremented on each timestep, IMUs will then update at the same rate
+    uint32_t last_one_hz_ms;
+
+    // OPTIONAL internal battery model.
+    // ("OPTIONAL" because a child can ignore it and directly set battery_* protected members, exposed publicly via getters.)
+    // (Note that some aircraft get battery-info from an external source, ignoring this "internal" one.)
+    Battery battery;
+
+    uint32_t motor_mask;
+    float rpm[32];
+    uint8_t rcin_chan_count;
     float rcin[12];
-    float range = -1.0f;                 // externally supplied rangefinder value, assumed to have been corrected for vehicle attitude
+
+    virtual float rangefinder_beam_width() const { return 0; }
+    virtual float perpendicular_distance_to_rangefinder_surface() const;
 
     struct {
         // data from simulated laser scanner, if available
@@ -183,7 +267,7 @@ protected:
     } scanner;
 
     // Rangefinder
-    float rangefinder_m[RANGEFINDER_MAX_INSTANCES];
+    float rangefinder_m[SITL_NUM_RANGEFINDERS];
 
     // Windvane apparent wind
     struct {
@@ -192,29 +276,31 @@ protected:
     } wind_vane_apparent;
 
     // Wind Turbulence simulated Data
-    float turbulence_azimuth = 0.0f;
-    float turbulence_horizontal_speed = 0.0f;  // m/s
-    float turbulence_vertical_speed = 0.0f;    // m/s
+    float turbulence_azimuth;
+    float turbulence_horizontal_speed;  // m/s
+    float turbulence_vertical_speed;    // m/s
 
     Vector3f mag_bf;  // local earth magnetic field vector in Gauss, earth frame
 
     uint64_t time_now_us;
 
-    const float gyro_noise;
-    const float accel_noise;
-    float rate_hz;
+    const float gyro_noise = radians(0.1f);
+    const float accel_noise = 0.3f;
+    float rate_hz = 1200.0f;
     float target_speedup;
     uint64_t frame_time_us;
     uint64_t last_wall_time_us;
     uint32_t last_fps_report_ms;
+    float achieved_rate_hz;  // achieved speedup rate
     int64_t sleep_debt_us;
     uint32_t last_frame_count;
     uint8_t instance;
     const char *autotest_dir;
-    const char *frame;
     bool use_time_sync = true;
     float last_speedup = -1.0f;
     const char *config_ = "";
+    float eas2tas = 1.0;
+    float air_density = SSL_AIR_DENSITY;
 
     // allow for AHRS_ORIENTATION
     AP_Int8 *ahrs_orientation;
@@ -231,8 +317,8 @@ protected:
     } ground_behavior;
 
     bool use_smoothing;
+    bool disable_origin_movement;
 
-    AP_Terrain *terrain;
     float ground_height_difference() const;
 
     virtual bool on_ground() const;
@@ -262,9 +348,6 @@ protected:
     /* add noise based on throttle level (from 0..1) */
     void add_noise(float throttle);
 
-    /* return a monotonic wall clock time in microseconds */
-    uint64_t get_wall_time_us(void) const;
-
     // update attitude and relative position
     void update_dynamics(const Vector3f &rot_accel);
 
@@ -272,12 +355,16 @@ protected:
     void update_wind(const struct sitl_input &input);
 
     // return filtered servo input as -1 to 1 range
-    float filtered_idx(float v, uint8_t idx);
     float filtered_servo_angle(const struct sitl_input &input, uint8_t idx);
     float filtered_servo_range(const struct sitl_input &input, uint8_t idx);
+    void filtered_servo_setup(uint8_t idx, uint16_t pwm_min, uint16_t pwm_max, float deflection_deg);
 
     // extrapolate sensors by a given delta time in seconds
     void extrapolate_sensors(float delta_time);
+
+    // update battery
+    virtual void update_battery();
+    virtual void update_battery(const struct sitl_input &input);
 
     // update external payload/sensor dynamic
     void update_external_payload(const struct sitl_input &input);
@@ -285,35 +372,78 @@ protected:
     void add_shove_forces(Vector3f &rot_accel, Vector3f &body_accel);
     void add_twist_forces(Vector3f &rot_accel);
 
+    // add body-frame force due to payload
+    void add_external_forces(Vector3f &body_accel);
+
     // get local thermal updraft
-    float get_local_updraft(Vector3f currentPos);
+    float get_local_updraft(const Vector3d &currentPos);
+
+    // update EAS speeds
+    void update_eas_airspeed();
+
+    // clamp support
+    class Clamp {
+    public:
+        bool clamped(class Aircraft&, const struct sitl_input &input);  // true if the vehicle is currently clamped down
+    private:
+        bool currently_clamped;
+        bool grab_attempted;  // avoid warning multiple times about missed grab
+    } clamp;
 
 private:
-    uint64_t last_time_us = 0;
-    uint32_t frame_counter = 0;
+    uint64_t last_time_us;
+    uint32_t frame_counter;
     uint32_t last_ground_contact_ms;
-    const uint32_t min_sleep_time;
+#if defined(__CYGWIN__) || defined(__CYGWIN64__)
+    const uint32_t min_sleep_time{20000};
+#else
+    const uint32_t min_sleep_time{5000};
+#endif
 
     struct {
         Vector3f accel_body;
         Vector3f gyro;
         Matrix3f rotation_b2e;
-        Vector3f position;
+        Vector3d position;
         Vector3f velocity_ef;
         uint64_t last_update_us;
         Location location;
     } smoothing;
 
-    LowPassFilterFloat servo_filter[4];
-
-    Buzzer *buzzer;
-    Sprayer *sprayer;
-    Gripper_Servo *gripper;
-    Gripper_EPM *gripper_epm;
-    Parachute *parachute;
     RichenPower *richenpower;
-    SIM_Precland *precland;
-    class I2C *i2c;
+#if AP_SIM_LOWEHEISER_ENABLED
+    Loweheiser *loweheiser;
+#endif
+    FETtecOneWireESC *fetteconewireesc;
+#if AP_SIM_VOLZ_ENABLED
+    Volz *volz;
+#endif  // AP_SIM_VOLZ_ENABLED
+
+    IntelligentEnergy24 *ie24;
+
+
+#if AP_SIM_GPIO_LED_1_ENABLED
+    GPIO_LED_1 sim_led1{8};  // pin to match sitl.h
+#endif
+#if AP_SIM_GPIO_LED_2_ENABLED
+    GPIO_LED_2 sim_led2{13, 14};  // pins to match sitl.h
+#endif
+#if AP_SIM_GPIO_LED_3_ENABLED
+    GPIO_LED_3 sim_led3{13, 14, 15};  // pins to match sitl.h
+#endif
+#if AP_SIM_GPIO_LED_RGB_ENABLED
+    GPIO_LED_RGB sim_ledrgb{8, 9, 10};  // pins to match sitl.h
+#endif
+
+    static Aircraft *instances[MAX_SIM_INSTANCES];
+    HAL_Semaphore pose_sem;
+
+#if AP_SIM_MOUNT_ENABLED
+    static constexpr uint8_t GIMBAL_SIM_MAX = 8;
+    Mount *gimbal_sims[GIMBAL_SIM_MAX];
+#endif
 };
 
 } // namespace SITL
+
+#endif // AP_SIM_ENABLED

@@ -1,145 +1,96 @@
 #include <AP_HAL/AP_HAL.h>
 
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL && !defined(HAL_BUILD_AP_PERIPH)
 
 #include "AP_HAL_SITL.h"
 #include "AP_HAL_SITL_Namespace.h"
 #include "HAL_SITL_Class.h"
 #include "UARTDriver.h"
 #include "Scheduler.h"
+#include "CANSocketIface.h"
+#include "SITL_Multicast.h"
 
 #include <stdio.h>
 #include <signal.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 #include <errno.h>
+#include <sys/types.h>
 #include <sys/select.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <time.h>
 
 #include <AP_Param/AP_Param.h>
 #include <SITL/SIM_JSBSim.h>
-#include <AP_HAL/utility/Socket.h>
+#include <AP_HAL/utility/Socket_native.h>
+
+#include <AP_HAL/SIMState.h>
 
 extern const AP_HAL::HAL& hal;
 
 using namespace HALSITL;
 
-void SITL_State::_set_param_default(const char *parm)
-{
-    char *pdup = strdup(parm);
-    char *p = strchr(pdup, '=');
-    if (p == nullptr) {
-        printf("Please specify parameter as NAME=VALUE");
-        exit(1);
-    }
-    float value = strtof(p+1, nullptr);
-    *p = 0;
-    enum ap_var_type var_type;
-    AP_Param *vp = AP_Param::find(pdup, &var_type);
-    if (vp == nullptr) {
-        printf("Unknown parameter %s\n", pdup);
-        exit(1);
-    }
-    if (var_type == AP_PARAM_FLOAT) {
-        ((AP_Float *)vp)->set_and_save(value);
-    } else if (var_type == AP_PARAM_INT32) {
-        ((AP_Int32 *)vp)->set_and_save(value);
-    } else if (var_type == AP_PARAM_INT16) {
-        ((AP_Int16 *)vp)->set_and_save(value);
-    } else if (var_type == AP_PARAM_INT8) {
-        ((AP_Int8 *)vp)->set_and_save(value);
-    } else {
-        printf("Unable to set parameter %s\n", pdup);
-        exit(1);
-    }
-    printf("Set parameter %s to %f\n", pdup, value);
-    free(pdup);
-}
-
-
 /*
   setup for SITL handling
  */
-void SITL_State::_sitl_setup(const char *home_str)
+void SITL_State::_sitl_setup()
 {
-    _home_str = home_str;
-
-#if !defined(__CYGWIN__) && !defined(__CYGWIN64__)
+#if !defined(__CYGWIN__) && !defined(__CYGWIN64__) && !defined(__EMSCRIPTEN__)
     _parent_pid = getppid();
 #endif
 
-#ifndef HIL_MODE
-    _setup_fdm();
-#endif
     fprintf(stdout, "Starting SITL input\n");
 
-    // find the barometer object if it exists
     _sitl = AP::sitl();
-    _barometer = AP_Baro::get_singleton();
-    _ins = AP_InertialSensor::get_singleton();
-    _compass = Compass::get_singleton();
 
     if (_sitl != nullptr) {
         // setup some initial values
-#ifndef HIL_MODE
         _update_airspeed(0);
-        _update_gps(0, 0, 0, 0, 0, 0, 0, false);
-        _update_rangefinder(0);
-#endif
+#if AP_SIM_SOLOGIMBAL_ENABLED
         if (enable_gimbal) {
-            gimbal = new SITL::Gimbal(_sitl->state);
+            // the gimbal connects back to the vehicle's SERIAL1 MAVLink endpoint
+            const char *serial1_path = _serial_path[1];
+            if (strncmp(serial1_path, "uds:", 4) == 0) {
+                gimbal = NEW_NOTHROW SITL::SoloGimbal(serial1_path + 4);
+            } else {
+                gimbal = NEW_NOTHROW SITL::SoloGimbal(base_port() + 2);
+            }
         }
+#endif
 
-        sitl_model->set_buzzer(&_sitl->buzzer_sim);
-        sitl_model->set_sprayer(&_sitl->sprayer_sim);
-        sitl_model->set_gripper_servo(&_sitl->gripper_sim);
-        sitl_model->set_gripper_epm(&_sitl->gripper_epm_sim);
-        sitl_model->set_parachute(&_sitl->parachute_sim);
-        sitl_model->set_precland(&_sitl->precland_sim);
-        sitl_model->set_i2c(&_sitl->i2c_sim);
+#if AP_SIM_PRECLAND_ENABLED
+        // seed the precland simulator's beacon location from home.  This
+        // is done before parameters are loaded from storage so that the
+        // location-is-zero check inside set_default_location sees the
+        // unloaded (zero) values; parameters present in storage then
+        // overwrite the seed, while any absent ones keep it
+        const Location &home = sitl_model->get_home();
+        _sitl->precland_sim.set_default_location(home.lat * 1.0e-7f, home.lng * 1.0e-7f, static_cast<int16_t>(sitl_model->get_home_yaw()));
+#endif
 
         if (_use_fg_view) {
+            fprintf(stdout, "FGView: %s:%u\n", _fg_address, _fg_view_port);
             fg_socket.connect(_fg_address, _fg_view_port);
         }
 
         fprintf(stdout, "Using Irlock at port : %d\n", _irlock_port);
         _sitl->irlock_port = _irlock_port;
+
+        _sitl->rcin_port = _rcin_port;
+        _sitl->rcin_path = _rcin_path;
+
+        fprintf(stdout, "Using \\clock topic for DDS timing: %s\n", _use_dds_sim_time ? "enabled" : "disabled");
+        _sitl->use_dds_sim_time = _use_dds_sim_time;
     }
 
-    if (_synthetic_clock_mode) {
-        // start with non-zero clock
-        hal.scheduler->stop_clock(1);
-    }
+    // start with non-zero clock
+    hal.scheduler->stop_clock(1);
 }
-
-
-#ifndef HIL_MODE
-/*
-  setup a SITL FDM listening UDP port
- */
-void SITL_State::_setup_fdm(void)
-{
-    if (!_sitl_rc_in.reuseaddress()) {
-        fprintf(stderr, "SITL: socket reuseaddress failed on RC in port: %d - %s\n", _rcin_port, strerror(errno));
-        fprintf(stderr, "Aborting launch...\n");
-        exit(1);
-    }
-    if (!_sitl_rc_in.bind("0.0.0.0", _rcin_port)) {
-        fprintf(stderr, "SITL: socket bind failed on RC in port : %d - %s\n", _rcin_port, strerror(errno));
-        fprintf(stderr, "Aborting launch...\n");
-        exit(1);
-    }
-    if (!_sitl_rc_in.set_blocking(false)) {
-        fprintf(stderr, "SITL: socket set_blocking(false) failed on RC in port: %d - %s\n", _rcin_port, strerror(errno));
-        fprintf(stderr, "Aborting launch...\n");
-        exit(1);
-    }
-    if (!_sitl_rc_in.set_cloexec()) {
-        fprintf(stderr, "SITL: socket set_cloexec() failed on RC in port: %d - %s\n", _rcin_port, strerror(errno));
-        fprintf(stderr, "Aborting launch...\n");
-        exit(1);
-    }
-}
-#endif
 
 
 /*
@@ -147,381 +98,90 @@ void SITL_State::_setup_fdm(void)
  */
 void SITL_State::_fdm_input_step(void)
 {
-    static uint32_t last_pwm_input = 0;
-
     _fdm_input_local();
 
     /* make sure we die if our parent dies */
+#if !defined(__EMSCRIPTEN__) // No parent process for Emscripten
     if (kill(_parent_pid, 0) != 0) {
         exit(1);
     }
+#endif
 
     if (_scheduler->interrupts_are_blocked() || _sitl == nullptr) {
         return;
     }
 
-    // simulate RC input at 50Hz
-    if (AP_HAL::millis() - last_pwm_input >= 20 && _sitl->rc_fail != SITL::SITL::SITL_RCFail_NoPulses) {
-        last_pwm_input = AP_HAL::millis();
-        new_rc_input = true;
-    }
-
     _scheduler->sitl_begin_atomic();
 
     if (_update_count == 0 && _sitl != nullptr) {
-        _update_gps(0, 0, 0, 0, 0, 0, 0, false);
-        _scheduler->timer_event();
+        HALSITL::Scheduler::timer_event();
         _scheduler->sitl_end_atomic();
         return;
     }
 
     if (_sitl != nullptr) {
-        _update_gps(_sitl->state.latitude, _sitl->state.longitude,
-                    _sitl->state.altitude,
-                    _sitl->state.speedN, _sitl->state.speedE, _sitl->state.speedD,
-                    _sitl->state.yawDeg, true);
         _update_airspeed(_sitl->state.airspeed);
-        _update_rangefinder(_sitl->state.range);
-
-        if (_sitl->adsb_plane_count >= 0 &&
-            adsb == nullptr) {
-            adsb = new SITL::ADSB(_sitl->state, sitl_model->get_home());
-        } else if (_sitl->adsb_plane_count == -1 &&
-                   adsb != nullptr) {
-            delete adsb;
-            adsb = nullptr;
-        }
+        _update_rangefinder();
     }
 
     // trigger all APM timers.
-    _scheduler->timer_event();
+    HALSITL::Scheduler::timer_event();
     _scheduler->sitl_end_atomic();
 }
 
 
 void SITL_State::wait_clock(uint64_t wait_time_usec)
 {
+    float speedup = sitl_model->get_speedup();
+    if (speedup < 1) {
+        // for purposes of sleeps treat low speedups as 1
+        speedup = 1.0;
+    }
     while (AP_HAL::micros64() < wait_time_usec) {
         if (hal.scheduler->in_main_thread() ||
             Scheduler::from(hal.scheduler)->semaphore_wait_hack_required()) {
             _fdm_input_step();
         } else {
-            usleep(1000);
+#ifdef CYGWIN_BUILD
+            if (speedup > 2 && hal.util->get_soft_armed()) {
+                const char *current_thread = Scheduler::from(hal.scheduler)->get_current_thread_name();
+                if (current_thread && strcmp(current_thread, "Scripting") == 0) {
+                    // this effectively does a yield of the CPU. The
+                    // granularity of sleeps on cygwin is very high,
+                    // so this is needed for good thread performance
+                    // in scripting. We don't do this at low speedups
+                    // as it causes the cpu to run hot
+                    // We also don't do it while disarmed, as lua performance is less
+                    // critical while disarmed
+                    usleep(0);
+                    continue;
+                }
+            }
+#endif
+            // most devices can't sleep for 10us - so this is also
+            // essentially a yield.  At 30x speedup a 10us wall-clock
+            // sleep here can equate to your thread sleeping for 300us
+            // of simulated time
+            usleep(10);
         }
     }
     // check the outbound TCP queue size.  If it is too long then
     // MAVProxy/pymavlink take too long to process packets and it ends
     // up seeing traffic well into our past and hits time-out
     // conditions.
-    if (sitl_model->get_speedup() > 1) {
+    if (speedup > 1 && hal.scheduler->in_main_thread()) {
         while (true) {
-            const int queue_length = ((HALSITL::UARTDriver*)hal.uartA)->get_system_outqueue_length();
+            HALSITL::UARTDriver *uart = (HALSITL::UARTDriver*)hal.serial(0);
+            const int queue_length = uart->get_system_outqueue_length();
             // ::fprintf(stderr, "queue_length=%d\n", (signed)queue_length);
-            if (queue_length < 1024) {
+            if (queue_length < uart->get_system_outqueue_limit()) {
                 break;
             }
+            _serial_0_outqueue_full_count++;
+            uart->handle_reading_from_device_to_readbuffer();
             usleep(1000);
         }
     }
-}
-
-#define streq(a, b) (!strcmp(a, b))
-int SITL_State::sim_fd(const char *name, const char *arg)
-{
-    if (streq(name, "vicon")) {
-        if (vicon != nullptr) {
-            AP_HAL::panic("Only one vicon system at a time");
-        }
-        vicon = new SITL::Vicon();
-        return vicon->fd();
-    } else if (streq(name, "benewake_tf02")) {
-        if (benewake_tf02 != nullptr) {
-            AP_HAL::panic("Only one benewake_tf02 at a time");
-        }
-        benewake_tf02 = new SITL::RF_Benewake_TF02();
-        return benewake_tf02->fd();
-    } else if (streq(name, "benewake_tf03")) {
-        if (benewake_tf03 != nullptr) {
-            AP_HAL::panic("Only one benewake_tf03 at a time");
-        }
-        benewake_tf03 = new SITL::RF_Benewake_TF03();
-        return benewake_tf03->fd();
-    } else if (streq(name, "benewake_tfmini")) {
-        if (benewake_tfmini != nullptr) {
-            AP_HAL::panic("Only one benewake_tfmini at a time");
-        }
-        benewake_tfmini = new SITL::RF_Benewake_TFmini();
-        return benewake_tfmini->fd();
-    } else if (streq(name, "lightwareserial")) {
-        if (lightwareserial != nullptr) {
-            AP_HAL::panic("Only one lightwareserial at a time");
-        }
-        lightwareserial = new SITL::RF_LightWareSerial();
-        return lightwareserial->fd();
-    } else if (streq(name, "lightwareserial-binary")) {
-        if (lightwareserial_binary != nullptr) {
-            AP_HAL::panic("Only one lightwareserial-binary at a time");
-        }
-        lightwareserial_binary = new SITL::RF_LightWareSerialBinary();
-        return lightwareserial_binary->fd();
-    } else if (streq(name, "lanbao")) {
-        if (lanbao != nullptr) {
-            AP_HAL::panic("Only one lanbao at a time");
-        }
-        lanbao = new SITL::RF_Lanbao();
-        return lanbao->fd();
-    } else if (streq(name, "blping")) {
-        if (blping != nullptr) {
-            AP_HAL::panic("Only one blping at a time");
-        }
-        blping = new SITL::RF_BLping();
-        return blping->fd();
-    } else if (streq(name, "leddarone")) {
-        if (leddarone != nullptr) {
-            AP_HAL::panic("Only one leddarone at a time");
-        }
-        leddarone = new SITL::RF_LeddarOne();
-        return leddarone->fd();
-    } else if (streq(name, "ulanding_v0")) {
-        if (ulanding_v0 != nullptr) {
-            AP_HAL::panic("Only one ulanding_v0 at a time");
-        }
-        ulanding_v0 = new SITL::RF_uLanding_v0();
-        return ulanding_v0->fd();
-    } else if (streq(name, "ulanding_v1")) {
-        if (ulanding_v1 != nullptr) {
-            AP_HAL::panic("Only one ulanding_v1 at a time");
-        }
-        ulanding_v1 = new SITL::RF_uLanding_v1();
-        return ulanding_v1->fd();
-    } else if (streq(name, "maxsonarseriallv")) {
-        if (maxsonarseriallv != nullptr) {
-            AP_HAL::panic("Only one maxsonarseriallv at a time");
-        }
-        maxsonarseriallv = new SITL::RF_MaxsonarSerialLV();
-        return maxsonarseriallv->fd();
-    } else if (streq(name, "wasp")) {
-        if (wasp != nullptr) {
-            AP_HAL::panic("Only one wasp at a time");
-        }
-        wasp = new SITL::RF_Wasp();
-        return wasp->fd();
-    } else if (streq(name, "nmea")) {
-        if (nmea != nullptr) {
-            AP_HAL::panic("Only one nmea at a time");
-        }
-        nmea = new SITL::RF_NMEA();
-        return nmea->fd();
-
-    } else if (streq(name, "rf_mavlink")) {
-        if (wasp != nullptr) {
-            AP_HAL::panic("Only one rf_mavlink at a time");
-        }
-        rf_mavlink = new SITL::RF_MAVLink();
-        return rf_mavlink->fd();
-
-    } else if (streq(name, "frsky-d")) {
-        if (frsky_d != nullptr) {
-            AP_HAL::panic("Only one frsky_d at a time");
-        }
-        frsky_d = new SITL::Frsky_D();
-        return frsky_d->fd();
-    // } else if (streq(name, "frsky-SPort")) {
-    //     if (frsky_sport != nullptr) {
-    //         AP_HAL::panic("Only one frsky_sport at a time");
-    //     }
-    //     frsky_sport = new SITL::Frsky_SPort();
-    //     return frsky_sport->fd();
-
-    // } else if (streq(name, "frsky-SPortPassthrough")) {
-    //     if (frsky_sport_passthrough != nullptr) {
-    //         AP_HAL::panic("Only one frsky_sport passthrough at a time");
-    //     }
-    //     frsky_sport = new SITL::Frsky_SPortPassthrough();
-    //     return frsky_sportpassthrough->fd();
-    } else if (streq(name, "crsf")) {
-        if (crsf != nullptr) {
-            AP_HAL::panic("Only one crsf at a time");
-        }
-        crsf = new SITL::CRSF();
-        return crsf->fd();
-    } else if (streq(name, "rplidara2")) {
-        if (rplidara2 != nullptr) {
-            AP_HAL::panic("Only one rplidara2 at a time");
-        }
-        rplidara2 = new SITL::PS_RPLidarA2();
-        return rplidara2->fd();
-    } else if (streq(name, "richenpower")) {
-        sitl_model->set_richenpower(&_sitl->richenpower_sim);
-        return _sitl->richenpower_sim.fd();
-    } else if (streq(name, "gyus42v2")) {
-        if (gyus42v2 != nullptr) {
-            AP_HAL::panic("Only one gyus42v2 at a time");
-        }
-        gyus42v2 = new SITL::RF_GYUS42v2();
-        return gyus42v2->fd();
-    }
-
-    AP_HAL::panic("unknown simulated device: %s", name);
-}
-int SITL_State::sim_fd_write(const char *name)
-{
-    if (streq(name, "vicon")) {
-        if (vicon == nullptr) {
-            AP_HAL::panic("No vicon created");
-        }
-        return vicon->write_fd();
-    } else if (streq(name, "benewake_tf02")) {
-        if (benewake_tf02 == nullptr) {
-            AP_HAL::panic("No benewake_tf02 created");
-        }
-        return benewake_tf02->write_fd();
-    } else if (streq(name, "benewake_tf03")) {
-        if (benewake_tf03 == nullptr) {
-            AP_HAL::panic("No benewake_tf03 created");
-        }
-        return benewake_tf03->write_fd();
-    } else if (streq(name, "benewake_tfmini")) {
-        if (benewake_tfmini == nullptr) {
-            AP_HAL::panic("No benewake_tfmini created");
-        }
-        return benewake_tfmini->write_fd();
-    } else if (streq(name, "lightwareserial")) {
-        if (lightwareserial == nullptr) {
-            AP_HAL::panic("No lightwareserial created");
-        }
-        return lightwareserial->write_fd();
-    } else if (streq(name, "lightwareserial-binary")) {
-        if (lightwareserial_binary == nullptr) {
-            AP_HAL::panic("No lightwareserial_binary created");
-        }
-        return lightwareserial_binary->write_fd();
-    } else if (streq(name, "lanbao")) {
-        if (lanbao == nullptr) {
-            AP_HAL::panic("No lanbao created");
-        }
-        return lanbao->write_fd();
-    } else if (streq(name, "blping")) {
-        if (blping == nullptr) {
-            AP_HAL::panic("No blping created");
-        }
-        return blping->write_fd();
-    } else if (streq(name, "leddarone")) {
-        if (leddarone == nullptr) {
-            AP_HAL::panic("No leddarone created");
-        }
-        return leddarone->write_fd();
-    } else if (streq(name, "ulanding_v0")) {
-        if (ulanding_v0 == nullptr) {
-            AP_HAL::panic("No ulanding_v0 created");
-        }
-        return ulanding_v0->write_fd();
-    } else if (streq(name, "ulanding_v1")) {
-        if (ulanding_v1 == nullptr) {
-            AP_HAL::panic("No ulanding_v1 created");
-        }
-        return ulanding_v1->write_fd();
-    } else if (streq(name, "maxsonarseriallv")) {
-        if (maxsonarseriallv == nullptr) {
-            AP_HAL::panic("No maxsonarseriallv created");
-        }
-        return maxsonarseriallv->write_fd();
-    } else if (streq(name, "wasp")) {
-        if (wasp == nullptr) {
-            AP_HAL::panic("No wasp created");
-        }
-        return wasp->write_fd();
-    } else if (streq(name, "nmea")) {
-        if (nmea == nullptr) {
-            AP_HAL::panic("No nmea created");
-        }
-        return nmea->write_fd();
-    } else if (streq(name, "rf_mavlink")) {
-        if (rf_mavlink == nullptr) {
-            AP_HAL::panic("No rf_mavlink created");
-        }
-        return rf_mavlink->write_fd();
-    } else if (streq(name, "frsky-d")) {
-        if (frsky_d == nullptr) {
-            AP_HAL::panic("No frsky-d created");
-        }
-        return frsky_d->write_fd();
-    } else if (streq(name, "crsf")) {
-        if (crsf == nullptr) {
-            AP_HAL::panic("No crsf created");
-        }
-        return crsf->write_fd();
-    } else if (streq(name, "rplidara2")) {
-        if (rplidara2 == nullptr) {
-            AP_HAL::panic("No rplidara2 created");
-        }
-        return rplidara2->write_fd();
-    } else if (streq(name, "richenpower")) {
-        return _sitl->richenpower_sim.write_fd();
-    } else if (streq(name, "gyus42v2")) {
-        if (gyus42v2 == nullptr) {
-            AP_HAL::panic("No gyus42v2 created");
-        }
-        return gyus42v2->write_fd();
-    }
-    AP_HAL::panic("unknown simulated device: %s", name);
-}
-
-#ifndef HIL_MODE
-/*
-  check for a SITL RC input packet
- */
-void SITL_State::_check_rc_input(void)
-{
-    uint32_t count = 0;
-    while (_read_rc_sitl_input()) {
-        count++;
-    }
-
-    if (count > 100) {
-        ::fprintf(stderr, "Read %u rc inputs\n", count);
-    }
-}
-
-bool SITL_State::_read_rc_sitl_input()
-{
-    struct pwm_packet {
-        uint16_t pwm[16];
-    } pwm_pkt;
-
-    const ssize_t size = _sitl_rc_in.recv(&pwm_pkt, sizeof(pwm_pkt), 0);
-    switch (size) {
-    case -1:
-        return false;
-    case 8*2:
-    case 16*2: {
-        // a packet giving the receiver PWM inputs
-        for (uint8_t i=0; i<size/2; i++) {
-            // setup the pwm input for the RC channel inputs
-            if (i < _sitl->state.rcin_chan_count) {
-                // we're using rc from simulator
-                continue;
-            }
-            uint16_t pwm = pwm_pkt.pwm[i];
-            if (pwm != 0) {
-                if (_sitl->rc_fail == SITL::SITL::SITL_RCFail_Throttle950) {
-                    if (i == 2) {
-                        // set throttle (assumed to be on channel 3...)
-                        pwm = 950;
-                    } else {
-                        // centre all other inputs
-                        pwm = 1500;
-                    }
-                }
-                pwm_input[i] = pwm;
-            }
-        }
-        return true;
-    }
-    default:
-        fprintf(stderr, "Malformed SITL RC input (%ld)", (long)size);
-    }
-    return false;
 }
 
 /*
@@ -541,10 +201,27 @@ void SITL_State::_output_to_flightgear(void)
     fdm.phi   = radians(sfdm.rollDeg);
     fdm.theta = radians(sfdm.pitchDeg);
     fdm.psi   = radians(sfdm.yawDeg);
+    fdm.vcas  = sfdm.velocity_air_bf.length()/0.3048;
     if (_vehicle == ArduCopter) {
         fdm.num_engines = 4;
-        for (uint8_t i=0; i<4; i++) {
-            fdm.rpm[i] = constrain_float((pwm_output[i]-1000), 0, 1000);
+        if (_model_str != nullptr && strstr(_model_str, "heliquad") != nullptr) {
+            // copter variable-pitch quad (heli-quad). The packet has no
+            // field for blade collective, so it rides in an unused
+            // per-engine field which only the heliquad aircraft model XML
+            // reads:
+            //   rpm[i]       - rotor speed, from the shared RSC output
+            //   fuel_flow[i] - blade collective, -1..1 about trim
+            // collective servos are SERVO1-4, RSC is SERVO8 (copter-heli convention)
+            const float rsc = constrain_float((pwm_output[7]-1000)*0.001f, 0, 1);
+            for (uint8_t i=0; i<4; i++) {
+                fdm.rpm[i] = rsc * 1500;  // nominal head speed, rev/min
+                fdm.fuel_flow[i] = constrain_float((pwm_output[i]-1500)*0.002f, -1, 1);
+            }
+        } else {
+            // normal direct-drive fixed-pitch quadcopter
+            for (uint8_t i=0; i<4; i++) {
+                fdm.rpm[i] = constrain_float((pwm_output[i]-1000), 0, 1000);
+            }
         }
     } else {
         fdm.num_engines = 4;
@@ -564,198 +241,68 @@ void SITL_State::_output_to_flightgear(void)
  */
 void SITL_State::_fdm_input_local(void)
 {
+    if (_sitl == nullptr) {
+        return;
+    }
     struct sitl_input input;
-
-    // check for direct RC input
-    _check_rc_input();
 
     // construct servos structure for FDM
     _simulator_servos(input);
 
+#if AP_SIM_JSON_MASTER_ENABLED
+    // read servo inputs from ride along flight controllers
+    ride_along.receive(input);
+#endif  // AP_SIM_JSON_MASTER_ENABLED
+
+    // replace outputs from multicast
+    multicast_servo_update(input);
+
     // update the model
+    sitl_model->update_home();
     sitl_model->update_model(input);
 
     // get FDM output from the model
-    if (_sitl) {
-        sitl_model->fill_fdm(_sitl->state);
-        _sitl->update_rate_hz = sitl_model->get_rate_hz();
+    sitl_model->fill_fdm(_sitl->state);
 
-        if (_sitl->rc_fail == SITL::SITL::SITL_RCFail_None) {
-            for (uint8_t i=0; i< _sitl->state.rcin_chan_count; i++) {
-                pwm_input[i] = 1000 + _sitl->state.rcin[i]*1000;
-            }
-        }
+#if HAL_NUM_CAN_IFACES
+    if (CANIface::num_interfaces() > 0) {
+        multicast_state_send();
     }
+#endif
 
-    if (gimbal != nullptr) {
-        gimbal->update();
-    }
-    if (adsb != nullptr) {
-        adsb->update();
-    }
-    if (vicon != nullptr) {
-        Quaternion attitude;
-        sitl_model->get_attitude(attitude);
-        vicon->update(sitl_model->get_location(),
-                      sitl_model->get_position(),
-                      sitl_model->get_velocity_ef(),
-                      attitude);
-    }
-    if (benewake_tf02 != nullptr) {
-        benewake_tf02->update(sitl_model->rangefinder_range());
-    }
-    if (benewake_tf03 != nullptr) {
-        benewake_tf03->update(sitl_model->rangefinder_range());
-    }
-    if (benewake_tfmini != nullptr) {
-        benewake_tfmini->update(sitl_model->rangefinder_range());
-    }
-    if (lightwareserial != nullptr) {
-        lightwareserial->update(sitl_model->rangefinder_range());
-    }
-    if (lightwareserial_binary != nullptr) {
-        lightwareserial_binary->update(sitl_model->rangefinder_range());
-    }
-    if (lanbao != nullptr) {
-        lanbao->update(sitl_model->rangefinder_range());
-    }
-    if (blping != nullptr) {
-        blping->update(sitl_model->rangefinder_range());
-    }
-    if (leddarone != nullptr) {
-        leddarone->update(sitl_model->rangefinder_range());
-    }
-    if (ulanding_v0 != nullptr) {
-        ulanding_v0->update(sitl_model->rangefinder_range());
-    }
-    if (ulanding_v1 != nullptr) {
-        ulanding_v1->update(sitl_model->rangefinder_range());
-    }
-    if (maxsonarseriallv != nullptr) {
-        maxsonarseriallv->update(sitl_model->rangefinder_range());
-    }
-    if (wasp != nullptr) {
-        wasp->update(sitl_model->rangefinder_range());
-    }
-    if (nmea != nullptr) {
-        nmea->update(sitl_model->rangefinder_range());
-    }
-    if (rf_mavlink != nullptr) {
-        rf_mavlink->update(sitl_model->rangefinder_range());
-    }
-    if (gyus42v2 != nullptr) {
-        gyus42v2->update(sitl_model->rangefinder_range());
-    }
+#if AP_SIM_JSON_MASTER_ENABLED
+    // output JSON state to ride along flight controllers
+    ride_along.send(_sitl->state,sitl_model->get_position_relhome());
+#endif  // AP_SIM_JSON_MASTER_ENABLED
 
-    if (frsky_d != nullptr) {
-        frsky_d->update();
-    }
-    // if (frsky_sport != nullptr) {
-    //     frsky_sport->update();
-    // }
-    // if (frsky_sportpassthrough != nullptr) {
-    //     frsky_sportpassthrough->update();
-    // }
+    sim_update();
 
-    if (crsf != nullptr) {
-        crsf->update();
-    }
-
-    if (rplidara2 != nullptr) {
-        rplidara2->update(sitl_model->get_location());
-    }
-
-    if (_sitl) {
-        _sitl->efi_ms.update();
-    }
-
-    if (_sitl && _use_fg_view) {
+    if (_use_fg_view) {
         _output_to_flightgear();
     }
 
     // update simulation time
-    if (_sitl) {
-        hal.scheduler->stop_clock(_sitl->state.timestamp_us);
-    } else {
-        hal.scheduler->stop_clock(AP_HAL::micros64()+100);
-    }
+    hal.scheduler->stop_clock(_sitl->state.timestamp_us);
 
     set_height_agl();
 
-    _synthetic_clock_mode = true;
     _update_count++;
 }
-#endif
 
 /*
   create sitl_input structure for sending to FDM
  */
 void SITL_State::_simulator_servos(struct sitl_input &input)
 {
-    static uint32_t last_update_usec;
-
-    /* this maps the registers used for PWM outputs. The RC
-     * driver updates these whenever it wants the channel output
-     * to change */
-    uint8_t i;
-
-    if (last_update_usec == 0 || !output_ready) {
-        for (i=0; i<SITL_NUM_CHANNELS; i++) {
-            pwm_output[i] = 1000;
-        }
-        if (_vehicle == ArduPlane) {
-            pwm_output[0] = pwm_output[1] = pwm_output[3] = 1500;
-        }
-        if (_vehicle == Rover) {
-            pwm_output[0] = pwm_output[1] = pwm_output[2] = pwm_output[3] = 1500;
-        }
+    if (_sitl == nullptr) {
+        return;
     }
 
-    // output at chosen framerate
-    uint32_t now = AP_HAL::micros();
-    last_update_usec = now;
+#if AP_SIM_WIND_SIMULATION_ENABLED
+    hal.simstate->update_simulated_wind(input);
+#endif  // AP_SIM_WIND_SIMULATION_ENABLED
 
-    float altitude = _barometer?_barometer->get_altitude():0;
-    float wind_speed = 0;
-    float wind_direction = 0;
-    float wind_dir_z = 0;
-
-    // give 5 seconds to calibrate airspeed sensor at 0 wind speed
-    if (wind_start_delay_micros == 0) {
-        wind_start_delay_micros = now;
-    } else if (_sitl && (now - wind_start_delay_micros) > 5000000 ) {
-        // The EKF does not like step inputs so this LPF keeps it happy.
-        wind_speed =     _sitl->wind_speed_active     = (0.95f*_sitl->wind_speed_active)     + (0.05f*_sitl->wind_speed);
-        wind_direction = _sitl->wind_direction_active = (0.95f*_sitl->wind_direction_active) + (0.05f*_sitl->wind_direction);
-        wind_dir_z =     _sitl->wind_dir_z_active     = (0.95f*_sitl->wind_dir_z_active)     + (0.05f*_sitl->wind_dir_z);
-        
-        // pass wind into simulators using different wind types via param SIM_WIND_T*.
-        switch (_sitl->wind_type) {
-        case SITL::SITL::WIND_TYPE_SQRT:
-            if (altitude < _sitl->wind_type_alt) {
-                wind_speed *= sqrtf(MAX(altitude / _sitl->wind_type_alt, 0));
-            }
-            break;
-
-        case SITL::SITL::WIND_TYPE_COEF:
-            wind_speed += (altitude - _sitl->wind_type_alt) * _sitl->wind_type_coef;
-            break;
-
-        case SITL::SITL::WIND_TYPE_NO_LIMIT:
-        default:
-            break;
-        }
-
-        // never allow negative wind velocity
-        wind_speed = MAX(wind_speed, 0);
-    }
-
-    input.wind.speed = wind_speed;
-    input.wind.direction = wind_direction;
-    input.wind.turbulence = _sitl?_sitl->wind_turbulance:0;
-    input.wind.dir_z = wind_dir_z;
-
-    for (i=0; i<SITL_NUM_CHANNELS; i++) {
+    for (uint8_t i=0; i<SITL_NUM_CHANNELS; i++) {
         if (pwm_output[i] == 0xFFFF) {
             input.servos[i] = 0;
         } else {
@@ -763,27 +310,58 @@ void SITL_State::_simulator_servos(struct sitl_input &input)
         }
     }
 
-    float engine_mul = _sitl?_sitl->engine_mul.get():1;
-    uint8_t engine_fail = _sitl?_sitl->engine_fail.get():0;
-    float throttle = 0.0f;
-    
-    if (engine_fail >= ARRAY_SIZE(input.servos)) {
-        engine_fail = 0;
-    }
-    // apply engine multiplier to motor defined by the SIM_ENGINE_FAIL parameter
-    if (_vehicle != Rover) {
-        input.servos[engine_fail] = ((input.servos[engine_fail]-1000) * engine_mul) + 1000;
-    } else {
-        input.servos[engine_fail] = static_cast<uint16_t>(((input.servos[engine_fail] - 1500) * engine_mul) + 1500);
+    // FETtec ESC simulation support.  Input signals of 1000-2000
+    // are positive thrust, 0 to 1000 are negative thrust.  Deeper
+    // changes required to support negative thrust - potentially
+    // adding a field to input.
+    if (_sitl->fetteconewireesc_sim.enabled()) {
+        _sitl->fetteconewireesc_sim.update_sitl_input_pwm(input);
+        for (uint8_t i=0; i<ARRAY_SIZE(input.servos); i++) {
+            if (input.servos[i] != 0 && input.servos[i] < 1000) {
+                AP_HAL::panic("Bad input servo value (%u)", input.servos[i]);
+            }
+        }
     }
 
+#if AP_SIM_VOLZ_ENABLED
+    // update simulation input based on data received via "serial" to
+    // Volz servos:
+    if (_sitl->volz_sim.enabled()) {
+        _sitl->volz_sim.update_sitl_input_pwm(input);
+        for (uint8_t i=0; i<ARRAY_SIZE(input.servos); i++) {
+            if (input.servos[i] != 0 && input.servos[i] < 1000) {
+                AP_HAL::panic("Bad input servo value (%u)", input.servos[i]);
+            }
+        }
+    }
+#endif
+
+    const float engine_mul = _sitl->engine_mul.get();
+    const uint32_t engine_fail = _sitl->engine_fail.get();
+
+    // apply engine multiplier to motor defined by the SIM_ENGINE_FAIL parameter
+    for (uint8_t i=0; i<ARRAY_SIZE(input.servos); i++) {
+        if (engine_fail & (1<<i)) {
+            if (_vehicle != Rover) {
+                input.servos[i] = ((input.servos[i]-1000) * engine_mul) + 1000;
+            } else {
+                input.servos[i] = static_cast<uint16_t>(((input.servos[i] - 1500) * engine_mul) + 1500);
+            }
+        }
+    }
+
+    float throttle = 0.0f; // 0 is 'no throttle', 1.0 is 'full' throttle
     if (_vehicle == ArduPlane) {
         float forward_throttle = constrain_float((input.servos[2] - 1000) / 1000.0f, 0.0f, 1.0f);
         // do a little quadplane dance
         float hover_throttle = 0.0f;
         uint8_t running_motors = 0;
-        for (i=0; i < sitl_model->get_num_motors() - 1; i++) {
-            float motor_throttle = constrain_float((input.servos[sitl_model->get_motors_offset() + i] - 1000) / 1000.0f, 0.0f, 1.0f);
+        uint32_t mask = _sitl->state.motor_mask;
+        uint8_t bit;
+        while ((bit = __builtin_ffs(mask)) != 0) {
+            uint8_t motor = bit-1;
+            mask &= ~(1U<<motor);
+            float motor_throttle = constrain_float((input.servos[motor] - 1000) / 1000.0f, 0.0f, 1.0f);
             // update motor_on flag
             if (!is_zero(motor_throttle)) {
                 hover_throttle += motor_throttle;
@@ -799,14 +377,21 @@ void SITL_State::_simulator_servos(struct sitl_input &input)
             throttle = hover_throttle;
         }
     } else if (_vehicle == Rover) {
-        input.servos[2] = static_cast<uint16_t>(constrain_int16(input.servos[2], 1000, 2000));
-        input.servos[0] = static_cast<uint16_t>(constrain_int16(input.servos[0], 1000, 2000));
-        throttle = fabsf((input.servos[2] - 1500) / 500.0f);
+        if (input.servos[2] != 0) {
+            const uint16_t servo2 = static_cast<uint16_t>(constrain_int16(input.servos[2], 1000, 2000));
+            throttle = fabsf((servo2 - 1500) / 500.0f);
+        } else {
+            throttle = 0;
+        }
     } else {
         // run checks on each motor
         uint8_t running_motors = 0;
-        for (i=0; i < sitl_model->get_num_motors(); i++) {
-            float motor_throttle = constrain_float((input.servos[i] - 1000) / 1000.0f, 0.0f, 1.0f);
+        uint32_t mask = _sitl->state.motor_mask;
+        uint8_t bit;
+        while ((bit = __builtin_ffs(mask)) != 0) {
+            const uint8_t motor = bit-1;
+            mask &= ~(1U<<motor);
+            float motor_throttle = constrain_float((input.servos[motor] - 1000) / 1000.0f, 0.0f, 1.0f);
             // update motor_on flag
             if (!is_zero(motor_throttle)) {
                 throttle += motor_throttle;
@@ -817,56 +402,13 @@ void SITL_State::_simulator_servos(struct sitl_input &input)
             throttle /= running_motors;
         }
     }
-    if (_sitl) {
-        _sitl->throttle = throttle;
-    }
+    _sitl->throttle = throttle;
 
-    float voltage = 0;
-    _current = 0;
-    
-    if (_sitl != nullptr) {
-        if (_sitl->state.battery_voltage <= 0) {
-            if (_vehicle == ArduSub) {
-                voltage = _sitl->batt_voltage;
-                for (i = 0; i < 6; i++) {
-                    float pwm = input.servos[i];
-                    //printf("i: %d, pwm: %.2f\n", i, pwm);
-                    float fraction = fabsf((pwm - 1500) / 500.0f);
-
-                    voltage -= fraction * 0.5f;
-
-                    float draw = fraction * 15;
-                    _current += draw;
-                }
-            } else {
-                // simulate simple battery setup
-                // lose 0.7V at full throttle
-                voltage = _sitl->batt_voltage - 0.7f * throttle;
-
-                // assume 50A at full throttle
-                _current = 50.0f * throttle;
-            }
-        } else {
-            // FDM provides voltage and current
-            voltage = _sitl->state.battery_voltage;
-            _current = _sitl->state.battery_current;
-        }
-    }
-
-    // assume 3DR power brick
-    voltage_pin_value = ((voltage / 10.1f) / 5.0f) * 1024;
-    current_pin_value = ((_current / 17.0f) / 5.0f) * 1024;
-    // fake battery2 as just a 25% gain on the first one
-    voltage2_pin_value = ((voltage * 0.25f / 10.1f) / 5.0f) * 1024;
-    current2_pin_value = ((_current * 0.25f / 17.0f) / 5.0f) * 1024;
+    set_voltage_current_pins(sitl_model->get_battery_voltage(), sitl_model->get_battery_current());
 }
 
 void SITL_State::init(int argc, char * const argv[])
 {
-    pwm_input[0] = pwm_input[1] = pwm_input[3] = 1500;
-    pwm_input[4] = pwm_input[7] = 1800;
-    pwm_input[2] = pwm_input[5] = pwm_input[6] = 1000;
-
     _scheduler = Scheduler::from(hal.scheduler);
     _parse_command_line(argc, argv);
 }
@@ -889,28 +431,262 @@ void SITL_State::set_height_agl(void)
     }
 
 #if AP_TERRAIN_AVAILABLE
-    if (_sitl != nullptr &&
-        _sitl->terrain_enable) {
+    if (_sitl->terrain_enable) {
         // get height above terrain from AP_Terrain. This assumes
         // AP_Terrain is working
         float terrain_height_amsl;
-        struct Location location;
+        Location location;
         location.lat = _sitl->state.latitude*1.0e7;
         location.lng = _sitl->state.longitude*1.0e7;
 
         AP_Terrain *_terrain = AP_Terrain::get_singleton();
         if (_terrain != nullptr &&
             _terrain->height_amsl(location, terrain_height_amsl, false)) {
-            _sitl->height_agl = _sitl->state.altitude - terrain_height_amsl;
+            _sitl->state.height_agl = _sitl->state.altitude - terrain_height_amsl;
             return;
         }
     }
 #endif
 
-    if (_sitl != nullptr) {
-        // fall back to flat earth model
-        _sitl->height_agl = _sitl->state.altitude - home_alt;
+    // fall back to flat earth model
+    _sitl->state.height_agl = _sitl->state.altitude - home_alt;
+}
+
+/*
+  open multicast UDP
+ */
+void SITL_State::multicast_state_open(void)
+{
+    struct sockaddr_in sockaddr {};
+    int ret;
+
+#ifdef HAVE_SOCK_SIN_LEN
+    sockaddr.sin_len = sizeof(sockaddr);
+#endif
+    sockaddr.sin_family = AF_INET;
+
+    /*
+      open the servo input socket; state is also sent from this socket
+      so that peripherals can reply to the source address and port they
+      observe, whatever this instance's servo port is
+     */
+    servo_in_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (servo_in_fd == -1) {
+        fprintf(stderr, "socket failed - %s\n", strerror(errno));
+        exit(1);
+    }
+    ret = fcntl(servo_in_fd, F_SETFD, FD_CLOEXEC);
+    if (ret == -1) {
+        fprintf(stderr, "fcntl failed on setting FD_CLOEXEC - %s\n", strerror(errno));
+        exit(1);
+    }
+
+    // try to setup for broadcast, this may fail if insufficient privileges
+    int one = 1;
+    setsockopt(servo_in_fd,SOL_SOCKET,SO_BROADCAST,(char *)&one,sizeof(one));
+
+    const uint32_t mc_if_addr = sitl_multicast_interface_address();
+    if (mc_if_addr != 0) {
+        // the state is multicast from this socket, so it needs the same
+        // interface pinning the other multicast paths have: without it
+        // the state follows the routing table while the peripheral is
+        // listening on the interface it was told to use, and never sees
+        // the vehicle.  See sitl_multicast_interface_address()
+        struct in_addr ifaddr {};
+        ifaddr.s_addr = mc_if_addr;
+        if (setsockopt(servo_in_fd, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr)) == -1) {
+            fprintf(stderr, "failed to set multicast interface - %s\n", strerror(errno));
+            exit(1);
+        }
+    }
+
+    sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    sockaddr.sin_port = htons(SITL_SERVO_PORT + _instance);
+
+    ret = bind(servo_in_fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+    if (ret == -1) {
+        fprintf(stderr, "udp servo bind failed\n");
+        exit(1);
+    }
+
+    // destination address for the multicast state
+    mc_dest = {};
+#ifdef HAVE_SOCK_SIN_LEN
+    mc_dest.sin_len = sizeof(mc_dest);
+#endif
+    mc_dest.sin_family = AF_INET;
+    mc_dest.sin_port = htons(sitl_multicast_state_port(SITL_MCAST_PORT));
+    mc_dest.sin_addr.s_addr = inet_addr(SITL_MCAST_IP);
+
+    ::printf("multicast initialised\n");
+}
+
+/*
+  send out SITL state as multicast UDP
+ */
+void SITL_State::multicast_state_send(void)
+{
+    if (_sitl == nullptr) {
+        return;
+    }
+    if (servo_in_fd == -1) {
+        multicast_state_open();
+    }
+    const auto &sfdm = _sitl->state;
+    sendto(servo_in_fd, (void*)&sfdm, sizeof(sfdm), 0, (struct sockaddr *)&mc_dest, sizeof(mc_dest));
+
+    check_servo_input();
+
+    if (_periph_lockstep) {
+        wait_periph_acks(sfdm.timestamp_us);
     }
 }
 
+/*
+  check for ack/servo data from peripherals
+ */
+void SITL_State::check_servo_input(void)
+{
+    // drain any pending packets; we loop to ensure we drain all
+    // packets from all nodes
+    struct sitl_mcast_ack ack;
+    struct sockaddr_in src;
+    socklen_t src_len = sizeof(src);
+    ssize_t ret;
+    while ((ret = recvfrom(servo_in_fd, (void*)&ack, sizeof(ack), MSG_DONTWAIT,
+                           (struct sockaddr *)&src, &src_len)) > 0) {
+        handle_periph_ack(ack, ret, src);
+        src_len = sizeof(src);
+    }
+}
+
+/*
+  handle one ack/servo packet from a peripheral
+ */
+void SITL_State::handle_periph_ack(const struct sitl_mcast_ack &ack, ssize_t len, const struct sockaddr_in &src)
+{
+    if (len != sizeof(ack)) {
+        // unknown packet format.  The most likely cause is a
+        // peripheral built from a different source tree, sending the
+        // old servo-only reply; its servo output will be ignored and
+        // it can take no part in lockstep, so say so rather than
+        // discarding its packets in silence
+        if (!_warned_ack_size) {
+            _warned_ack_size = true;
+            ::fprintf(stderr, "SITL: ignoring %d-byte peripheral reply from %s:%u, expected %u bytes; build the peripheral from this source tree\n",
+                      int(len), inet_ntoa(src.sin_addr), (unsigned)ntohs(src.sin_port),
+                      (unsigned)sizeof(ack));
+        }
+        return;
+    }
+    for (uint8_t i=0; i<SITL_NUM_CHANNELS; i++) {
+        // nan means that node is not outputting this channel
+        if (!isnan(ack.servos[i])) {
+            mc_servo[i] = uint16_t(ack.servos[i]);
+        }
+    }
+    if (!_periph_lockstep) {
+        return;
+    }
+    // register the peripheral, or update its ack state
+    struct mcast_periph *periph = nullptr;
+    for (uint8_t i=0; i<num_mcast_periphs; i++) {
+        if (mcast_periphs[i].addr.sin_addr.s_addr == src.sin_addr.s_addr &&
+            mcast_periphs[i].addr.sin_port == src.sin_port) {
+            periph = &mcast_periphs[i];
+            break;
+        }
+    }
+    if (periph == nullptr) {
+        // do not let a recently-evicted peer's stale queued acks
+        // re-register it; a live peer re-registers with fresh acks
+        // once the cooldown expires
+        const uint64_t now_ms = wall_millis();
+        for (uint8_t i=0; i<num_evicted_periphs; ) {
+            if (now_ms - evicted_periphs[i].evicted_ms > PERIPH_REJOIN_COOLDOWN_MS) {
+                evicted_periphs[i] = evicted_periphs[--num_evicted_periphs];
+                continue;
+            }
+            if (evicted_periphs[i].addr.sin_addr.s_addr == src.sin_addr.s_addr &&
+                evicted_periphs[i].addr.sin_port == src.sin_port) {
+                return;
+            }
+            i++;
+        }
+        if (num_mcast_periphs >= MAX_MCAST_PERIPHS) {
+            return;
+        }
+        periph = &mcast_periphs[num_mcast_periphs++];
+        periph->addr = src;
+        ::printf("SITL: peripheral %s:%u joined lockstep\n",
+                 inet_ntoa(src.sin_addr), (unsigned)ntohs(src.sin_port));
+    }
+    periph->last_ack_us = ack.timestamp_us;
+    periph->last_heard_ms = wall_millis();
+}
+
+// wall-clock milliseconds; the simulation clock must not be used for
+// the lockstep eviction timeout as it is frozen while we wait
+uint64_t SITL_State::wall_millis(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return uint64_t(ts.tv_sec) * 1000ULL + ts.tv_nsec / 1000000ULL;
+}
+
+/*
+  strict simulated-peripheral lockstep: do not return (and so do not
+  advance the simulation) until every registered peripheral has
+  acknowledged consuming the state packet with this timestamp.  A
+  peripheral which stops responding for a wall-clock second is
+  presumed dead (the harness SIGTERMs them with no notice) and is
+  evicted; it re-registers on its next ack
+ */
+void SITL_State::wait_periph_acks(const uint64_t timestamp_us)
+{
+    while (true) {
+        bool all_acked = true;
+        const uint64_t now_ms = wall_millis();
+        for (uint8_t i=0; i<num_mcast_periphs; ) {
+            if (mcast_periphs[i].last_ack_us >= timestamp_us) {
+                i++;
+                continue;
+            }
+            if (now_ms - mcast_periphs[i].last_heard_ms > PERIPH_EVICT_TIMEOUT_MS) {
+                ::fprintf(stderr, "SITL: evicting unresponsive peripheral %s:%u from lockstep\n",
+                          inet_ntoa(mcast_periphs[i].addr.sin_addr),
+                          (unsigned)ntohs(mcast_periphs[i].addr.sin_port));
+                if (num_evicted_periphs < MAX_MCAST_PERIPHS) {
+                    evicted_periphs[num_evicted_periphs].addr = mcast_periphs[i].addr;
+                    evicted_periphs[num_evicted_periphs].evicted_ms = now_ms;
+                    num_evicted_periphs++;
+                }
+                mcast_periphs[i] = mcast_periphs[--num_mcast_periphs];
+                continue;
+            }
+            all_acked = false;
+            i++;
+        }
+        if (all_acked) {
+            return;
+        }
+        struct pollfd pfd { servo_in_fd, POLLIN, 0 };
+        poll(&pfd, 1, PERIPH_ACK_POLL_MS);
+        check_servo_input();
+    }
+}
+
+/*
+  overwrite input structure with multicast values
+ */
+void SITL_State::multicast_servo_update(struct sitl_input &input)
+{
+    for (uint8_t i=0; i<SITL_NUM_CHANNELS; i++) {
+        const uint32_t mask = (1U<<i);
+        const uint32_t can_mask = uint32_t(_sitl->can_servo_mask.get());
+        if (can_mask & mask) {
+            input.servos[i] = mc_servo[i];
+        }
+    }
+}
 #endif

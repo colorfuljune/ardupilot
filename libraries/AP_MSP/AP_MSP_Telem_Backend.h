@@ -16,15 +16,26 @@
 */
 #pragma once
 
+#include "AP_MSP_config.h"
+
+#if HAL_MSP_ENABLED
+
 #include <AP_RCTelemetry/AP_RCTelemetry.h>
+#include <AP_SerialManager/AP_SerialManager.h>
+#include <AP_OSD/AP_OSD.h>
+#if AP_MSP_VIDEOTX_ENABLED
+#include <AP_VideoTX/AP_VideoTX.h>
+#endif
 
 #include "msp.h"
 
 #include <time.h>
 
-#if HAL_MSP_ENABLED
-
+#if AP_MSP_VIDEOTX_ENABLED
+#define MSP_TIME_SLOT_MAX 13
+#else
 #define MSP_TIME_SLOT_MAX 12
+#endif
 #define CELLFULL 4.35
 #define MSP_TXT_BUFFER_SIZE     15U // 11 + 3 utf8 chars + terminator
 #define MSP_TXT_VISIBLE_CHARS   11U
@@ -33,6 +44,7 @@ class AP_MSP;
 
 class AP_MSP_Telem_Backend : AP_RCTelemetry
 {
+friend AP_MSP;
 public:
     AP_MSP_Telem_Backend(AP_HAL::UARTDriver *uart);
 
@@ -52,7 +64,7 @@ public:
         int32_t lon;
         uint16_t alt_m;
         uint16_t speed_cms;
-        int16_t ground_course_cd;
+        uint16_t ground_course_dd;
     } gps_state_t;
 
     typedef struct airspeed_state_s {
@@ -77,6 +89,17 @@ public:
     void process_incoming_data();     // incoming data
     void process_outgoing_data();     // push outgoing data
 
+#if HAL_WITH_MSP_DISPLAYPORT
+    // displayport commands
+    // betaflight/src/main/io/displayport_msp.c
+    virtual void msp_displayport_heartbeat();
+    virtual void msp_displayport_grab();
+    virtual void msp_displayport_release();
+    virtual void msp_displayport_clear_screen();
+    virtual void msp_displayport_draw_screen();
+    virtual void msp_displayport_write_string(uint8_t col, uint8_t row, bool blink, const char *string, const uint8_t font_table);
+    virtual void msp_displayport_set_options(const uint8_t font_index, const uint8_t screen_resolution);
+#endif
 protected:
     enum msp_packet_type : uint8_t {
         EMPTY_SLOT = 0,
@@ -89,10 +112,13 @@ protected:
         ALTITUDE,
         ANALOG,
         BATTERY_STATE,
-#ifdef HAVE_AP_BLHELI_SUPPORT
+#if HAL_WITH_ESC_TELEM
         ESC_SENSOR_DATA,
 #endif
         RTC_DATETIME,
+#if AP_MSP_VIDEOTX_ENABLED
+        VTX_PARAMETERS,
+#endif
     };
 
     const uint16_t msp_packet_type_map[MSP_TIME_SLOT_MAX] = {
@@ -106,10 +132,13 @@ protected:
         MSP_ALTITUDE,
         MSP_ANALOG,
         MSP_BATTERY_STATE,
-#ifdef HAVE_AP_BLHELI_SUPPORT
+#if HAL_WITH_ESC_TELEM
         MSP_ESC_SENSOR_DATA,
 #endif
-        MSP_RTC
+        MSP_RTC,
+#if AP_MSP_VIDEOTX_ENABLED
+        MSP_VTX_CONFIG,
+#endif
     };
 
     /* UTF-8 encodings
@@ -133,6 +162,26 @@ protected:
     // MSP decoder status
     MSP::msp_port_t _msp_port;
 
+#if AP_MSP_VIDEOTX_ENABLED
+    // set once the VTX has uploaded its own config (MSP_SET_VTX_CONFIG),
+    // completing the betaflight-style boot handshake; gates deviceIsReady
+    bool _vtx_config_received;
+    // push the VTX config on change, repeated this many times for delivery
+    // robustness; the air unit does not report its state back so we cannot
+    // confirm receipt the way the Tramp backend does
+    static const uint8_t MSP_VTX_CONFIG_PUSH_COUNT = 3;
+    uint8_t _vtx_config_push_remaining;
+    // last configured VTX settings pushed to the air unit, to detect changes
+    struct {
+        uint8_t band;
+        uint8_t channel;
+        uint16_t freq_mhz;
+        uint16_t power_mw;
+        bool pitmode;
+        bool valid;
+    } _vtx_pushed;
+#endif  // AP_MSP_VIDEOTX_ENABLED
+
     // passthrough WFQ scheduler
     bool is_packet_ready(uint8_t idx, bool queue_empty) override;
     void process_packet(uint8_t idx) override;
@@ -145,18 +194,22 @@ protected:
 
     // telemetry helpers
     uint8_t calc_cell_count(float battery_voltage);
-    float get_vspeed_ms(void);
-    void update_home_pos(home_state_t &home_state);
-    void update_battery_state(battery_state_t &_battery_state);
-    void update_gps_state(gps_state_t &gps_state);
-    void update_airspeed(airspeed_state_t &airspeed_state);
-    void update_flight_mode_str(char *flight_mode_str, bool wind_enabled);
+    virtual float get_vspeed_ms(void) const;
+    virtual bool get_rssi(float &rssi) const;
+    virtual void update_home_pos(home_state_t &home_state);
+    virtual void update_battery_state(battery_state_t &_battery_state);
+    virtual void update_gps_state(gps_state_t &gps_state);
+    virtual void update_airspeed(airspeed_state_t &airspeed_state);
+    virtual void update_flight_mode_str(char *flight_mode_str, uint8_t size, bool wind_enabled);
 
     // MSP parsing
     void msp_process_received_command();
     MSP::MSPCommandResult msp_process_command(MSP::msp_packet_t *cmd, MSP::msp_packet_t *reply);
     MSP::MSPCommandResult msp_process_sensor_command(uint16_t cmd_msp, MSP::sbuf_t *src);
-    MSP::MSPCommandResult msp_process_out_command(uint16_t cmd_msp, MSP::sbuf_t *dst);
+    MSP::MSPCommandResult msp_process_out_command(uint16_t cmd_msp, MSP::sbuf_t *src, MSP::sbuf_t *dst);
+
+    // MSP send
+    void msp_send_packet(uint16_t cmd, MSP::msp_version_e msp_version, const void *p, uint16_t size, bool is_request);
 
     // MSP sensor command processing
     void msp_handle_opflow(const MSP::msp_opflow_data_message_t &pkt);
@@ -164,26 +217,29 @@ protected:
     void msp_handle_gps(const MSP::msp_gps_data_message_t &pkt);
     void msp_handle_compass(const MSP::msp_compass_data_message_t &pkt);
     void msp_handle_baro(const MSP::msp_baro_data_message_t &pkt);
+    void msp_handle_airspeed(const MSP::msp_airspeed_data_message_t &pkt);
 
     // implementation specific helpers
+    // we only set arming status
     // custom masks are needed for vendor specific settings
-    virtual uint32_t get_osd_flight_mode_bitmask(void)
-    {
-        return 0;
-    }
+    virtual uint32_t get_osd_flight_mode_bitmask(void);
 
-    virtual bool is_scheduler_enabled() = 0;                            // only osd backends should allow a push type telemetry
+    virtual bool is_scheduler_enabled() const = 0;                            // only osd backends should allow a push type telemetry
+    virtual bool use_msp_thread() const {return true;};                       // is this backend hanlded by the MSP thread?
+    virtual AP_SerialManager::SerialProtocol get_serial_protocol() const = 0;
+    virtual bool displaying_stats_screen() const;
 
     // implementation specific MSP out command processing
-    virtual MSP::MSPCommandResult msp_process_out_api_version(MSP::sbuf_t *dst) = 0;
-    virtual MSP::MSPCommandResult msp_process_out_fc_version(MSP::sbuf_t *dst) = 0;
-    virtual MSP::MSPCommandResult msp_process_out_fc_variant(MSP::sbuf_t *dst) = 0;
+    virtual MSP::MSPCommandResult msp_process_out_api_version(MSP::sbuf_t *dst);
+    virtual MSP::MSPCommandResult msp_process_out_fc_version(MSP::sbuf_t *dst);
+    virtual MSP::MSPCommandResult msp_process_out_fc_variant(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_uid(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_board_info(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_build_info(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_name(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_status(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_osd_config(MSP::sbuf_t *dst);
+    virtual MSP::MSPCommandResult msp_process_out_osd_canvas(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_raw_gps(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_comp_gps(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_attitude(MSP::sbuf_t *dst);
@@ -193,6 +249,25 @@ protected:
     virtual MSP::MSPCommandResult msp_process_out_esc_sensor_data(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_rtc(MSP::sbuf_t *dst);
     virtual MSP::MSPCommandResult msp_process_out_rc(MSP::sbuf_t *dst);
+#if AP_MSP_VIDEOTX_ENABLED
+    virtual MSP::MSPCommandResult msp_process_out_vtx_config(MSP::sbuf_t *src, MSP::sbuf_t *dst);
+    virtual MSP::MSPCommandResult msp_process_in_vtx_config(MSP::sbuf_t *src, MSP::sbuf_t *dst);
+    virtual MSP::MSPCommandResult msp_process_in_vtxtable_powerlevel(MSP::sbuf_t *src, MSP::sbuf_t *dst);
+    // true when a VTX config push is due this scheduler tick (push on change,
+    // then repeat MSP_VTX_CONFIG_PUSH_COUNT times)
+    bool vtx_should_push_config();
+#endif  // AP_MSP_VIDEOTX_ENABLED
+
+private:
+#if AP_MSP_VIDEOTX_ENABLED
+    // helpers operating on the AP::vtx() singleton, applying a betaflight-style
+    // MSP_SET_VTX_CONFIG / MSP_SET_VTXTABLE_POWERLEVEL onto the configured VTX
+    void msp_vtx_set_band_and_channel(uint8_t band, uint8_t channel);
+    void msp_vtx_set_frequency(uint16_t freq_mhz);
+    void msp_vtx_set_power_index(uint8_t index);
+    uint8_t msp_vtx_get_power_index() const;
+    void msp_vtx_set_pitmode(bool pitmode);
+#endif  // AP_MSP_VIDEOTX_ENABLED
 };
 
 #endif  //HAL_MSP_ENABLED

@@ -29,17 +29,31 @@
 
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/select.h>
 #include <termios.h>
 #include <sys/time.h>
+#include <arpa/inet.h>
+#if HAL_SITL_WASM_ENABLED
+#include <emscripten/emscripten.h>
+#endif
 
 #include "UARTDriver.h"
 #include "SITL_State.h"
+#include "SITL_Multicast.h"
+#if HAL_GCS_ENABLED
 #include <AP_HAL/utility/packetise.h>
+#endif
+
+#include <AP_Vehicle/AP_Vehicle_Type.h>
+#include <AP_Filesystem/AP_Filesystem.h>
+#include <AP_Common/ExpandingString.h>
+#include <AP_HAL/utility/Socket_native.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -49,13 +63,19 @@ bool UARTDriver::_console;
 
 /* UARTDriver method implementations */
 
-void UARTDriver::begin(uint32_t baud, uint16_t rxSpace, uint16_t txSpace)
+void UARTDriver::_begin(uint32_t baud, uint16_t rxSpace, uint16_t txSpace)
 {
-    if (_portNumber >= ARRAY_SIZE(_sitlState->_uart_path)) {
-        AP_HAL::panic("port number out of range; you may need to extend _sitlState->_uart_path");
+    if (baud == 0 && rxSpace == 0 && txSpace == 0) {
+        // this is a claim of the uart for the current thread, which
+        // is currently not implemented in SITL
+        return;
     }
 
-    const char *path = _sitlState->_uart_path[_portNumber];
+    if (_portNumber >= ARRAY_SIZE(_sitlState->_serial_path)) {
+        AP_HAL::panic("port number out of range; you may need to extend _sitlState->_serial_path");
+    }
+
+    const char *path = _sitlState->_serial_path[_portNumber];
 
     if (baud != 0) {
         _uart_baudrate = baud;
@@ -64,16 +84,17 @@ void UARTDriver::begin(uint32_t baud, uint16_t rxSpace, uint16_t txSpace)
     if (strcmp(path, "GPS1") == 0) {
         /* gps */
         _connected = true;
-        _fd = _sitlState->gps_pipe(0);
+        _sim_serial_device = _sitlState->create_serial_sim("gps", "1", _portNumber);
     } else if (strcmp(path, "GPS2") == 0) {
         /* 2nd gps */
         _connected = true;
-        _fd = _sitlState->gps_pipe(1);
+        _sim_serial_device = _sitlState->create_serial_sim("gps", "2", _portNumber);
     } else {
         /* parse type:args:flags string for path. 
            For example:
              tcp:5760:wait    // tcp listen on port 5760
              tcp:0:wait       // tcp listen on use base_port + 0
+             uds:APM-UDS-serial0:wait
              tcpclient:192.168.2.15:5762
              udpclient:127.0.0.1
              udpclient:127.0.0.1:14550
@@ -81,16 +102,35 @@ void UARTDriver::begin(uint32_t baud, uint16_t rxSpace, uint16_t txSpace)
              mcast:239.255.145.50:14550
              uart:/dev/ttyUSB0:57600
              sim:ParticleSensor_SDS021:
+             file:/tmp/my-device-capture.BIN
+             logic_async_csv:/tmp/logic_async.csv:
+             wasm
          */
         char *saveptr = nullptr;
         char *s = strdup(path);
         char *devtype = strtok_r(s, ":", &saveptr);
         char *args1 = strtok_r(nullptr, ":", &saveptr);
         char *args2 = strtok_r(nullptr, ":", &saveptr);
+#if APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_ArduPlane)
+        if (_portNumber == 1 && AP::sitl()->adsb_plane_count >= 0) {
+            // this is ordinarily port 5762.  The ADSB simulation assumed
+            // this port, so if enabled we assume we'll be doing ADSB...
+            // add sanity check here that we're doing mavlink on this port?
+            ::printf("SIM-ADSB connection on SERIAL%u\n", _portNumber);
+            _connected = true;
+            _sim_serial_device = _sitlState->create_serial_sim("adsb", nullptr, _portNumber);
+        } else
+#endif
         if (strcmp(devtype, "tcp") == 0) {
             uint16_t port = atoi(args1);
             bool wait = (args2 && strcmp(args2, "wait") == 0);
             _tcp_start_connection(port, wait);
+        } else if (strcmp(devtype, "uds") == 0) {
+            if (args1 == nullptr || args1[0] == '\0') {
+                AP_HAL::panic("Invalid Unix domain socket path: %s", path);
+            }
+            bool wait = (args2 && strcmp(args2, "wait") == 0);
+            _unix_start_connection(args1, wait);
         } else if (strcmp(devtype, "tcpclient") == 0) {
             if (args2 == nullptr) {
                 AP_HAL::panic("Invalid tcp client path: %s", path);
@@ -99,16 +139,17 @@ void UARTDriver::begin(uint32_t baud, uint16_t rxSpace, uint16_t txSpace)
             _tcp_start_client(args1, port);
         } else if (strcmp(devtype, "uart") == 0) {
             uint32_t baudrate = args2? atoi(args2) : baud;
-            ::printf("UART connection %s:%u\n", args1, baudrate);
-            _uart_path = strdup(args1);
+            if (_uart_path == nullptr) {
+                ::printf("UART connection %s:%u\n", args1, baudrate);
+                _uart_path = strdup(args1);
+            }
             _uart_baudrate = baudrate;
             _uart_start_connection();
         } else if (strcmp(devtype, "sim") == 0) {
             if (!_connected) {
-                ::printf("SIM connection %s:%s on port %u\n", args1, args2, _portNumber);
+                ::printf("SIM connection %s:%s on SERIAL%u\n", args1, args2, _portNumber);
                 _connected = true;
-                _fd = _sitlState->sim_fd(args1, args2);
-                _fd_write = _sitlState->sim_fd_write(args1);
+                _sim_serial_device = _sitlState->create_serial_sim(args1, args2, _portNumber);
             }
         } else if (strcmp(devtype, "udpclient") == 0) {
             // udp client connection
@@ -126,25 +167,66 @@ void UARTDriver::begin(uint32_t baud, uint16_t rxSpace, uint16_t txSpace)
                 ::printf("UDP multicast connection %s:%u\n", ip, port);
                 _udp_start_multicast(ip, port);
             }
+#if HAL_SITL_WASM_ENABLED
+        } else if (strcmp(devtype, "wasm") == 0) {
+            _connected = true;
+            _wasm = true;
+#endif
+        } else if (strcmp(devtype,"none") == 0) {
+            // skipping port
+            ::printf("Skipping port %s\n", args1);
+        } else if (strcmp(devtype, "file") == 0) {
+            if (_connected) {
+                AP::FS().close(_fd);
+            }
+            ::printf("FILE connection %s\n", args1);
+            _fd = AP::FS().open(args1, O_RDONLY);
+            if (_fd == -1) {
+                AP_HAL::panic("Failed to open (%s): %m", args1);
+            }
+            _connected = true;
+        } else if (strcmp(devtype, "outfile") == 0) {
+            if (_connected) {
+                AP::FS().close(_fd);
+            }
+            ::printf("FILE output connection %s\n", args1);
+            _fd = AP::FS().open(args1, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+            if (_fd == -1) {
+                AP_HAL::panic("Failed to open (%s): %m", args1);
+            }
+            _connected = true;
+        } else if (strcmp(devtype, "logic_async_csv") == 0) {
+            if (_connected) {
+                AP::FS().close(_fd);
+            }
+            ::printf("logic_async_csv connection %s\n", args1);
+            _fd = AP::FS().open(args1, O_RDONLY);
+            if (_fd == -1) {
+                AP_HAL::panic("Failed to open (%s): %m", args1);
+            }
+            _connected = true;
+            logic_async_csv.active = true;
         } else {
             AP_HAL::panic("Invalid device path: %s", path);
         }
         free(s);
     }
 
+    if (_sim_serial_device != nullptr) {
+        _sim_serial_device->set_autopilot_baud(baud);
+    }
+
     if (hal.console != this) { // don't clear USB buffers (allows early startup messages to escape)
         _readbuffer.clear();
         _writebuffer.clear();
     }
-
-    _set_nonblocking(_fd);
 }
 
-void UARTDriver::end()
+void UARTDriver::_end()
 {
 }
 
-uint32_t UARTDriver::available(void)
+uint32_t UARTDriver::_available(void)
 {
     _check_connection();
 
@@ -164,69 +246,111 @@ uint32_t UARTDriver::txspace(void)
     return _writebuffer.space();
 }
 
-int16_t UARTDriver::read(void)
+void UARTDriver::set_flow_control(enum flow_control flow_control_setting)
 {
-    if (available() <= 0) {
-        return -1;
+    _flow_control = flow_control_setting;
+    if (_flow_control == FLOW_CONTROL_AUTO) {
+        // reset auto-detection state
+        _auto_flow_start_ms = 0;
+        _auto_flow_detected = false;
     }
-    uint8_t c;
-    _readbuffer.read(&c, 1);
-    return c;
+    // If already connected on a real UART path, apply immediately
+    if (_uart_path && _connected && _fd != -1) {
+        struct termios t {};
+        if (tcgetattr(_fd, &t) == 0) {
+            if (_flow_control != FLOW_CONTROL_DISABLE) {
+                t.c_cflag |= CRTSCTS;
+            } else {
+                t.c_cflag &= ~CRTSCTS;
+            }
+            tcsetattr(_fd, TCSANOW, &t);
+        }
+    }
 }
 
-bool UARTDriver::discard_input(void)
+enum AP_HAL::UARTDriver::flow_control UARTDriver::get_flow_control(void)
+{
+    if (_uart_path) {
+        return _flow_control;
+    }
+    return FLOW_CONTROL_ENABLE;
+}
+
+ssize_t UARTDriver::_read(uint8_t *buffer, uint16_t count)
+{
+    const ssize_t ret = _readbuffer.read(buffer, count);
+    _rx_stats_bytes += ret;
+    return ret;
+}
+
+bool UARTDriver::_discard_input(void)
 {
     _readbuffer.clear();
     return true;
 }
 
-void UARTDriver::flush(void)
+void UARTDriver::_flush(void)
 {
+#if HAL_SITL_WASM_ENABLED
+    if (_wasm) {
+        return;
+    }
+#endif
+
+    // flush the write buffer - but don't fail and don't
+    // infinitely-loop.  This is not a good definition of "flush", but
+    // it was judged that we had to return from this function even if
+    // we hadn't actually done our job.
+    uint32_t start_ms = AP_HAL::millis();
+    while (AP_HAL::millis() - start_ms < 1000) {
+        if (_writebuffer.available() == 0) {
+            break;
+        }
+        _timer_tick();
+    }
+
+    // ensure that the outbound TCP queue is also empty...
+    start_ms = AP_HAL::millis();
+    while (AP_HAL::millis() - start_ms < 1000) {
+        if (((HALSITL::UARTDriver*)hal.serial(0))->get_system_outqueue_length() == 0) {
+            break;
+        }
+        usleep(1000);
+    }
 }
 
-// size_t UARTDriver::write(uint8_t c)
-// {
-//     if (txspace() <= 0) {
-//         return 0;
-//     }
-//     _writebuffer.write(&c, 1);
-//     return 1;
-// }
-
-size_t UARTDriver::write(uint8_t c)
+size_t UARTDriver::_write(const uint8_t *buffer, size_t size)
 {
-    return write(&c, 1);
-}
-size_t UARTDriver::write(const uint8_t *buffer, size_t size)
-{
-    if (txspace() <= size) {
-        size = txspace();
+    const auto _txspace = txspace();
+    if (_txspace < size) {
+        size = _txspace;
     }
     if (size <= 0) {
         return 0;
     }
-    if (_unbuffered_writes) {
-        // write buffer straight to the file descriptor
-        int fd = _fd_write;
-        if (fd == -1) {
-            fd = _fd;
-        }
-        const ssize_t nwritten = ::write(fd, buffer, size);
-        if (nwritten == -1 && errno != EAGAIN && _uart_path) {
-            if (_fd_write != -1) {
-                close(_fd_write);
-                _fd_write = -1;
+
+        /*
+          simulate byte loss at the link layer
+         */
+        uint8_t lost_byte = 0;
+#if !defined(HAL_BUILD_AP_PERIPH)
+        SITL::SIM *_sitl = AP::sitl();
+
+        if (_sitl && _sitl->uart_byte_loss_pct > 0) {
+            if (fabsf(rand_float()) < _sitl->uart_byte_loss_pct.get() * 0.01 * size) {
+                lost_byte = 1;
             }
-            close(_fd);
-            _fd = -1;
-            _connected = false;
         }
-        // these have no effect
-        tcdrain(_fd);
-    } else {
-        _writebuffer.write(buffer, size);
+#endif // HAL_BUILD_AP_PERIPH
+
+    // Include lost byte in tx count, we think we sent it even though it was never added to the write buffer
+    _tx_stats_bytes += lost_byte;
+
+    const size_t ret = _writebuffer.write(buffer, size - lost_byte) + lost_byte;
+    if (_unbuffered_writes) {
+        handle_writing_from_writebuffer_to_device();
     }
-    return size;
+    return ret;
 }
 
     
@@ -238,6 +362,7 @@ void UARTDriver::_tcp_start_connection(uint16_t port, bool wait_for_connection)
 {
     int one=1;
     int ret;
+    struct sockaddr_in _listen_sockaddr {};
 
     if (_connected) {
         return;
@@ -288,7 +413,7 @@ void UARTDriver::_tcp_start_connection(uint16_t port, bool wait_for_connection)
             exit(1);
         }
 
-        fprintf(stderr, "bind port %u for %u\n",
+        fprintf(stderr, "bind port %u for SERIAL%u\n",
                 (unsigned)ntohs(_listen_sockaddr.sin_port),
                 (unsigned)_portNumber);
 
@@ -306,7 +431,7 @@ void UARTDriver::_tcp_start_connection(uint16_t port, bool wait_for_connection)
             exit(1);
         }
 
-        fprintf(stderr, "Serial port %u on TCP port %u\n", _portNumber,
+        fprintf(stderr, "SERIAL%u on TCP port %u\n", _portNumber,
                 (unsigned)ntohs(_listen_sockaddr.sin_port));
         fflush(stdout);
     }
@@ -329,24 +454,141 @@ void UARTDriver::_tcp_start_connection(uint16_t port, bool wait_for_connection)
 
 
 /*
-  start a TCP client connection for the serial port. 
+  start a Unix domain socket connection for the serial port. If
+  wait_for_connection is true then block until a client connects
  */
-void UARTDriver::_tcp_start_client(const char *address, uint16_t port)
+void UARTDriver::_unix_start_connection(const char *path, bool wait_for_connection)
 {
-    int one=1;
-    struct sockaddr_in sockaddr;
-    int ret;
+    struct sockaddr_un listen_sockaddr {};
 
     if (_connected) {
         return;
     }
 
     _use_send_recv = true;
-    
+    _is_unix_socket = true;
+
+    if (_console) {
+        _connected = true;
+        _use_send_recv = false;
+        _listen_fd = -1;
+        _fd = 1;
+        return;
+    }
+
     if (_fd != -1) {
         close(_fd);
     }
 
+    if (_listen_fd == -1) {
+        if (strlen(path) >= sizeof(listen_sockaddr.sun_path)) {
+            fprintf(stderr, "Unix domain socket path is too long: %s\n", path);
+            exit(1);
+        }
+
+        listen_sockaddr.sun_family = AF_UNIX;
+        strncpy(listen_sockaddr.sun_path, path, sizeof(listen_sockaddr.sun_path) - 1);
+
+        _listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (_listen_fd == -1) {
+            fprintf(stderr, "socket failed - %s\n", strerror(errno));
+            exit(1);
+        }
+        if (fcntl(_listen_fd, F_SETFD, FD_CLOEXEC) == -1) {
+            fprintf(stderr, "fcntl failed on setting FD_CLOEXEC - %s\n", strerror(errno));
+            exit(1);
+        }
+
+        int ret = bind(_listen_fd, (struct sockaddr *)&listen_sockaddr, sizeof(listen_sockaddr));
+        if (ret == -1 && errno == EADDRINUSE) {
+            struct stat path_stat;
+            if (lstat(path, &path_stat) == 0 && S_ISSOCK(path_stat.st_mode)) {
+                int probe_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+                int connect_ret = probe_fd == -1 ? -1 : connect(
+                    probe_fd,
+                    (struct sockaddr *)&listen_sockaddr,
+                    sizeof(listen_sockaddr));
+                int connect_errno = errno;
+                if (probe_fd != -1) {
+                    close(probe_fd);
+                }
+                if (connect_ret == -1 && connect_errno == ECONNREFUSED) {
+                    // A newly bound stream socket also refuses connections in
+                    // the brief interval before listen(). Give it time to
+                    // become live before treating the path as stale.
+                    usleep(100000);
+                    probe_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+                    connect_ret = probe_fd == -1 ? -1 : connect(
+                        probe_fd,
+                        (struct sockaddr *)&listen_sockaddr,
+                        sizeof(listen_sockaddr));
+                    connect_errno = errno;
+                    if (probe_fd != -1) {
+                        close(probe_fd);
+                    }
+
+                    struct stat current_path_stat;
+                    if (connect_ret == -1 && connect_errno == ECONNREFUSED &&
+                        lstat(path, &current_path_stat) == 0 &&
+                        S_ISSOCK(current_path_stat.st_mode) &&
+                        current_path_stat.st_dev == path_stat.st_dev &&
+                        current_path_stat.st_ino == path_stat.st_ino &&
+                        unlink(path) == 0) {
+                        ret = bind(_listen_fd, (struct sockaddr *)&listen_sockaddr, sizeof(listen_sockaddr));
+                    }
+                }
+            }
+        }
+        if (ret == -1) {
+            fprintf(stderr, "bind failed on Unix domain socket %s - %s\n", path, strerror(errno));
+            exit(1);
+        }
+        SocketAPM_native::register_unix_path(_listen_fd, path);
+
+        if (listen(_listen_fd, 5) == -1) {
+            fprintf(stderr, "listen failed - %s\n", strerror(errno));
+            exit(1);
+        }
+
+        fprintf(stderr, "SERIAL%u on Unix domain socket %s\n", _portNumber, path);
+        fflush(stdout);
+    }
+
+    if (wait_for_connection) {
+        fprintf(stdout, "Waiting for connection ....\n");
+        fflush(stdout);
+        _fd = accept(_listen_fd, nullptr, nullptr);
+        if (_fd == -1) {
+            fprintf(stderr, "accept() error - %s", strerror(errno));
+            exit(1);
+        }
+        if (fcntl(_fd, F_SETFD, FD_CLOEXEC) == -1) {
+            fprintf(stderr, "fcntl failed on setting FD_CLOEXEC - %s\n", strerror(errno));
+            exit(1);
+        }
+        _connected = true;
+        fprintf(stdout, "Connection on Unix domain socket for SERIAL%u\n", _portNumber);
+    }
+}
+
+
+/*
+  start a TCP client connection for the serial port. 
+ */
+void UARTDriver::_tcp_start_client(const char *address, uint16_t port)
+{
+
+    if (_connected) {
+        return;
+    }
+
+    _use_send_recv = true;
+
+    if (_fd != -1) {
+        close(_fd);
+    }
+
+    struct sockaddr_in sockaddr;
     memset(&sockaddr,0,sizeof(sockaddr));
 
 #ifdef HAVE_SOCK_SIN_LEN
@@ -356,22 +598,41 @@ void UARTDriver::_tcp_start_client(const char *address, uint16_t port)
     sockaddr.sin_family = AF_INET;
     sockaddr.sin_addr.s_addr = inet_addr(address);
 
-    _fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (_fd == -1) {
-        fprintf(stderr, "socket failed - %s\n", strerror(errno));
-        exit(1);
-    }
-    ret = fcntl(_fd, F_SETFD, FD_CLOEXEC);
-    if (ret == -1) {
-        fprintf(stderr, "fcntl failed on setting FD_CLOEXEC - %s\n", strerror(errno));
-        exit(1);
+    constexpr auto one=1;
+    int ret;
+    // Retry for up to 30 seconds.  Companion processes (e.g. AP_Periph
+    // connecting to an ArduPlane SITL TCP listener for a PPP link) can be
+    // launched ahead of the peer's socket, so a few seconds of grace is
+    // not enough when the peer is also rebuilding.
+    constexpr uint8_t max_attempts = 30;
+    for (uint8_t attempt = 0; attempt < max_attempts; ++attempt) {
+        _fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (_fd == -1) {
+            fprintf(stderr, "socket failed - %s\n", strerror(errno));
+            exit(1);
+        }
+        ret = fcntl(_fd, F_SETFD, FD_CLOEXEC);
+        if (ret == -1) {
+            fprintf(stderr, "fcntl failed on setting FD_CLOEXEC - %s\n", strerror(errno));
+            exit(1);
+        }
+
+        /* we want to be able to re-use ports quickly */
+        setsockopt(_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+        ret = connect(_fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+        if (ret == 0) {
+            break;
+        }
+        fprintf(stderr, "connect failed on port %u - %s at %d retrying\n",
+                (unsigned) ntohs(sockaddr.sin_port), strerror(errno), AP_HAL::millis());
+        close(_fd);
+        // If connection failed, wait for a bit before retrying
+        sleep(1);
     }
 
-    /* we want to be able to re-use ports quickly */
-    setsockopt(_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-    ret = connect(_fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
     if (ret == -1) {
+        close(_fd);
         fprintf(stderr, "connect failed on port %u - %s\n",
                 (unsigned)ntohs(sockaddr.sin_port),
                 strerror(errno));
@@ -382,6 +643,7 @@ void UARTDriver::_tcp_start_client(const char *address, uint16_t port)
     setsockopt(_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     fcntl(_fd, F_SETFD, FD_CLOEXEC);
     _connected = true;
+    fprintf(stdout, "New remote connection on serial port %u, p %u at %d\n", _portNumber, (unsigned) ntohs(sockaddr.sin_port), AP_HAL::millis());
 }
 
 
@@ -422,6 +684,7 @@ void UARTDriver::_udp_start_client(const char *address, uint16_t port)
         fprintf(stderr, "fcntl failed on setting FD_CLOEXEC - %s\n", strerror(errno));
         exit(1);
     }
+    fcntl(_fd, F_SETFL, fcntl(_fd, F_GETFL, 0) | O_NONBLOCK);
 
     // try to setup for broadcast, this may fail if insufficient privileges
     int one = 1;
@@ -436,7 +699,9 @@ void UARTDriver::_udp_start_client(const char *address, uint16_t port)
     }
 
     _is_udp = true;
+#if HAL_GCS_ENABLED
     _packetise = true;
+#endif
     _connected = true;
 }
 
@@ -472,6 +737,7 @@ void UARTDriver::_udp_start_multicast(const char *address, uint16_t port)
         fprintf(stderr, "fcntl failed on setting FD_CLOEXEC - %s\n", strerror(errno));
         exit(1);
     }
+    fcntl(_mc_fd, F_SETFL, fcntl(_mc_fd, F_GETFL, 0) | O_NONBLOCK);
     int one = 1;
     if (setsockopt(_mc_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == -1) {
         fprintf(stderr, "setsockopt failed: %s\n", strerror(errno));
@@ -481,6 +747,14 @@ void UARTDriver::_udp_start_multicast(const char *address, uint16_t port)
     // close on exec, to allow reboot
     fcntl(_mc_fd, F_SETFD, FD_CLOEXEC);
 
+#if defined(__CYGWIN__) || defined(__CYGWIN64__) || defined(CYGWIN_BUILD)
+    /*
+      on cygwin you need to bind to INADDR_ANY then use the multicast
+      IP_ADD_MEMBERSHIP to get on the right address
+     */
+    sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+#endif
+    
     ret = bind(_mc_fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
     if (ret == -1) {
         fprintf(stderr, "multicast bind failed on port %u - %s\n",
@@ -489,9 +763,15 @@ void UARTDriver::_udp_start_multicast(const char *address, uint16_t port)
         exit(1);
     }
 
+    // pin to one interface when SITL_MULTICAST_IF_ADDR is set (see
+    // SITL_Multicast.h). CAN_Multicast/SITL_Periph_State/the sim-state
+    // broadcast already do this; this UDP MAVLink mcast link
+    // (--serial5=mcast: etc) did not.
+    const uint32_t mcast_if_addr = sitl_multicast_interface_address();
+
     struct ip_mreq mreq {};
     mreq.imr_multiaddr.s_addr = inet_addr(address);
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    mreq.imr_interface.s_addr = mcast_if_addr;
 
     ret = setsockopt(_mc_fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
     if (ret == -1) {
@@ -503,6 +783,18 @@ void UARTDriver::_udp_start_multicast(const char *address, uint16_t port)
 
     // now start the outgoing connection as an ordinary UDP connection
     _udp_start_client(address, port);
+
+    if (mcast_if_addr != 0) {
+        // also send on that interface; without this the routing table
+        // chooses for the outgoing side too
+        struct in_addr ifaddr {};
+        ifaddr.s_addr = mcast_if_addr;
+        if (setsockopt(_fd, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr)) == -1) {
+            fprintf(stderr, "multicast IP_MULTICAST_IF failed on port %u - %s\n",
+                    (unsigned)port, strerror(errno));
+            exit(1);
+        }
+    }
 }
 
 
@@ -543,13 +835,15 @@ void UARTDriver::_uart_start_connection(void)
     t.c_oflag &= ~(OPOST | ONLCR);
     t.c_lflag &= ~(ISIG | ICANON | IEXTEN | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE);
     t.c_cc[VMIN] = 0;
-    if (_sitlState->use_rtscts()) {
+    if (_flow_control != FLOW_CONTROL_DISABLE) {
         t.c_cflag |= CRTSCTS;
     }
     tcsetattr(_fd, TCSANOW, &t);
 
     // set baudrate
-    set_speed(_uart_baudrate);
+    if (_uart_baudrate != 0) {
+        set_speed(_uart_baudrate);
+    }
 
     _connected = true;
     _use_send_recv = false;
@@ -568,11 +862,18 @@ void UARTDriver::_check_connection(void)
         _fd = accept(_listen_fd, nullptr, nullptr);
         if (_fd != -1) {
             int one = 1;
-            _connected = true;
-            setsockopt(_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+            if (!_is_unix_socket) {
+                setsockopt(_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+            }
             setsockopt(_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-            fcntl(_fd, F_SETFD, FD_CLOEXEC);
-            fprintf(stdout, "New connection on serial port %u\n", _portNumber);
+            if (fcntl(_fd, F_SETFD, FD_CLOEXEC) == -1) {
+                fprintf(stderr, "fcntl failed on setting FD_CLOEXEC - %s\n", strerror(errno));
+                close(_fd);
+                _fd = -1;
+                return;
+            }
+            _connected = true;
+            fprintf(stdout, "New connection on SERIAL%u\n", _portNumber);
         }
     }
 }
@@ -585,6 +886,7 @@ bool UARTDriver::_select_check(int fd)
     if (fd == -1) {
         return false;
     }
+#if !APM_BUILD_TYPE(APM_BUILD_Replay)
     fd_set fds;
     struct timeval tv;
 
@@ -598,14 +900,10 @@ bool UARTDriver::_select_check(int fd)
     if (select(fd+1, &fds, nullptr, nullptr, &tv) == 1) {
         return true;
     }
+#endif
     return false;
 }
 
-void UARTDriver::_set_nonblocking(int fd)
-{
-    unsigned v = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, v | O_NONBLOCK);
-}
 
 bool UARTDriver::set_unbuffered_writes(bool on) {
     if (_fd == -1) {
@@ -618,6 +916,8 @@ bool UARTDriver::set_unbuffered_writes(bool on) {
     v &= ~O_NONBLOCK;
 #if defined(__APPLE__) && defined(__MACH__)
     fcntl(_fd, F_SETFL | F_NOCACHE, v | O_SYNC);
+#elif defined(__OpenBSD__)
+    fcntl(_fd, F_SETFL, v | O_SYNC);
 #else
     fcntl(_fd, F_SETFL, v | O_DIRECT | O_SYNC);
 #endif
@@ -632,32 +932,131 @@ void UARTDriver::_check_reconnect(void)
     _uart_start_connection();
 }
 
-void UARTDriver::_timer_tick(void)
+uint16_t UARTDriver::read_from_async_csv(uint8_t *buffer, uint16_t space)
 {
+    if (_fd == -1) {
+        return 0;
+    }
+    const uint32_t micros = AP_HAL::micros();
+    if (micros < 5000000) {
+        // don't inject for the first several seconds
+        return 0;
+    }
+
+    uint8_t i;
+    for (i=0; i<space; i++) {
+        if (logic_async_csv.loaded) {
+            const uint32_t emit_timestamp_us = micros - logic_async_csv.first_emit_micros_us;
+            const uint32_t data_timestamp_us = logic_async_csv.loaded_data.timestamp_us - logic_async_csv.first_timestamp_us;
+            if (data_timestamp_us > emit_timestamp_us) {
+                return i;
+            }
+            buffer[i] = logic_async_csv.loaded_data.b;
+            logic_async_csv.loaded = false;
+        }
+
+        while (!logic_async_csv.loaded) {
+            uint8_t c;
+            const ssize_t nread = ::read(_fd, &c, 1);
+            if (nread == 0) {
+                // EOF
+                close(_fd);
+                _fd = -1;
+                return i;
+            }
+
+            // feed data into CSV Reader, handle new state:
+            auto retcode = logic_async_csv.csvreader.feed(c);
+            switch (retcode) {
+            case AP_CSVReader::RetCode::OK:
+                continue;
+            case AP_CSVReader::RetCode::ERROR:
+                AP_HAL::panic("Malformed CSV?");
+            case AP_CSVReader::RetCode::TERM_DONE:
+            case AP_CSVReader::RetCode::VECTOR_DONE:
+                switch (logic_async_csv.terms_seen) {
+                case 0:  // start_time
+                    if (!logic_async_csv.done_first_line) {
+                        break;
+                    }
+                    logic_async_csv.loaded_data.timestamp_us = atof((char*)logic_async_csv.term) * 1000000;  // seconds to microseconds
+                    break;
+                case 1:  // data
+                    if (!logic_async_csv.done_first_line) {
+                        break;
+                    }
+                    if (!hex_twochars_to_uint8((const char*)&logic_async_csv.term[2], logic_async_csv.loaded_data.b)) {
+                        // invalid character; panic as we do for other
+                        // malformed-CSV cases rather than silently stopping
+                        AP_HAL::panic("Malformed CSV?");
+                    }
+                    break;
+                case 2:  // error
+                case 3:  // framing error
+                    break;
+                case 4:
+                    AP_HAL::panic("Too many terms in CSV, want (name,type,start_time,duration,data");
+                }
+                logic_async_csv.terms_seen++;
+                if (retcode != AP_CSVReader::RetCode::VECTOR_DONE) {
+                    break;
+                }
+
+                // we've handled the last term, now handle the vector:
+                if (logic_async_csv.terms_seen != 4) {
+                    AP_HAL::panic("Incorrect number off terms in CSV, want (Time [s],Value,Parity Error,Framing Error)");
+                }
+                logic_async_csv.terms_seen = 0;
+                if (!logic_async_csv.done_first_line) {
+                    // skip the headers
+                    logic_async_csv.done_first_line = true;
+                    break;
+                }
+                if (logic_async_csv.first_timestamp_us == 0) {
+                    logic_async_csv.first_timestamp_us = logic_async_csv.loaded_data.timestamp_us;
+                    logic_async_csv.first_emit_micros_us = micros;
+                }
+                logic_async_csv.loaded = true;
+            }
+        }
+    }
+    return i;
+}
+
+void UARTDriver::handle_writing_from_writebuffer_to_device()
+{
+#if HAL_SITL_WASM_ENABLED
+    if (_wasm) {
+        return;
+    }
+#endif
+
+    WITH_SEMAPHORE(write_mtx);
     if (!_connected) {
         _check_reconnect();
         return;
     }
-    ssize_t nwritten;
+    ssize_t nwritten = 0;
     uint32_t max_bytes = 10000;
-    SITL::SITL *_sitl = AP::sitl();
+#if !defined(HAL_BUILD_AP_PERIPH)
+    SITL::SIM *_sitl = AP::sitl();
     if (_sitl && _sitl->telem_baudlimit_enable) {
         // limit byte rate to configured baudrate
-        uint32_t now = AP_HAL::micros();
-        float dt = 1.0e-6 * (now - last_tick_us);
-        max_bytes = _uart_baudrate * dt / 10;
+        // Byte rate is bit rate divided by 10. 8 bits of data + start/stop bits
+        max_bytes = baud_limits.write.max_bytes(float(_uart_baudrate) * 0.1);
         if (max_bytes == 0) {
             return;
         }
-        last_tick_us = now;
     }
-
+#endif
     if (_packetise) {
         uint16_t n = _writebuffer.available();
         n = MIN(n, max_bytes);
+#if HAL_GCS_ENABLED
         if (n > 0) {
             n = mavlink_packetise(_writebuffer, n);
         }
+#endif
         if (n > 0) {
             // keep as a single UDP packet
             uint8_t tmpbuf[n];
@@ -665,6 +1064,7 @@ void UARTDriver::_timer_tick(void)
             ssize_t ret = send(_fd, tmpbuf, n, MSG_DONTWAIT);
             if (ret > 0) {
                 _writebuffer.advance(ret);
+                _tx_stats_bytes += ret;
             }
         }
     } else {
@@ -672,36 +1072,89 @@ void UARTDriver::_timer_tick(void)
         const uint8_t *readptr = _writebuffer.readptr(navail);
         if (readptr && navail > 0) {
             navail = MIN(navail, max_bytes);
-            if (!_use_send_recv) {
-                int fd = _fd_write;
-                if (fd == -1) {
-                    fd = _fd;
-                }
-                nwritten = ::write(fd, readptr, navail);
-                if (nwritten == -1 && errno != EAGAIN && _uart_path) {
-                    if (_fd_write != -1){
-                        close(_fd_write);
-                        _fd_write = -1;
+            if (_sim_serial_device != nullptr) {
+                nwritten = _sim_serial_device->write_to_device((const char*)readptr, navail);
+            } else if (!_use_send_recv) {
+                // For ENABLE/AUTO modes on a real UART, check CTS via ioctl
+                // before writing. This provides reliable flow control on
+                // platforms where kernel CRTSCTS may not work (e.g. macOS
+                // with USB-serial adapters).
+                bool cts_blocked = false;
+                if (_flow_control != FLOW_CONTROL_DISABLE) {
+                    int modem_bits = 0;
+                    if (ioctl(_fd, TIOCMGET, &modem_bits) == 0 &&
+                        !(modem_bits & TIOCM_CTS)) {
+                        // CTS deasserted - remote end asked us to stop sending
+                        cts_blocked = true;
                     }
-                    close(_fd);
-                    _fd = -1;
-                    _connected = false;
+                }
+                if (!cts_blocked) {
+                    nwritten = ::write(_fd, readptr, navail);
+                    if (nwritten == -1 && errno != EAGAIN && _uart_path) {
+                        close(_fd);
+                        _fd = -1;
+                        _connected = false;
+                    }
+                }
+                // AUTO flow control detection: mirror ChibiOS 500ms timeout logic
+                if (_flow_control == FLOW_CONTROL_AUTO && _uart_path) {
+                    if (_auto_flow_start_ms == 0) {
+                        _auto_flow_start_ms = AP_HAL::millis();
+                    }
+                    if (nwritten > 0 && !_auto_flow_detected) {
+                        // first successful write - CTS active
+                        ::printf("SERIAL%u: hardware flow control enabled\n", _portNumber);
+                        _auto_flow_detected = true;
+                    } else if (!_auto_flow_detected && AP_HAL::millis() - _auto_flow_start_ms > 500U) {
+                        // CTS never seen since AUTO was set - actually disable
+                        ::printf("SERIAL%u: hardware flow control not detected, disabled\n", _portNumber);
+                        set_flow_control(FLOW_CONTROL_DISABLE);
+                    }
                 }
             } else {
                 nwritten = send(_fd, readptr, navail, MSG_DONTWAIT);
             }
             if (nwritten > 0) {
                 _writebuffer.advance(nwritten);
+                _tx_stats_bytes += nwritten;
             }
         }
+    }
+}
+
+void UARTDriver::handle_reading_from_device_to_readbuffer()
+{
+#if HAL_SITL_WASM_ENABLED
+    if (_wasm) {
+        return;
+    }
+#endif
+
+    if (!_connected) {
+        _check_reconnect();
+        return;
     }
 
     uint32_t space = _readbuffer.space();
     if (space == 0) {
         return;
     }
+
+    uint32_t max_bytes = 10000;
+#if !defined(HAL_BUILD_AP_PERIPH)
+    SITL::SIM *_sitl = AP::sitl();
+    if (_sitl && _sitl->telem_baudlimit_enable) {
+        // limit byte rate to configured baudrate
+        // Byte rate is bit rate divided by 10. 8 bits of data + start/stop bits
+        max_bytes = baud_limits.read.max_bytes(float(_uart_baudrate) * 0.1);
+        if (max_bytes == 0) {
+            return;
+        }
+    }
+#endif
+
     space = MIN(space, max_bytes);
-    
+
     char buf[space];
     ssize_t nread = 0;
     if (_mc_fd >= 0) {
@@ -727,6 +1180,10 @@ void UARTDriver::_timer_tick(void)
                 nread = 0;
             }
         }
+    } else if (_sim_serial_device != nullptr) {
+        nread = _sim_serial_device->read_from_device(buf, space);
+    } else if (logic_async_csv.active) {
+        nread = read_from_async_csv((uint8_t*)buf, space);
     } else if (!_use_send_recv) {
         if (!_select_check(_fd)) {
             return;
@@ -745,8 +1202,16 @@ void UARTDriver::_timer_tick(void)
             close(_fd);
             _fd = -1;
             _connected = false;
-            fprintf(stdout, "Closed connection on serial port %u\n", _portNumber);
+            fprintf(stdout, "Closed connection on SERIAL%u\n", _portNumber);
             fflush(stdout);
+#if defined(__CYGWIN__) || defined(__CYGWIN64__) || defined(CYGWIN_BUILD)
+            if (_portNumber == 0) {
+                // exit on cygwin port 0 is almost certainly closing the
+                // connection in MissionPlanner SITL. We want to exit or
+                // we leave a stray process which confuses restart
+                exit(0);
+            }
+#endif
             return;
         }
     }
@@ -755,6 +1220,13 @@ void UARTDriver::_timer_tick(void)
         _receive_timestamp = AP_HAL::micros64();
     }
 }
+
+void UARTDriver::_timer_tick(void)
+{
+    handle_writing_from_writebuffer_to_device();
+    handle_reading_from_device_to_readbuffer();
+}
+
 
 /*
   return timestamp estimate in microseconds for when the start of
@@ -782,6 +1254,11 @@ uint64_t UARTDriver::receive_time_constraint_us(uint16_t nbytes)
 
 ssize_t UARTDriver::get_system_outqueue_length() const
 {
+#if HAL_SITL_WASM_ENABLED
+    if (_wasm) {
+        return 0;
+    }
+#endif
     if (!_connected) {
         return 0;
     }
@@ -800,5 +1277,105 @@ ssize_t UARTDriver::get_system_outqueue_length() const
 #endif
 }
 
-#endif // CONFIG_HAL_BOARD
+ssize_t UARTDriver::get_system_outqueue_limit() const
+{
+    // AF_UNIX TIOCOUTQ includes per-write kernel accounting and data already
+    // delivered to the peer. Allow enough room for several full UART writes
+    // before applying the anti-lag throttle, while retaining the TCP limit.
+    return _is_unix_socket ? 65536 : 1024;
+}
 
+uint32_t UARTDriver::bw_in_bytes_per_second() const
+{
+    // if connected, assume at least a 10/100Mbps connection if not limited
+    bool baud_limit = false;
+#if !defined(HAL_BUILD_AP_PERIPH)
+    SITL::SIM *_sitl = AP::sitl();
+    baud_limit = (_sitl != nullptr) && _sitl->telem_baudlimit_enable;
+#endif
+    const uint32_t bitrate = (_connected && !baud_limit) ? 10E6 : _uart_baudrate;
+    return bitrate/10; // convert bits to bytes minus overhead
+};
+
+#if HAL_SITL_WASM_ENABLED
+size_t UARTDriver::wasm_write(const uint8_t *buf, size_t len)
+{
+    if (!_wasm) {
+        return 0;
+    }
+    const size_t written = _readbuffer.write(buf, len);
+    if (written > 0) {
+        _receive_timestamp = AP_HAL::micros64();
+    }
+    return written;
+}
+
+size_t UARTDriver::wasm_read(uint8_t *buf, size_t max_len)
+{
+    return _wasm ? _writebuffer.read(buf, max_len) : 0;
+}
+
+size_t UARTDriver::wasm_read_available() const
+{
+    return _wasm ? _writebuffer.available() : 0;
+}
+
+static UARTDriver *wasm_serial(uint32_t serial_num)
+{
+    if (serial_num >= AP_HAL::HAL::num_serial) {
+        return nullptr;
+    }
+    return static_cast<UARTDriver *>(AP_HAL::get_HAL_mutable().serial(serial_num));
+}
+
+extern "C" {
+
+EMSCRIPTEN_KEEPALIVE size_t ardupilot_serial_write(uint32_t serial_num, const uint8_t *buf, size_t len)
+{
+    UARTDriver *uart = wasm_serial(serial_num);
+    return uart == nullptr ? 0 : uart->wasm_write(buf, len);
+}
+
+EMSCRIPTEN_KEEPALIVE size_t ardupilot_serial_read(uint32_t serial_num, uint8_t *buf, size_t max_len)
+{
+    UARTDriver *uart = wasm_serial(serial_num);
+    return uart == nullptr ? 0 : uart->wasm_read(buf, max_len);
+}
+
+EMSCRIPTEN_KEEPALIVE size_t ardupilot_serial_read_available(uint32_t serial_num)
+{
+    UARTDriver *uart = wasm_serial(serial_num);
+    return uart == nullptr ? 0 : uart->wasm_read_available();
+}
+
+EMSCRIPTEN_KEEPALIVE void *ardupilot_malloc(size_t size)
+{
+    return malloc(size);
+}
+
+EMSCRIPTEN_KEEPALIVE void ardupilot_free(void *ptr)
+{
+    free(ptr);
+}
+
+} // extern "C"
+#endif
+
+#if HAL_UART_STATS_ENABLED
+// request information on uart I/O for @SYS/uarts.txt for this uart
+void UARTDriver::uart_info(ExpandingString &str, StatsTracker &stats, const uint32_t dt_ms)
+{
+    const uint32_t tx_bytes = stats.tx.update(_tx_stats_bytes);
+    const uint32_t rx_bytes = stats.rx.update(_rx_stats_bytes);
+
+    str.printf("TX=%8u RX=%8u TXBD=%6u RXBD=%6u %s (%s)\n",
+                unsigned(tx_bytes),
+                unsigned(rx_bytes),
+                unsigned((tx_bytes * 10000) / dt_ms),
+                unsigned((rx_bytes * 10000) / dt_ms),
+                _connected ? "connected    " : "not connected",
+                _sitlState->_serial_path[_portNumber]);
+}
+#endif
+
+#endif // CONFIG_HAL_BOARD

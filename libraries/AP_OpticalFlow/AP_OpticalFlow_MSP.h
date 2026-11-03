@@ -1,9 +1,10 @@
 #pragma once
 
-#include "OpticalFlow.h"
-#include <AP_HAL/utility/OwnPtr.h>
+#include "AP_OpticalFlow_config.h"
 
 #if HAL_MSP_OPTICALFLOW_ENABLED
+
+#include "AP_OpticalFlow.h"
 
 class AP_OpticalFlow_MSP : public OpticalFlow_backend
 {
@@ -21,7 +22,7 @@ public:
     void handle_msp(const MSP::msp_opflow_data_message_t &pkt) override;
 
     // detect if the sensor is available
-    static AP_OpticalFlow_MSP *detect(OpticalFlow &_frontend);
+    static AP_OpticalFlow_MSP *detect(AP_OpticalFlow &_frontend);
 
 private:
 

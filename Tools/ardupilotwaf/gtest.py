@@ -1,5 +1,6 @@
-#!/usr/bin/env python
 # encoding: utf-8
+
+# flake8: noqa
 
 """
 gtest is a Waf tool for test builds in Ardupilot

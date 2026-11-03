@@ -15,10 +15,6 @@
 
 const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 
-const struct AP_Param::GroupInfo        GCS_MAVLINK_Parameters::var_info[] = {
-    AP_GROUPEND
-};
-
 class MissionTest {
 public:
     void setup();
@@ -29,7 +25,7 @@ private:
     AP_Baro baro;
     AP_GPS  gps;
     Compass compass;
-    AP_AHRS_DCM ahrs{};
+    AP_AHRS ahrs{};
     GCS_Dummy _gcs;
 
     // global constants that control how many verify calls must be made for a command before it completes

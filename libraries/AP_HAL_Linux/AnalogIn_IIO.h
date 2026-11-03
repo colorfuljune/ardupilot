@@ -8,18 +8,9 @@
 #define IIO_ANALOG_IN_COUNT 8
 #define IIO_ANALOG_IN_DIR "/sys/bus/iio/devices/iio:device0/"
 
-#if CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_PXF
-// Note that echo BB-ADC cape should be loaded
-#define IIO_VOLTAGE_SCALING 0.00142602816
-#elif CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_BBBMINI
-#define IIO_VOLTAGE_SCALING 3.0*1.8/4095.0
-#elif CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_BLUE
-#define IIO_VOLTAGE_SCALING 1.8/4095.0
-#elif CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_POCKET
-#define IIO_VOLTAGE_SCALING 3.0*1.8/4095.0
-#else
-#define IIO_VOLTAGE_SCALING 1.0
-#endif
+#ifndef AP_HAL_LINUX_ANALOGIN_IIO_VOLTAGE_SCALING
+#define AP_HAL_LINUX_ANALOGIN_IIO_VOLTAGE_SCALING 1.0
+#endif  // defined(AP_HAL_LINUX_ANALOGIN_IIO_VOLTAGE_SCALING)
 
 class AnalogSource_IIO : public AP_HAL::AnalogSource {
 public:
@@ -27,7 +18,7 @@ public:
     AnalogSource_IIO(int16_t pin, float initial_value, float voltage_scaling);
     float read_average() override;
     float read_latest() override;
-    void set_pin(uint8_t p) override;
+    bool set_pin(uint8_t p) override;
     float voltage_average() override;
     float voltage_latest() override;
     float voltage_average_ratiometric() override { return voltage_average(); }

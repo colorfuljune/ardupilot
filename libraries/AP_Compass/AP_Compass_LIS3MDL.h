@@ -14,6 +14,10 @@
  */
 #pragma once
 
+#include "AP_Compass_config.h"
+
+#if AP_COMPASS_LIS3MDL_ENABLED
+
 #include <AP_Common/AP_Common.h>
 #include <AP_HAL/AP_HAL.h>
 #include <AP_HAL/Device.h>
@@ -37,8 +41,6 @@ public:
                                      bool force_external,
                                      enum Rotation rotation);
 
-    void read() override;
-
     static constexpr const char *name = "LIS3MDL";
 
 private:
@@ -54,7 +56,8 @@ private:
     bool init();
     void timer();
 
-    uint8_t compass_instance;
     bool force_external;
     enum Rotation rotation;
 };
+
+#endif  // AP_COMPASS_LIS3MDL_ENABLED

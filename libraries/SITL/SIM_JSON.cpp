@@ -16,6 +16,10 @@
     Simulator Connector for JSON based interfaces
 */
 
+#include "SIM_config.h"
+
+#if AP_SIM_JSON_ENABLED
+
 #include "SIM_JSON.h"
 
 #include <stdio.h>
@@ -25,6 +29,8 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Logger/AP_Logger.h>
 #include <AP_HAL/utility/replace.h>
+#include <SRV_Channel/SRV_Channel.h>
+#include <AP_Filesystem/AP_Filesystem.h>
 
 #define UDP_TIMEOUT_MS 100
 
@@ -98,20 +104,34 @@ void JSON::set_interface_ports(const char* address, const int port_in, const int
 */
 void JSON::output_servos(const struct sitl_input &input)
 {
-    servo_packet pkt;
-    pkt.frame_rate = rate_hz;
-    pkt.frame_count = frame_counter;
-    for (uint8_t i=0; i<16; i++) {
-        pkt.pwm[i] = input.servos[i];
+    size_t pkt_size = 0;
+    ssize_t send_ret = -1;
+    if (SRV_Channels::have_32_channels()) {
+      servo_packet_32 pkt;
+      pkt.frame_rate = rate_hz;
+      pkt.frame_count = frame_counter;
+      for (uint8_t i=0; i<32; i++) {
+          pkt.pwm[i] = input.servos[i];
+      }
+      pkt_size = sizeof(pkt);
+      send_ret = sock.sendto(&pkt, pkt_size, target_ip, control_port);
+    } else {
+      servo_packet_16 pkt;
+      pkt.frame_rate = rate_hz;
+      pkt.frame_count = frame_counter;
+      for (uint8_t i=0; i<16; i++) {
+          pkt.pwm[i] = input.servos[i];
+      }
+      pkt_size = sizeof(pkt);
+      send_ret = sock.sendto(&pkt, pkt_size, target_ip, control_port);
     }
 
-    size_t send_ret = sock.sendto(&pkt, sizeof(pkt), target_ip, control_port);
-    if (send_ret != sizeof(pkt)) {
+    if ((size_t)send_ret != pkt_size) {
         if (send_ret <= 0) {
             printf("Unable to send servo output to %s:%u - Error: %s, Return value: %ld\n",
                    target_ip, control_port, strerror(errno), (long)send_ret);
         } else {
-            printf("Sent %ld bytes instead of %lu bytes\n", (long)send_ret, (unsigned long)sizeof(pkt));
+            printf("Sent %ld bytes instead of %lu bytes\n", (long)send_ret, (unsigned long)pkt_size);
         }
     }
 }
@@ -124,9 +144,55 @@ void JSON::output_servos(const struct sitl_input &input)
     This parser does not do any syntax checking, and is not at all
     general purpose
 */
-uint16_t JSON::parse_sensors(const char *json)
+
+template <typename T>
+bool parse_array(const char *str, T &arr, int count) {
+    const char *p = str;
+
+    for (int i = 0; i < count; i++) {
+        // Skip to start of number
+        while (*p && *p != '-' && (*p < '0' || *p > '9'))
+            p++;
+
+        if (!*p) {
+            // End of string before we got all numbers
+            return false;
+        }
+
+        arr[i] = strtod(p, nullptr);
+
+        // Move past the number
+        while (*p && *p != ',' && *p != ']')
+            p++;
+
+        if (i < count - 1) { // expect comma between numbers
+            if (*p != ',') return false;
+            p++; // skip comma
+        }
+    }
+
+    return true;
+}
+
+uint64_t JSON::parse_sensors(const char *json)
 {
-    uint16_t received_bitmask = 0;
+    uint64_t received_bitmask = 0;
+
+#if SITL_JSON_DEBUG && AP_FILESYSTEM_FILE_WRITING_ENABLED
+    // it is useful in some environments to be able to get a copy of the raw
+    // JSON data
+    const uint32_t now_ms = AP_HAL::millis();
+    if (now_ms - last_debug_ms >= 1000) {
+        // dump received JSON at 1Hz for easy debugging
+        last_debug_ms = now_ms;
+        auto &fs = AP::FS();
+        int fd = fs.open("json_debug.txt", O_WRONLY|O_CREAT|O_TRUNC);
+        if (fd != -1) {
+            fs.write(fd, json, strlen(json));
+            fs.close(fd);
+        }
+    }
+#endif
 
     //printf("%s\n", json);
     for (uint16_t i=0; i<ARRAY_SIZE(keytable); i++) {
@@ -155,7 +221,7 @@ uint16_t JSON::parse_sensors(const char *json)
         }
 
         // record the keys that are found
-        received_bitmask |= 1U << i;
+        received_bitmask |= 1ULL << i;
 
         p += strlen(key.key)+2;
         switch (key.type) {
@@ -165,7 +231,7 @@ uint16_t JSON::parse_sensors(const char *json)
                 break;
 
             case DATA_FLOAT:
-                *((float *)key.ptr) = atof(p);
+                *((float *)key.ptr) = strtof(p, nullptr);
                 //printf("%s/%s = %f\n", key.section, key.key, *((float *)key.ptr));
                 break;
 
@@ -175,24 +241,55 @@ uint16_t JSON::parse_sensors(const char *json)
                 break;
 
             case DATA_VECTOR3F: {
-                Vector3f *v = (Vector3f *)key.ptr;
-                if (sscanf(p, "[%f, %f, %f]", &v->x, &v->y, &v->z) != 3) {
+                Vector3<float> v;
+                if (!parse_array(p, v, ARRAY_SIZE(v))) {
                     printf("Failed to parse Vector3f for %s/%s\n", key.section, key.key);
                     return received_bitmask;
                 }
+                Vector3f *tv = (Vector3<float> *)key.ptr;
+                *tv = v;
+                //printf("%s/%s = %f, %f, %f\n", key.section, key.key, v->x, v->y, v->z);
+                break;
+            }
+
+            case DATA_VECTOR3D: {
+                Vector3<double> v;
+                if (!parse_array(p, v, ARRAY_SIZE(v))) {
+                    printf("Failed to parse Vector3d for %s/%s\n", key.section, key.key);
+                    return received_bitmask;
+                }
+                Vector3d *tv = (Vector3d *)key.ptr;
+                *tv = v;
                 //printf("%s/%s = %f, %f, %f\n", key.section, key.key, v->x, v->y, v->z);
                 break;
             }
 
             case QUATERNION: {
-                Quaternion *v = static_cast<Quaternion*>(key.ptr);
-                if (sscanf(p, "[%f, %f, %f, %f]", &(v->q1), &(v->q2), &(v->q3), &(v->q4)) != 4) {
+                VectorN<float, 4> v;
+                if (!parse_array(p, v, ARRAY_SIZE(v))) {
                     printf("Failed to parse Vector4f for %s/%s\n", key.section, key.key);
                     return received_bitmask;
                 }
+                Quaternion *tv = static_cast<Quaternion*>(key.ptr);
+                tv->q1 = v[0];
+                tv->q2 = v[1];
+                tv->q3 = v[2];
+                tv->q4 = v[3];
                 break;
             }
 
+            case BOOLEAN: {
+                bool *b = (bool *)key.ptr;
+                if (strncasecmp(p, "true", 4) == 0) {
+                    *b = true;
+                } else if (strncasecmp(p, "false", 5) == 0) {
+                    *b = false;
+                } else {
+                    *b = strtoull(p, nullptr, 10) != 0;
+                }
+                //printf("%s/%s = %i\n", key.section, key.key, *((unit8_t *)key.ptr));
+                break;
+            }
         }
     }
 
@@ -208,6 +305,19 @@ void JSON::recv_fdm(const struct sitl_input &input)
     // Receive sensor packet
     ssize_t ret = sock.recv(&sensor_buffer[sensor_buffer_len], sizeof(sensor_buffer)-sensor_buffer_len, UDP_TIMEOUT_MS);
     uint32_t wait_ms = UDP_TIMEOUT_MS;
+
+    if (state.no_lockstep && ret <= 0) {
+        // in no_lockstep mode do not block waiting for data; advance time using SITL loop rate
+        if (sitl != nullptr && sitl->loop_rate_hz > 0) {
+            frame_time_us = (uint32_t)(1000000.0f / sitl->loop_rate_hz);
+        } else {
+            frame_time_us = 10000; // fallback to 10ms
+        }
+        time_now_us += frame_time_us;
+        time_advance();
+        return;
+    }
+
     while (ret <= 0) {
         //printf("No JSON sensor message received - %s\n", strerror(errno));
         ret = sock.recv(&sensor_buffer[sensor_buffer_len], sizeof(sensor_buffer)-sensor_buffer_len, UDP_TIMEOUT_MS);
@@ -236,9 +346,9 @@ void JSON::recv_fdm(const struct sitl_input &input)
         return;
     }
 
-    const uint16_t received_bitmask = parse_sensors((const char *)(p1+1));
+    const uint64_t received_bitmask = parse_sensors((const char *)(p1+1));
     if (received_bitmask == 0) {
-        // did not receve one of the mandatory fields
+        // did not receive one of the mandatory fields
         printf("Did not contain all mandatory fields\n");
         return;
     }
@@ -254,7 +364,7 @@ void JSON::recv_fdm(const struct sitl_input &input)
         printf("\nJSON received:\n");
         for (uint16_t i=0; i<ARRAY_SIZE(keytable); i++) {
             struct keytable &key = keytable[i];
-            if ((received_bitmask &  1U << i) == 0) {
+            if ((received_bitmask &  1ULL << i) == 0) {
                 continue;
             }
             if (strcmp(key.section, "") == 0) {
@@ -273,7 +383,48 @@ void JSON::recv_fdm(const struct sitl_input &input)
     accel_body = state.imu.accel_body;
     gyro = state.imu.gyro;
     velocity_ef = state.velocity;
-    position = state.position;
+
+    if ((received_bitmask & (LATITUDE | LONGITUDE | ALTITUDE)) == (LATITUDE | LONGITUDE | ALTITUDE)) {
+        Location new_loc;
+        new_loc.lat = state.latitude * 1.0e7;
+        new_loc.lng = state.longitude * 1.0e7;
+        new_loc.alt = state.altitude * 100.0;
+        new_loc.relative_alt = false;
+        new_loc.origin_alt = false;
+        new_loc.terrain_alt = false;
+
+        if (!home_is_set) {
+            set_start_location(new_loc, 0.0f);
+        }
+
+        position = origin.get_distance_NED_double(new_loc);
+    } else {
+        position = state.position;
+        position.xy() += origin.get_distance_NE_double(home);
+    }
+
+    if (received_bitmask & TIME_SYNC) {
+        if (use_time_sync != !state.no_time_sync) {
+            use_time_sync = !state.no_time_sync;
+            printf("Forcing use_time_sync=%d\n", int(use_time_sync));
+            if (!use_time_sync) {
+                // if not using time sync then default EKF type to 10, as
+                // otherwise EKF is likely to diverge
+                AP_Param::set_default_by_name("AHRS_EKF_TYPE", 10);
+            }
+        }
+    }
+
+    // Handle lockstep setting from JSON
+    if (received_bitmask & LOCKSTEP) {
+        // state.no_lockstep is true when we DON'T want lockstep
+        // So we need to check if it changed and act accordingly
+        if (state.no_lockstep != last_no_lockstep) {
+            last_no_lockstep = state.no_lockstep;
+            printf("Lockstep mode changed: no_lockstep=%d (lockstep %s)\n", 
+                   int(state.no_lockstep), state.no_lockstep ? "DISABLED" : "ENABLED");
+        }
+    }
 
     // deal with euler or quaternion attitude
     if ((received_bitmask & QUAT_ATT) != 0) {
@@ -283,24 +434,39 @@ void JSON::recv_fdm(const struct sitl_input &input)
         dcm.from_euler(state.attitude[0], state.attitude[1], state.attitude[2]);
     }
 
-    // velocity relative to airmass in body frame
-    velocity_air_bf = dcm.transposed() * velocity_ef;
+    if ((received_bitmask & AIRSPEED)) {
+        // received airspeed directly
+        airspeed = state.airspeed;
 
-    // airspeed
-    airspeed = velocity_air_bf.length();
+        airspeed_pitot = state.airspeed;
+    } else {
+        
+        // wind is not supported yet for JSON sim, assume zero for now        
+        wind_ef.zero(); 
 
-    // airspeed as seen by a fwd pitot tube (limited to 120m/s)
-    airspeed_pitot = constrain_float(velocity_air_bf * Vector3f(1.0f, 0.0f, 0.0f), 0.0f, 120.0f);
+        // velocity relative to airmass in Earth's frame
+        velocity_air_ef = velocity_ef - wind_ef;
+
+        // velocity relative to airmass in body frame
+        velocity_air_bf = dcm.transposed() * velocity_air_ef;
+
+        // airspeed fix for eas2tas
+        update_eas_airspeed();
+    }
+
+    if ((received_bitmask & WIND_VEL) != 0) {
+        wind_ef = state.velocity_wind;
+    }
 
     // Convert from a meters from origin physics to a lat long alt
     update_position();
 
     // update range finder distances
-    for (uint8_t i=7; i<13; i++) {
-        if ((received_bitmask &  1U << i) == 0) {
+    for (uint8_t i=0; i<6; i++) {
+        if ((received_bitmask & (RNG_1 << i)) == 0) {
             continue;
         }
-        rangefinder_m[i-7] = state.rng[i-7];
+        rangefinder_m[i] = state.rng[i];
     }
 
     // update wind vane
@@ -310,6 +476,31 @@ void JSON::recv_fdm(const struct sitl_input &input)
     if ((received_bitmask & WIND_SPD) != 0) {
         wind_vane_apparent.speed = state.wind_vane_apparent.speed;
     }
+
+    // update RC input
+    static_assert(ARRAY_SIZE(state.rc) <= ARRAY_SIZE(rcin), "JSON rc in size mismatch");
+    uint8_t rc_chan_count = 0;
+    for (uint8_t i=0; i<ARRAY_SIZE(state.rc); i++) {
+        if ((received_bitmask & (RC_1 << i)) != 0) {
+            rcin[i] = (state.rc[i] - 1000.0f) / 1000.0f;
+            rc_chan_count = i+1;
+        }
+    }
+    rcin_chan_count = rc_chan_count;
+
+    // update battery state
+    if ((received_bitmask & BAT_VOLT) != 0) {
+        battery_voltage = state.bat_volt;
+    } else {
+        battery_voltage = sitl->batt_voltage;
+    }
+    if ((received_bitmask & BAT_AMP) != 0) {
+        battery_current = state.bat_amp;
+    } else {
+        battery_current = 0.0f;
+    }
+    // (temperature is not part of the protocol, just set it explicitly here)
+    battery_temperature_degC = 0.0f;
 
     double deltat;
     if (state.timestamp_s < last_timestamp_s) {
@@ -323,9 +514,12 @@ void JSON::recv_fdm(const struct sitl_input &input)
     time_now_us += deltat * 1.0e6;
 
     if (is_positive(deltat) && deltat < 0.1) {
-        // time in us to hz
-        adjust_frame_time(1.0 / deltat);
-
+        // Only adjust frame time if we want lockstep
+        // When no_lockstep is true, skip adjust_frame_time to let SITL run free
+        if (use_time_sync && !state.no_lockstep) {
+            // time in us to hz
+            adjust_frame_time(1.0 / deltat);
+        }
         // match actual frame rate with desired speedup
         time_advance();
     }
@@ -353,7 +547,7 @@ void JSON::recv_fdm(const struct sitl_input &input)
 // @Field: GX: Simulated gyroscope, X-axis (rad/sec)
 // @Field: GY: Simulated gyroscope, Y-axis (rad/sec)
 // @Field: GZ: Simulated gyroscope, Z-axis (rad/sec)
-    AP::logger().Write("JSN1", "TimeUS,TStamp,R,P,Y,GX,GY,GZ",
+    AP::logger().WriteStreaming("JSN1", "TimeUS,TStamp,R,P,Y,GX,GY,GZ",
                        "ssrrrEEE",
                        "F???????",
                        "Qfffffff",
@@ -380,7 +574,7 @@ void JSON::recv_fdm(const struct sitl_input &input)
 // @Field: AN: simulation's acceleration, North (m/s^2)
 // @Field: AE: simulation's acceleration, East (m/s^2)
 // @Field: AD: simulation's acceleration, Down (m/s^2)
-    AP::logger().Write("JSN2", "TimeUS,VN,VE,VD,AX,AY,AZ,AN,AE,AD",
+    AP::logger().WriteStreaming("JSN2", "TimeUS,VN,VE,VD,AX,AY,AZ,AN,AE,AD",
                        "snnnoooooo",
                        "F?????????",
                        "Qfffffffff",
@@ -414,12 +608,17 @@ void JSON::update(const struct sitl_input &input)
     update_mag_field_bf();
 
     // allow for changes in physics step
-    adjust_frame_time(constrain_float(sitl->loop_rate_hz, rate_hz-1, rate_hz+1));
+    // Only adjust frame time if lockstep is enabled (no_lockstep is false)
+    if (use_time_sync && !state.no_lockstep) {
+        adjust_frame_time(constrain_float(sitl->loop_rate_hz, rate_hz-1, rate_hz+1));
+    }
 
 #if 0
     // report frame rate
     if (frame_counter % 1000 == 0) {
-        printf("FPS %.2f\n", achieved_rate_hz); // this is instantaneous rather than any clever average
+        printf("FPS %.2f\n", rate_hz); // this is instantaneous rather than any clever average
     }
 #endif
 }
+
+#endif  // AP_SIM_JSON_ENABLED

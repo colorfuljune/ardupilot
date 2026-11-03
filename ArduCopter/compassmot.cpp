@@ -20,10 +20,15 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
     float    throttle_pct_max = 0.0f;   // maximum throttle reached (as a percentage 0~1.0)
     float    current_amps_max = 0.0f;   // maximum current reached
     float    interference_pct[COMPASS_MAX_INSTANCES]{};       // interference as a percentage of total mag field (for reporting purposes only)
-    uint32_t last_run_time;
-    uint32_t last_send_time;
+    uint32_t last_run_time_ms;
+    uint32_t last_send_time_ms;
     bool     updated = false;           // have we updated the compensation vector at least once
     uint8_t  command_ack_start = command_ack_counter;
+
+    // the motor test owns the motor output while it runs
+    if (ap.motor_test) {
+        return MAV_RESULT_TEMPORARILY_REJECTED;
+    }
 
     // exit immediately if we are already in compassmot
     if (ap.compass_mot) {
@@ -34,7 +39,7 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
     }
 
     // check compass is enabled
-    if (!AP::compass().enabled()) {
+    if (!AP::compass().available()) {
         gcs_chan.send_text(MAV_SEVERITY_CRITICAL, "Compass disabled");
         ap.compass_mot = false;
         return MAV_RESULT_TEMPORARILY_REJECTED;
@@ -85,7 +90,8 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
     }
 
     // send back initial ACK
-    mavlink_msg_command_ack_send(gcs_chan.get_chan(), MAV_CMD_PREFLIGHT_CALIBRATION,0);
+    mavlink_msg_command_ack_send(gcs_chan.get_chan(), MAV_CMD_PREFLIGHT_CALIBRATION,0,
+                                 0, 0, 0, 0);
 
     // flash leds
     AP_Notify::flags.esc_calibration = true;
@@ -101,12 +107,12 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
     }
 
     // disable throttle failsafe
-    g.failsafe_throttle = FS_THR_DISABLED;
+    g.failsafe_throttle.set(FS_THR_Action::DISABLED);
 
     // disable motor compensation
     compass.motor_compensation_type(AP_COMPASS_MOT_COMP_DISABLED);
     for (uint8_t i=0; i<compass.get_count(); i++) {
-        compass.set_motor_compensation(i, Vector3f(0,0,0));
+        compass.set_motor_compensation(i, Vector3f{0,0,0});
     }
 
     // get initial compass readings
@@ -122,33 +128,34 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
     EXPECT_DELAY_MS(5000);
 
     // enable motors and pass through throttle
-    init_rc_out();
-    enable_motor_output();
+    if (!using_rate_thread) {
+        motors->output_min();  // output lowest possible value to motors
+    }
     motors->armed(true);
     hal.util->set_soft_armed(true);
 
     // initialise run time
-    last_run_time = millis();
-    last_send_time = millis();
+    last_run_time_ms = millis();
+    last_send_time_ms = millis();
 
     // main run while there is no user input and the compass is healthy
     while (command_ack_start == command_ack_counter && compass.healthy() && motors->armed()) {
         EXPECT_DELAY_MS(5000);
 
         // 50hz loop
-        if (millis() - last_run_time < 20) {
+        if (millis() - last_run_time_ms < 20) {
             hal.scheduler->delay(5);
             continue;
         }
-        last_run_time = millis();
+        last_run_time_ms = millis();
 
         // read radio input
         read_radio();
 
-        // pass through throttle to motors
-        SRV_Channels::cork();
-        motors->set_throttle_passthrough_for_esc_calibration(channel_throttle->get_control_in() / 1000.0f);
-        SRV_Channels::push();
+        // this loop blocks the main loop, so without the rate thread nothing else outputs
+        if (!using_rate_thread) {
+            motors_output();
+        }
 
         // read some compass values
         compass.read();
@@ -157,8 +164,11 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
         battery.read();
 
         // calculate scaling for throttle
-        throttle_pct = (float)channel_throttle->get_control_in() / 1000.0f;
+        throttle_pct = (float)channel_throttle->get_control_in() * 0.001f;
         throttle_pct = constrain_float(throttle_pct,0.0f,1.0f);
+
+        // record maximum throttle
+        throttle_pct_max = MAX(throttle_pct_max, throttle_pct);
 
         if (!battery.current_amps(current)) {
             current = 0;
@@ -166,7 +176,7 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
         current_amps_max = MAX(current_amps_max, current);
 
         // if throttle is near zero, update base x,y,z values
-        if (throttle_pct <= 0.0f) {
+        if (!is_positive(throttle_pct)) {
             for (uint8_t i=0; i<compass.get_count(); i++) {
                 compass_base[i] = compass_base[i] * 0.99f + compass.get_field(i) * 0.01f;
             }
@@ -211,13 +221,10 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
                     interference_pct[i] = motor_compensation[i].length() * (current_amps_max/throttle_pct_max) / (float)arming.compass_magfield_expected() * 100.0f;
                 }
             }
-
-            // record maximum throttle
-            throttle_pct_max = MAX(throttle_pct_max, throttle_pct);
         }
 
-        if (AP_HAL::millis() - last_send_time > 500) {
-            last_send_time = AP_HAL::millis();
+        if (AP_HAL::millis() - last_send_time_ms > 500) {
+            last_send_time_ms = AP_HAL::millis();
             mavlink_msg_compassmot_status_send(gcs_chan.get_chan(),
                                                channel_throttle->get_control_in(),
                                                current,
@@ -225,13 +232,25 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
                                                motor_compensation[0].x,
                                                motor_compensation[0].y,
                                                motor_compensation[0].z);
+#if HAL_WITH_ESC_TELEM
+            // send ESC telemetry to monitor ESC and motor temperatures
+            AP::esc_telem().send_esc_telemetry_mavlink(gcs_chan.get_chan());
+#endif
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+            // a lot of autotest timeouts are based on receiving system time
+            gcs_chan.send_system_time();
+            // autotesting of compassmot wants to see RC channels message
+            gcs_chan.send_rc_channels();
+#endif
         }
     }
 
     // stop motors
-    motors->output_min();
     motors->armed(false);
     hal.util->set_soft_armed(false);
+    if (!using_rate_thread) {
+        motors->output_min();
+    }
 
     // set and save motor compensation
     if (updated) {
@@ -262,4 +281,17 @@ MAV_RESULT Copter::mavlink_compassmot(const GCS_MAVLINK &gcs_chan)
 
     return MAV_RESULT_ACCEPTED;
 #endif  // FRAME_CONFIG != HELI_FRAME
+}
+
+void Copter::compassmot_output()
+{
+#if FRAME_CONFIG != HELI_FRAME
+    // the flag is set before the motors are armed and cleared after they are disarmed
+    if (!motors->armed()) {
+        motors->output_min();
+        return;
+    }
+    // pass through throttle to motors
+    motors->set_throttle_passthrough_for_esc_calibration(channel_throttle->get_control_in() * 0.001f);
+#endif
 }

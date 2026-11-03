@@ -3,72 +3,21 @@
 */
 #pragma once
 
-#include "AP_Mount.h"
-#if HAL_MOUNT_ENABLED
+#include "AP_Mount_config.h"
+
+#if HAL_MOUNT_ALEXMOS_ENABLED
+
+#include "AP_Mount_Backend.h"
+
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Param/AP_Param.h>
 #include <AP_Math/AP_Math.h>
-#include <AP_AHRS/AP_AHRS.h>
-#include "AP_Mount_Backend.h"
-
-
-//definition of the commands id for the Alexmos Serial Protocol
-#define CMD_READ_PARAMS 'R'
-#define CMD_WRITE_PARAMS 'W'
-#define CMD_REALTIME_DATA 'D'
-#define CMD_BOARD_INFO 'V'
-#define CMD_CALIB_ACC 'A'
-#define CMD_CALIB_GYRO 'g'
-#define CMD_CALIB_EXT_GAIN 'G'
-#define CMD_USE_DEFAULTS 'F'
-#define CMD_CALIB_POLES 'P'
-#define CMD_RESET 'r'
-#define CMD_HELPER_DATA 'H'
-#define CMD_CALIB_OFFSET 'O'
-#define CMD_CALIB_BAT 'B'
-#define CMD_MOTORS_ON 'M'
-#define CMD_MOTORS_OFF 'm'
-#define CMD_CONTROL 'C'
-#define CMD_TRIGGER_PIN 'T'
-#define CMD_EXECUTE_MENU 'E'
-#define CMD_GET_ANGLES 'I'
-#define CMD_CONFIRM 'C'
-// Board v3.x only
-#define CMD_BOARD_INFO_3 20
-#define CMD_READ_PARAMS_3 21
-#define CMD_WRITE_PARAMS_3 22
-#define CMD_REALTIME_DATA_3 23
-#define CMD_SELECT_IMU_3 24
-#define CMD_READ_PROFILE_NAMES 28
-#define CMD_WRITE_PROFILE_NAMES 29
-#define CMD_QUEUE_PARAMS_INFO_3 30
-#define CMD_SET_PARAMS_3 31
-#define CMD_SAVE_PARAMS_3 32
-#define CMD_READ_PARAMS_EXT 33
-#define CMD_WRITE_PARAMS_EXT 34
-#define CMD_AUTO_PID 35
-#define CMD_SERVO_OUT 36
-#define CMD_ERROR 255
-
-#define AP_MOUNT_ALEXMOS_MODE_NO_CONTROL 0
-#define AP_MOUNT_ALEXMOS_MODE_SPEED 1
-#define AP_MOUNT_ALEXMOS_MODE_ANGLE 2
-#define AP_MOUNT_ALEXMOS_MODE_SPEED_ANGLE 3
-#define AP_MOUNT_ALEXMOS_MODE_RC 4
-
-#define AP_MOUNT_ALEXMOS_SPEED 30 // degree/s2
-
-#define VALUE_TO_DEGREE(d) ((float)((d * 720) >> 15))
-#define DEGREE_TO_VALUE(d) ((int16_t)((float)(d)*(1.0f/0.02197265625f)))
-#define DEGREE_PER_SEC_TO_VALUE(d) ((int16_t)((float)(d)*(1.0f/0.1220740379f)))
 
 class AP_Mount_Alexmos : public AP_Mount_Backend
 {
 public:
     //constructor
-    AP_Mount_Alexmos(AP_Mount &frontend, AP_Mount::mount_state &state, uint8_t instance):
-        AP_Mount_Backend(frontend, state, instance)
-    {}
+    using AP_Mount_Backend::AP_Mount_Backend;
 
     // init - performs any required initialisation for this instance
     void init() override;
@@ -76,16 +25,24 @@ public:
     // update mount position - should be called periodically
     void update() override;
 
-    // has_pan_control - returns true if this mount can control it's pan (required for multicopters)
+    // has_pan_control - returns true if this mount can control its pan (required for multicopters)
     bool has_pan_control() const override;
 
-    // set_mode - sets mount's mode
-    void set_mode(enum MAV_MOUNT_MODE mode) override;
+protected:
 
-    // send_mount_status - called to allow mounts to send their status to GCS via MAVLink
-    void send_mount_status(mavlink_channel_t chan) override;
+    // get attitude as a quaternion.  returns true on success
+    bool get_attitude_quaternion(Quaternion& att_quat) override;
+
+    // servo only natively supports angles:
+    uint8_t natively_supported_mount_target_types() const override {
+        return NATIVE_ANGLES_ONLY;
+    };
 
 private:
+    // allow removing lean angles for pitch and roll locks
+    bool apply_bf_roll_pitch_adjustments_in_rc_targeting() const override {
+        return true;
+    }
 
     // get_angles -
     void get_angles();
@@ -96,8 +53,8 @@ private:
     // get_boardinfo - get board version and firmware version
     void get_boardinfo();
 
-    // control_axis - send new angles to the gimbal at a fixed speed of 30 deg/s
-    void control_axis(const Vector3f& angle , bool targets_in_degrees);
+    // send new angles to the gimbal at a fixed speed of 30 deg/s
+    void send_target_angles(const MountAngleTarget& angle_rad) override;
 
     // read_params - read current profile profile_id and global parameters from the gimbal settings
     void read_params(uint8_t profile_id);
@@ -105,7 +62,7 @@ private:
     // write_params - write new parameters to the gimbal settings
     void write_params();
 
-    bool get_realtimedata( Vector3f& angle);
+    bool get_realtimedata(Vector3f& angle);
 
     // Alexmos Serial Protocol reading part implementation
     // send_command - send a command to the Alemox Serial API
@@ -275,7 +232,7 @@ private:
     } _buffer,_current_parameters;
 
     AP_HAL::UARTDriver *_port;
-    bool _initialised : 1;
+    bool _initialised;
 
     // result of the get_boardinfo
     uint8_t _board_version;
@@ -288,7 +245,7 @@ private:
     Vector3f _current_angle;
 
     // CMD_READ_PARAMS has been called once
-    bool _param_read_once : 1;
+    bool _param_read_once;
 
     // Serial Protocol Variables
     uint8_t _checksum;
@@ -298,6 +255,6 @@ private:
     uint8_t _payload_counter;
 
     // confirmed that last command was ok
-    bool _last_command_confirmed : 1;
+    bool _last_command_confirmed;
 };
-#endif // HAL_MOUNT_ENABLED
+#endif // HAL_MOUNT_ALEXMOS_ENABLED

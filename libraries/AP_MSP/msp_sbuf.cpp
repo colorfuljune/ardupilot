@@ -33,32 +33,6 @@ void MSP::sbuf_switch_to_reader(sbuf_t *buf, uint8_t *base)
     buf->ptr = base;
 }
 
-void MSP::sbuf_write_u8(sbuf_t *dst, uint8_t val)
-{
-    if (!sbuf_check_bounds(dst, 1)) {
-        return;
-    }
-    *dst->ptr++ = val;
-}
-
-void MSP::sbuf_write_u16(sbuf_t *dst, uint16_t val)
-{
-    if (!sbuf_check_bounds(dst, 2)) {
-        return;
-    }
-    put_le16_ptr(dst->ptr, val);
-    dst->ptr += 2;
-}
-
-void MSP::sbuf_write_u32(sbuf_t *dst, uint32_t val)
-{
-    if (!sbuf_check_bounds(dst, 4)) {
-        return;
-    }
-    put_le32_ptr(dst->ptr, val);
-    dst->ptr += 4;
-}
-
 void MSP::sbuf_write_data(sbuf_t *dst, const void *data, int len)
 {
     if (!sbuf_check_bounds(dst, len)) {
@@ -66,6 +40,24 @@ void MSP::sbuf_write_data(sbuf_t *dst, const void *data, int len)
     }
     memcpy(dst->ptr, data, len);
     dst->ptr += len;
+}
+
+uint8_t MSP::sbuf_read_u8(sbuf_t *src)
+{
+    if (!sbuf_check_bounds(src, 1)) {
+        return 0;
+    }
+    return *src->ptr++;
+}
+
+uint16_t MSP::sbuf_read_u16(sbuf_t *src)
+{
+    if (!sbuf_check_bounds(src, 2)) {
+        return 0;
+    }
+    uint16_t val = le16toh_ptr(src->ptr);
+    src->ptr += 2;
+    return val;
 }
 
 #endif //HAL_MSP_ENABLED

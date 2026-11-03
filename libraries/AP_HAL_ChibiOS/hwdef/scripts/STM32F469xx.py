@@ -1,4 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+
+# flake8: noqa
 '''
 these tables are generated from the STM32 datasheet stm32f469ii.pdf
 '''
@@ -25,16 +27,20 @@ pincount = {
 
 # MCU parameters
 mcu = {
-    # location of MCU serial number
-    'UDID_START' : 0x1FFF7A10,
-
     # ram map, as list of (address, size-kb, flags)
     # flags of 1 means DMA-capable
     # flags of 2 means faster memory for CPU intensive work
     'RAM_MAP' : [
         (0x20000000, 320, 1), # main memory, DMA safe
         (0x10000000,  64, 1), # CCM memory, faster, not DMA safe
-    ]
+    ],
+
+	'EXPECTED_CLOCK' : 180000000,
+
+    'DEFINES' : {
+        'STM32F4' : '1',
+    }
+
 }
 
 DMA_Map = {

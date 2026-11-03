@@ -4,7 +4,7 @@
 bool Rover::set_home_to_current_location(bool lock)
 {
     Location temp_loc;
-    if (ahrs.have_inertial_nav() && ahrs.get_position(temp_loc)) {
+    if (ahrs.have_inertial_nav() && ahrs.get_location(temp_loc)) {
         if (!set_home(temp_loc, lock)) {
             return false;
         }
@@ -19,21 +19,9 @@ bool Rover::set_home_to_current_location(bool lock)
 // returns true if home location set successfully
 bool Rover::set_home(const Location& loc, bool lock)
 {
-    const bool home_was_set = ahrs.home_is_set();
-
     // set ahrs home
     if (!ahrs.set_home(loc)) {
         return false;
-    }
-
-    if (!home_was_set) {
-        // log new home position which mission library will pull from ahrs
-        if (should_log(MASK_LOG_CMD)) {
-            AP_Mission::Mission_Command temp_cmd;
-            if (mode_auto.mission.read_cmd_from_storage(0, temp_cmd)) {
-                logger.Write_Mission_Cmd(mode_auto.mission, temp_cmd);
-            }
-        }
     }
 
     // lock home position
@@ -41,11 +29,8 @@ bool Rover::set_home(const Location& loc, bool lock)
         ahrs.lock_home();
     }
 
-    // Save Home to EEPROM
-    mode_auto.mission.write_home_to_storage();
-
     // send text of home position to ground stations
-    gcs().send_text(MAV_SEVERITY_INFO, "Set HOME to %.6f %.6f at %.2fm",
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Set HOME to %.6f %.6f at %.2fm",
             static_cast<double>(loc.lat * 1.0e-7f),
             static_cast<double>(loc.lng * 1.0e-7f),
             static_cast<double>(loc.alt * 0.01f));
@@ -64,7 +49,7 @@ void Rover::update_home()
     }
 
     Location loc{};
-    if (!ahrs.get_position(loc)) {
+    if (!ahrs.get_location(loc)) {
         return;
     }
 
@@ -76,7 +61,5 @@ void Rover::update_home()
         return;
     }
 
-    if (!ahrs.set_home(loc)) {
-        // silently ignored...
-    }
+    IGNORE_RETURN(ahrs.set_home(loc));
 }

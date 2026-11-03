@@ -17,26 +17,22 @@
  */
 
 /*
- *  this module deals with calculations involving struct Location
+ *  this module deals with calculations involving locations
  */
 #include <stdlib.h>
 #include "AP_Math.h"
 #include "location.h"
 
-// return horizontal distance between two positions in cm
-float get_horizontal_distance_cm(const Vector3f &origin, const Vector3f &destination)
+// return bearing_rad in radians between two positions
+float get_bearing_rad(const Vector2f &origin, const Vector2f &destination)
 {
-    return norm(destination.x-origin.x,destination.y-origin.y);
+    return wrap_2PI(atan2f(destination.y - origin.y, destination.x - origin.x));
 }
 
-// return bearing in centi-degrees between two positions
-float get_bearing_cd(const Vector3f &origin, const Vector3f &destination)
+// return bearing_cd in centi-degrees between two positions
+float get_bearing_cd(const Vector2f &origin, const Vector2f &destination)
 {
-    float bearing = atan2f(destination.y-origin.y, destination.x-origin.x) * DEGX100;
-    if (bearing < 0) {
-        bearing += 36000.0f;
-    }
-    return bearing;
+    return rad_to_cd(get_bearing_rad(origin, destination));
 }
 
 // return true when lat and lng are within range

@@ -32,6 +32,8 @@ public:
     void write_dword(uint16_t loc, uint32_t value);
     void write_block(uint16_t dst, const void* src, size_t n) override;
 
+    bool get_storage_ptr(void *&ptr, size_t &size) override;
+
     virtual void _timer_tick(void) override;
 
 protected:
@@ -39,9 +41,11 @@ protected:
     int _storage_create(const char *dpath);
 
     int _fd;
-    volatile bool _initialised;
-    volatile uint32_t _dirty_mask;
+    bool _initialised;
+    uint32_t _dirty_mask;
     uint8_t _buffer[LINUX_STORAGE_SIZE];
+    HAL_Semaphore _sem;
+    HAL_Semaphore _timer_sem;
 };
 
 }

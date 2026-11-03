@@ -15,24 +15,23 @@
 
 //  Novatel/Tersus/ComNav GPS driver for ArduPilot.
 //  Code by Michael Oborne
-//  Derived from http://www.novatel.com/assets/Documents/Manuals/om-20000129.pdf
+//  Derived from https://hexagondownloads.blob.core.windows.net/public/Novatel/assets/Documents/Manuals/om-20000129/om-20000129.pdf
 
 #pragma once
 
 #include "AP_GPS.h"
 #include "GPS_Backend.h"
 
+#if AP_GPS_NOVA_ENABLED
 class AP_GPS_NOVA : public AP_GPS_Backend
 {
 public:
-    AP_GPS_NOVA(AP_GPS &_gps, AP_GPS::GPS_State &_state, AP_HAL::UARTDriver *_port);
+    AP_GPS_NOVA(AP_GPS &_gps, AP_GPS::Params &_params, AP_GPS::GPS_State &_state, AP_HAL::UARTDriver *_port);
 
-    AP_GPS::GPS_Status highest_supported_status(void) override { return AP_GPS::GPS_OK_FIX_3D_RTK_FIXED; }
+    AP_GPS_FixType highest_supported_status(void) override { return AP_GPS_FixType::RTK_FIXED; }
 
     // Methods
     bool read() override;
-
-    void inject_data(const uint8_t *data, uint16_t len) override;
 
     const char *name() const override { return "NOVA"; }
 
@@ -40,8 +39,6 @@ private:
 
     bool parse(uint8_t temp);
     bool process_message();
-    uint32_t CRC32Value(uint32_t icrc);
-    uint32_t CalculateBlockCRC32(uint32_t length, uint8_t *buffer, uint32_t crc);
 
     static const uint8_t NOVA_PREAMBLE1 = 0xaa;
     static const uint8_t NOVA_PREAMBLE2 = 0x44;
@@ -56,10 +53,9 @@ private:
     
     uint8_t _init_blob_index = 0;
     uint32_t _init_blob_time = 0;
-    static const char* const _initialisation_blob[6];
+    static const char* const _initialisation_blob[4];
    
     uint32_t crc_error_counter = 0;
-    uint32_t last_injected_data_ms = 0;
 
     struct PACKED nova_header
     {
@@ -93,6 +89,7 @@ private:
         uint16_t recvswver;
     };    
 
+    static const uint8_t NOVA_PSRDOP = 174;
     struct PACKED psrdop
     {
         float gdop;
@@ -105,6 +102,7 @@ private:
         // extra data for individual prns
     };
 
+    static const uint8_t NOVA_BESTPOS = 42;
     struct PACKED bestpos
     {
         uint32_t solstat;      ///< Solution status
@@ -131,6 +129,7 @@ private:
         uint8_t gpsglosigmask;
     };
 
+    static const uint8_t NOVA_BESTVEL = 99;
     struct PACKED bestvel
     {
         uint32_t solstat;
@@ -178,3 +177,4 @@ private:
         uint16_t read;
     } nova_msg;
 };
+#endif

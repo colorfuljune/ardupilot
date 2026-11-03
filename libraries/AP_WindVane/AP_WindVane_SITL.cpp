@@ -13,15 +13,14 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "AP_WindVane_config.h"
+
+#if AP_WINDVANE_SIM_ENABLED
+
 #include "AP_WindVane_SITL.h"
 
-// constructor
-AP_WindVane_SITL::AP_WindVane_SITL(AP_WindVane &frontend) :
-    AP_WindVane_Backend(frontend)
-{
-}
-
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#include <SITL/SITL.h>
+#include <AP_AHRS/AP_AHRS.h>
 
 void AP_WindVane_SITL::update_direction()
 {
@@ -42,11 +41,11 @@ void AP_WindVane_SITL::update_direction()
         wind_vector_ef.x += AP::sitl()->state.speedN;
         wind_vector_ef.y += AP::sitl()->state.speedE;
 
-        direction_update_frontend(atan2f(wind_vector_ef.y, wind_vector_ef.x));
+        _frontend._direction_apparent_raw =  wrap_PI(atan2f(wind_vector_ef.y, wind_vector_ef.x) - AP::ahrs().get_yaw_rad());
 
     } else { // WINDVANE_SITL_APARRENT
-        // directly read the apparent wind from as set by physics backend
-        direction_update_frontend(AP::sitl()->get_apparent_wind_dir());
+        // directly read the body frame apparent wind set by physics backend
+        _frontend._direction_apparent_raw =  wrap_PI(AP::sitl()->get_apparent_wind_dir());
     }
 
 }
@@ -67,11 +66,11 @@ void AP_WindVane_SITL::update_speed()
         wind_vector_ef.x += AP::sitl()->state.speedN;
         wind_vector_ef.y += AP::sitl()->state.speedE;
 
-        speed_update_frontend(wind_vector_ef.length());
+        _frontend._speed_apparent_raw = wind_vector_ef.length();
 
     } else { // WINDSPEED_SITL_APARRENT
         // directly read the apparent wind from as set by physics backend
-        speed_update_frontend(AP::sitl()->get_apparent_wind_spd());
+        _frontend._speed_apparent_raw = AP::sitl()->get_apparent_wind_spd();
     }
 }
-#endif
+#endif  // AP_WINDVANE_SIM_ENABLED

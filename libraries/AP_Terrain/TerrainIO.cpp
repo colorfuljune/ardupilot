@@ -16,17 +16,16 @@
   handle disk IO for terrain code
  */
 
-#include <AP_HAL/AP_HAL.h>
-#include <AP_Common/AP_Common.h>
-#include <AP_Math/AP_Math.h>
-#include <GCS_MAVLink/GCS_MAVLink.h>
-#include <GCS_MAVLink/GCS.h>
-#include <stdio.h>
 #include "AP_Terrain.h"
 
 #if AP_TERRAIN_AVAILABLE
 
 #include <AP_Filesystem/AP_Filesystem.h>
+#include <AP_HAL/AP_HAL.h>
+#include <AP_Common/AP_Common.h>
+#include <AP_Math/AP_Math.h>
+#include <stdio.h>
+#include <GCS_MAVLink/GCS.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -35,9 +34,9 @@ extern const AP_HAL::HAL& hal;
  */
 void AP_Terrain::check_disk_read(void)
 {
-    for (uint16_t i=0; i<cache_size; i++) {
-        if (cache[i].state == GRID_CACHE_DISKWAIT) {
-            disk_block.block = cache[i].grid;
+    for (struct grid_cache *curr = cache; curr != nullptr; curr = curr->next) {
+        if (curr->state == GRID_CACHE_DISKWAIT) {
+            disk_block.block = curr->grid;
             disk_io_state = DiskIoWaitRead;
             return;
         }
@@ -49,9 +48,9 @@ void AP_Terrain::check_disk_read(void)
  */
 void AP_Terrain::check_disk_write(void)
 {
-    for (uint16_t i=0; i<cache_size; i++) {
-        if (cache[i].state == GRID_CACHE_DIRTY) {
-            disk_block.block = cache[i].grid;
+    for (struct grid_cache *curr = cache; curr != nullptr; curr = curr->next) {
+        if (curr->state == GRID_CACHE_DIRTY) {
+            disk_block.block = curr->grid;
             disk_io_state = DiskIoWaitWrite;
             return;
         }
@@ -63,7 +62,7 @@ void AP_Terrain::check_disk_write(void)
  */
 void AP_Terrain::schedule_disk_io(void)
 {
-    if (enable == 0 || !allocate()) {
+    if (!active() || diskless()) {
         return;
     }
 
@@ -84,14 +83,14 @@ void AP_Terrain::schedule_disk_io(void)
         
     case DiskIoDoneRead: {
         // a read has completed
-        int16_t cache_idx = find_io_idx(GRID_CACHE_DISKWAIT);
-        if (cache_idx != -1) {
+        struct grid_cache *entry = find_io_cache(GRID_CACHE_DISKWAIT);
+        if (entry != nullptr) {
             if (disk_block.block.bitmap != 0) {
                 // when bitmap is zero we read an empty block
-                cache[cache_idx].grid = disk_block.block;
+                entry->grid = disk_block.block;
             }
-            cache[cache_idx].state = GRID_CACHE_VALID;
-            cache[cache_idx].last_access_ms = AP_HAL::millis();
+            entry->state = GRID_CACHE_VALID;
+            entry->last_access_ms = AP_HAL::millis();
         }
         disk_io_state = DiskIoIdle;
         break;
@@ -99,11 +98,11 @@ void AP_Terrain::schedule_disk_io(void)
 
     case DiskIoDoneWrite: {
         // a write has completed
-        int16_t cache_idx = find_io_idx(GRID_CACHE_DIRTY);
-        if (cache_idx != -1) {
-            if (cache[cache_idx].grid.bitmap == disk_block.block.bitmap) {
+        struct grid_cache *entry = find_io_cache(GRID_CACHE_DIRTY);
+        if (entry != nullptr) {
+            if (entry->grid.bitmap == disk_block.block.bitmap) {
                 // only mark valid if more grids haven't been added
-                cache[cache_idx].state = GRID_CACHE_VALID;
+                entry->state = GRID_CACHE_VALID;
             }
         }
         disk_io_state = DiskIoIdle;
@@ -137,6 +136,9 @@ All file operations are done by the IO thread.
  */
 void AP_Terrain::open_file(void)
 {
+    if (diskless()) {
+        return;
+    }
     struct grid_block &block = disk_block.block;
     if (fd != -1 && 
         block.lat_degrees == file_lat_degrees &&
@@ -175,7 +177,7 @@ void AP_Terrain::open_file(void)
     if (lon_tmp > 999U) {
         lon_tmp = 999;
     }
-    snprintf(p, 13, "/%c%02u%c%03u.DAT",
+    hal.util->snprintf(p, 13, "/%c%02u%c%03u.DAT",
              block.lat_degrees<0?'S':'N',
              (unsigned)lat_tmp,
              block.lon_degrees<0?'W':'E',
@@ -224,7 +226,7 @@ uint32_t AP_Terrain::east_blocks(struct grid_block &block) const
     Location loc1, loc2;
     loc1.lat = block.lat_degrees*10*1000*1000L;
     loc1.lng = block.lon_degrees*10*1000*1000L;
-    loc2.lat = block.lat_degrees*10*1000*1000L;
+    loc2.lat = loc1.lat;
     loc2.lng = (block.lon_degrees+1)*10*1000*1000L;
 
     // shift another two blocks east to ensure room is available
@@ -259,7 +261,7 @@ void AP_Terrain::seek_offset(void)
 void AP_Terrain::write_block(void)
 {
     seek_offset();
-    if (io_failure) {
+    if (io_failure || diskless()) {
         return;
     }
 
@@ -292,7 +294,7 @@ void AP_Terrain::write_block(void)
 void AP_Terrain::read_block(void)
 {
     seek_offset();
-    if (io_failure) {
+    if (io_failure || diskless()) {
         return;
     }
     int32_t lat = disk_block.block.lat;
@@ -332,6 +334,19 @@ void AP_Terrain::read_block(void)
                (int)ret,
                (unsigned long long)disk_block.block.bitmap);
 #endif
+        if (disk_block.block.version_minor < TERRAIN_VERSION_MINOR_MIN) {
+            /*
+              this triggers a pre-arm warning to prompt the user to
+              download new terrain data
+             */
+#if HAL_GCS_ENABLED
+            if (!found_old_data && hal.util->get_soft_armed()) {
+                // in-flight warning for GCS operator
+                gcs().send_text(MAV_SEVERITY_WARNING, "terrain data expired, possible errors");
+            }
+#endif
+            found_old_data = true;
+        }
     }
     disk_io_state = DiskIoDoneRead;
 }
@@ -350,6 +365,8 @@ void AP_Terrain::io_timer(void)
         }
         return;
     }
+
+    update_reference_offset();
 
     switch (disk_io_state) {
     case DiskIoIdle:

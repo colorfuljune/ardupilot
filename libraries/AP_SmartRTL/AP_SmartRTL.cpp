@@ -36,6 +36,13 @@ const AP_Param::GroupInfo AP_SmartRTL::var_info[] = {
     // @RebootRequired: True
     AP_GROUPINFO("POINTS", 1, AP_SmartRTL, _points_max, SMARTRTL_POINTS_DEFAULT),
 
+    // @Param: OPTIONS
+    // @DisplayName: SmartRTL options
+    // @Description: Bitmask of SmartRTL options.
+    // @Bitmask: 2:Ignore pilot yaw
+    // @User: Standard
+    AP_GROUPINFO("OPTIONS", 2, AP_SmartRTL, _options, 0),
+
     AP_GROUPEND
 };
 
@@ -83,6 +90,12 @@ AP_SmartRTL::AP_SmartRTL(bool example_mode) :
     _simplify.bitmask.setall();
 }
 
+// Return true if SmartRTL is enabled
+bool AP_SmartRTL::enabled() const
+{
+    return _points_max > 0 && is_positive(_accuracy);
+}
+
 // initialise safe rtl including setting up background processes
 void AP_SmartRTL::init()
 {
@@ -92,10 +105,10 @@ void AP_SmartRTL::init()
     }
 
     // constrain the path length, in case the user decided to make the path unreasonably long.
-    _points_max = constrain_int16(_points_max, 0, SMARTRTL_POINTS_MAX);
+    _points_max.set(constrain_int16(_points_max, 0, SMARTRTL_POINTS_MAX));
 
     // check if user has disabled SmartRTL
-    if (_points_max == 0 || !is_positive(_accuracy)) {
+    if (!enabled()) {
         return;
     }
 
@@ -110,8 +123,8 @@ void AP_SmartRTL::init()
 
     // check if memory allocation failed
     if (_path == nullptr || _prune.loops == nullptr || _simplify.stack == nullptr) {
-        log_action(SRTL_DEACTIVATED_INIT_FAILED);
-        gcs().send_text(MAV_SEVERITY_WARNING, "SmartRTL deactivated: init failed");
+        log_action(Action::DEACTIVATED_INIT_FAILED);
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "SmartRTL deactivated: init failed");
         free(_path);
         free(_prune.loops);
         free(_simplify.stack);
@@ -134,7 +147,7 @@ uint16_t AP_SmartRTL::get_num_points() const
 }
 
 // get next point on the path to home, returns true on success
-bool AP_SmartRTL::pop_point(Vector3f& point)
+bool AP_SmartRTL::pop_point(Vector3p& point)
 {
     // check we are active
     if (!_active) {
@@ -143,7 +156,7 @@ bool AP_SmartRTL::pop_point(Vector3f& point)
 
     // get semaphore
     if (!_path_sem.take_nonblocking()) {
-        log_action(SRTL_POP_FAILED_NO_SEMAPHORE);
+        log_action(Action::POP_FAILED_NO_SEMAPHORE);
         return false;
     }
 
@@ -154,7 +167,7 @@ bool AP_SmartRTL::pop_point(Vector3f& point)
     }
 
     // return last point and remove from path
-    point = _path[--_path_points_count];
+    point = _path[--_path_points_count].topostype();
 
     // record count of last point popped
     _path_points_completed_limit = _path_points_count;
@@ -163,15 +176,42 @@ bool AP_SmartRTL::pop_point(Vector3f& point)
     return true;
 }
 
+// peek at next point on the path without removing it form the path. Returns true on success
+bool AP_SmartRTL::peek_point(Vector3p& point)
+{
+    // check we are active
+    if (!_active) {
+        return false;
+    }
+
+    // get semaphore
+    if (!_path_sem.take_nonblocking()) {
+        log_action(Action::PEEK_FAILED_NO_SEMAPHORE);
+        return false;
+    }
+
+    // check we have another point
+    if (_path_points_count == 0) {
+        _path_sem.give();
+        return false;
+    }
+
+    // return last point
+    point = _path[_path_points_count-1].topostype();
+
+    _path_sem.give();
+    return true;
+}
+
 // clear return path and set home location.  This should be called as part of the arming procedure
 void AP_SmartRTL::set_home(bool position_ok)
 {
-    Vector3f current_pos;
+    Vector3p current_pos;
     position_ok &= AP::ahrs().get_relative_position_NED_origin(current_pos);
     set_home(position_ok, current_pos);
 }
 
-void AP_SmartRTL::set_home(bool position_ok, const Vector3f& current_pos)
+void AP_SmartRTL::set_home(bool position_ok, const Vector3p& current_pos)
 {
     if (_path == nullptr) {
         return;
@@ -196,7 +236,9 @@ void AP_SmartRTL::set_home(bool position_ok, const Vector3f& current_pos)
     }
 
     // successfully added point and reset path
-    _last_good_position_ms = AP_HAL::millis();
+    const uint32_t now = AP_HAL::millis();
+    _last_good_position_ms = now;
+    _last_position_save_ms = now;
     _active = true;
     _home_saved = true;
 }
@@ -213,12 +255,12 @@ void AP_SmartRTL::update(bool position_ok, bool save_position)
         return;
     }
 
-    Vector3f current_pos;
+    Vector3p current_pos;
     position_ok &= AP::ahrs().get_relative_position_NED_origin(current_pos);
     update(position_ok, current_pos);
 }
 
-void AP_SmartRTL::update(bool position_ok, const Vector3f& current_pos)
+void AP_SmartRTL::update(bool position_ok, const Vector3p& current_pos)
 {
     if (!_active) {
         return;
@@ -232,12 +274,12 @@ void AP_SmartRTL::update(bool position_ok, const Vector3f& current_pos)
             _last_position_save_ms = now;
         } else if (AP_HAL::millis() - _last_position_save_ms > SMARTRTL_TIMEOUT) {
             // deactivate after timeout due to failure to save points to path (most likely due to buffer filling up)
-            deactivate(SRTL_DEACTIVATED_PATH_FULL_TIMEOUT, "buffer full");
+            deactivate(Action::DEACTIVATED_PATH_FULL_TIMEOUT, "buffer full");
         }
     } else {
         // check for timeout due to bad position
         if (AP_HAL::millis() - _last_good_position_ms > SMARTRTL_TIMEOUT) {
-            deactivate(SRTL_DEACTIVATED_BAD_POSITION_TIMEOUT, "bad position");
+            deactivate(Action::DEACTIVATED_BAD_POSITION_TIMEOUT, "bad position");
             return;
         }
     }
@@ -282,17 +324,17 @@ void AP_SmartRTL::cancel_request_for_thorough_cleanup()
 //
 
 // add point to end of path (if necessary), returns true on success
-bool AP_SmartRTL::add_point(const Vector3f& point)
+bool AP_SmartRTL::add_point(const Vector3p& point)
 {
     // get semaphore
     if (!_path_sem.take_nonblocking()) {
-        log_action(SRTL_ADD_FAILED_NO_SEMAPHORE, point);
+        log_action(Action::ADD_FAILED_NO_SEMAPHORE, point.tofloat());
         return false;
     }
 
     // check if we have traveled far enough
     if (_path_points_count > 0) {
-        const Vector3f& last_pos = _path[_path_points_count-1];
+        const Vector3p& last_pos = _path[_path_points_count-1].topostype();
         if (last_pos.distance_squared(point) < sq(_accuracy.get())) {
             _path_sem.give();
             return true;
@@ -302,13 +344,13 @@ bool AP_SmartRTL::add_point(const Vector3f& point)
     // check we have space in the path
     if (_path_points_count >= _path_points_max) {
         _path_sem.give();
-        log_action(SRTL_ADD_FAILED_PATH_FULL, point);
+        log_action(Action::ADD_FAILED_PATH_FULL, point.tofloat());
         return false;
     }
 
     // add point to path
-    _path[_path_points_count++] = point;
-    log_action(SRTL_POINT_ADD, point);
+    _path[_path_points_count++] = point.tofloat();
+    log_action(Action::POINT_ADD, point.tofloat());
 
     _path_sem.give();
     return true;
@@ -354,7 +396,7 @@ void AP_SmartRTL::run_background_cleanup()
     // warn if buffer is about to be filled
     uint32_t now_ms = AP_HAL::millis();
     if ((path_points_count >0) && (path_points_count >= _path_points_max - 9) && (now_ms - _last_low_space_notify_ms > 10000)) {
-        gcs().send_text(MAV_SEVERITY_INFO, "SmartRTL Low on space!");
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SmartRTL Low on space!");
        _last_low_space_notify_ms = now_ms;
     }
 
@@ -636,7 +678,7 @@ void AP_SmartRTL::remove_points_by_simplify_bitmask()
     uint16_t removed = 0;
     for (uint16_t src = 1; src < _path_points_count; src++) {
         if (!_simplify.bitmask.get(src)) {
-            log_action(SRTL_POINT_SIMPLIFY, _path[src]);
+            log_action(Action::POINT_SIMPLIFY, _path[src]);
             removed++;
         } else {
             _path[dest] = _path[src];
@@ -651,7 +693,7 @@ void AP_SmartRTL::remove_points_by_simplify_bitmask()
         _simplify.path_points_completed = _simplify.path_points_count;
     } else {
         // this is an error that should never happen so deactivate
-        deactivate(SRTL_DEACTIVATED_PROGRAM_ERROR, "program error");
+        deactivate(Action::DEACTIVATED_PROGRAM_ERROR, "program error");
     }
 
     _path_sem.give();
@@ -688,7 +730,7 @@ bool AP_SmartRTL::remove_points_by_loops(uint16_t num_points_to_remove)
         // shift points after the end of the loop down by the number of points in the loop
         uint16_t loop_num_points_to_remove = loop.end_index - loop.start_index;
         for (uint16_t dest = loop.start_index + 1; dest < _path_points_count - loop_num_points_to_remove; dest++) {
-            log_action(SRTL_POINT_PRUNE, _path[dest]);
+            log_action(Action::POINT_PRUNE, _path[dest]);
             _path[dest] = _path[dest + loop_num_points_to_remove];
         }
 
@@ -697,7 +739,7 @@ bool AP_SmartRTL::remove_points_by_loops(uint16_t num_points_to_remove)
             removed_points += loop_num_points_to_remove;
         } else {
             // this is an error that should never happen so deactivate
-            deactivate(SRTL_DEACTIVATED_PROGRAM_ERROR, "program error");
+            deactivate(Action::DEACTIVATED_PROGRAM_ERROR, "program error");
             _path_sem.give();
             // we return true so thorough_cleanup does not get stuck
             return true;
@@ -790,16 +832,16 @@ bool AP_SmartRTL::add_loop(uint16_t start_index, uint16_t end_index, const Vecto
 */
 AP_SmartRTL::dist_point AP_SmartRTL::segment_segment_dist(const Vector3f &p1, const Vector3f &p2, const Vector3f &p3, const Vector3f &p4)
 {
-    const Vector3f line1 = p2-p1;
-    const Vector3f line2 = p4-p3;
-    const Vector3f line_start_diff = p1-p3; // from the beginning of the second line to the beginning of the first line
+    const Vector3f line1 = p2 - p1;
+    const Vector3f line2 = p4 - p3;
+    const Vector3f line_start_diff = p1 - p3; // from the beginning of the second line to the beginning of the first line
 
     // these don't really have a physical representation. They're only here to break up the longer formulas below.
-    const float a = line1*line1;
-    const float b = line1*line2;
-    const float c = line2*line2;
-    const float d = line1*line_start_diff;
-    const float e = line2*line_start_diff;
+    const float a = line1 * line1;
+    const float b = line1 * line2;
+    const float c = line2 * line2;
+    const float d = line1 * line_start_diff;
+    const float e = line2 * line_start_diff;
 
     // the parameter for the position on line1 and line2 which define the closest points.
     float t1 = 0.0f;
@@ -811,35 +853,37 @@ AP_SmartRTL::dist_point AP_SmartRTL::segment_segment_dist(const Vector3f &p1, co
         return {FLT_MAX, Vector3f(0.0f, 0.0f, 0.0f)};
     }
 
-    t1 = (b*e-c*d)/(a*c-b*b);
-    t2 = (a*e-b*d)/(a*c-b*b);
+    t1 = (b * e - c * d) / (a * c - b * b);
+    t2 = (a * e - b * d) / (a * c - b * b);
 
     // restrict both parameters between 0 and 1.
     t1 = constrain_float(t1, 0.0f, 1.0f);
     t2 = constrain_float(t2, 0.0f, 1.0f);
 
     // difference between two closest points
-    const Vector3f dP = line_start_diff+line1*t1-line2*t2;
+    const Vector3f dP = line_start_diff + line1 * t1 - line2 * t2;
 
-    const Vector3f midpoint = (p1+line1*t1 + p3+line2*t2)/2.0f;
+    const Vector3f midpoint = (p1 + (line1 * t1) + p3 + (line2 * t2)) / 2.0;
     return {dP.length(), midpoint};
 }
 
 // de-activate SmartRTL, send warning to GCS and logger
-void AP_SmartRTL::deactivate(SRTL_Actions action, const char *reason)
+void AP_SmartRTL::deactivate(Action action, const char *reason)
 {
     _active = false;
     log_action(action);
-    gcs().send_text(MAV_SEVERITY_WARNING, "SmartRTL deactivated: %s", reason);
+    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "SmartRTL deactivated: %s", reason);
 }
 
+#if HAL_LOGGING_ENABLED
 // logging
-void AP_SmartRTL::log_action(SRTL_Actions action, const Vector3f &point)
+void AP_SmartRTL::log_action(Action action, const Vector3f &point) const
 {
     if (!_example_mode) {
         AP::logger().Write_SRTL(_active, _path_points_count, _path_points_max, action, point);
     }
 }
+#endif
 
 // returns true if the two loops overlap (used within add_loop to determine which loops to keep or throw away)
 bool AP_SmartRTL::loops_overlap(const prune_loop_t &loop1, const prune_loop_t &loop2) const
@@ -861,3 +905,10 @@ bool AP_SmartRTL::loops_overlap(const prune_loop_t &loop1, const prune_loop_t &l
     // if we got here, no overlap
     return false;
 }
+
+// returns true if pilot's yaw input should be used to adjust vehicle's heading
+bool AP_SmartRTL::use_pilot_yaw(void) const
+{
+    return (_options.get() & uint32_t(Options::IgnorePilotYaw)) == 0;
+}
+

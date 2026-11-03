@@ -1,4 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+
+# flake8: noqa
 '''
 these tables are generated from the STM32 datasheets for the
 STM32F40x
@@ -12,9 +14,6 @@ build = {
 
 # MCU parameters
 mcu = {
-    # location of MCU serial number
-    'UDID_START' : 0x1FFF7A10,
-
     # ram map, as list of (address, size-kb, flags)
     # flags of 1 means DMA-capable
     # flags of 2 means faster memory for CPU intensive work
@@ -23,7 +22,12 @@ mcu = {
         (0x10000000,  64, 2), # CCM memory, faster, but not DMA safe
     ],
 
-    'EXPECTED_CLOCK' : 168000000
+    'EXPECTED_CLOCK' : 168000000,
+
+    'DEFINES' : {
+        'STM32F4' : '1',
+    }
+
 }
 
 AltFunction_map = {

@@ -50,7 +50,7 @@ void Balloon::update(const struct sitl_input &input)
     Vector3f rot_accel = -gyro * radians(400) / terminal_rotation_rate;
 
     // air resistance
-    Vector3f air_resistance = -velocity_air_ef * (GRAVITY_MSS/terminal_velocity);
+    Vector3f air_resistance = -velocity_air_ef * (GRAVITY_MSS/terminal_velocity) / eas2tas;
 
     float lift_accel = 0;
     if (!burst && released) {
@@ -74,6 +74,8 @@ void Balloon::update(const struct sitl_input &input)
 
     // update magnetic field
     update_mag_field_bf();
+
+    update_battery();
 }
 
 } // namespace SITL

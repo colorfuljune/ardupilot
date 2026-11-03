@@ -23,6 +23,10 @@
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_Baro/AP_Baro.h>
 #include <AP_Compass/AP_Compass.h>
+#include <AP_ExternalAHRS/AP_ExternalAHRS.h>
+#include <AP_SerialManager/AP_SerialManager.h>
+#include <SITL/SITL.h>
+#include <AP_Logger/AP_Logger.h>
 
 const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 
@@ -30,14 +34,30 @@ static AP_BoardConfig board_config;
 
 class DummyVehicle {
 public:
-    AP_AHRS_DCM ahrs;  // Need since https://github.com/ArduPilot/ardupilot/pull/10890
+    AP_AHRS ahrs;  // Need since https://github.com/ArduPilot/ardupilot/pull/10890
     AP_Baro baro; // Compass tries to set magnetic model based on location.
+#if AP_COMPASS_EXTERNALAHRS_ENABLED
+    AP_ExternalAHRS eAHRS;
+#endif  // AP_COMPASS_EXTERNALAHRS_ENABLED
 };
 
 static DummyVehicle vehicle;
 // create compass object
 static Compass compass;
 static AP_SerialManager serial_manager;
+
+#if HAL_LOGGING_ENABLED
+static AP_Logger logger;
+AP_UInt32 logger_bitmask;
+static const struct LogStructure log_structure[] = {
+    LOG_COMMON_STRUCTURES
+};
+#endif  // HAL_LOGGING_ENABLED
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#include <SITL/SITL.h>
+SITL::SIM sitl;
+#endif
 
 uint32_t timer;
 
@@ -46,15 +66,23 @@ static void setup()
 {
     hal.console->printf("Compass library test\n");
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    sitl.init();
+#endif  // CONFIG_HAL_BOARD
+#if HAL_LOGGING_ENABLED
+    logger.init(logger_bitmask, log_structure, ARRAY_SIZE(log_structure));
+#endif  // HAL_LOGGING_ENABLED
     board_config.init();
     vehicle.ahrs.init();
     compass.init();
     hal.console->printf("init done - %u compasses detected\n", compass.get_count());
 
     // set offsets to account for surrounding interference
-    compass.set_and_save_offsets(0, Vector3f(0, 0, 0));
+    for (uint8_t i=0; i<compass.get_count(); i++) {
+        compass.set_and_save_offsets(i, Vector3f(0, 0, 0));
+    }
     // set local difference between magnetic north and true north
-    compass.set_declination(ToRad(0.0f));
+    compass.set_declination(radians(0.0f));
 
     hal.scheduler->delay(1000);
     timer = AP_HAL::micros();
@@ -108,7 +136,7 @@ static void loop()
 
             // display all to user
             hal.console->printf("Heading: %.2f (%3d, %3d, %3d)",
-                                (double)ToDeg(heading),
+                                (double)degrees(heading),
                                 (int)mag.x,
                                 (int)mag.y,
                                 (int)mag.z);

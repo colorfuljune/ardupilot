@@ -28,13 +28,14 @@ BalanceBot::BalanceBot(const char *frame_str) :
     skid_turn_rate(0.15708) // meters/sec
 {
     dcm.from_euler(0,0,0); // initial yaw, pitch and roll in radians
+    lock_step_scheduled = true;
     printf("Balance Bot Simulation Started\n");
 }
 
 /*
    return yaw rate in degrees/second given steering_angle
 */
-float BalanceBot::calc_yaw_rate(float steering)
+float BalanceBot::calc_yaw_rate(float steering) const
 {
     float wheel_base_length = 0.15f;
     return steering * degrees( skid_turn_rate/wheel_base_length );
@@ -72,8 +73,8 @@ void BalanceBot::update(const struct sitl_input &input)
     const float gear_ratio = 50.0f;
 
     // balance bot uses skid steering
-    const float motor1 = 2*((input.servos[0]-1000)/1000.0f - 0.5f);
-    const float motor2 = 2*((input.servos[2]-1000)/1000.0f - 0.5f);
+    float motor1 = input.servos[0] ? normalise_servo_input(input.servos[0]) : 0;
+    float motor2 = input.servos[2] ? normalise_servo_input(input.servos[2]) : 0;
     const float steering = motor1 - motor2;
     const float throttle = 0.5 * (motor1 + motor2);
 
@@ -84,7 +85,7 @@ void BalanceBot::update(const struct sitl_input &input)
     const float delta_time = frame_time_us * 1.0e-6f;
 
     // yaw rate in degrees/s
-    const float yaw_rate = calc_yaw_rate(steering);
+    float yaw_rate = calc_yaw_rate(steering);
 
     // obtain roll, pitch, yaw from dcm
     float r, p, y;
@@ -92,7 +93,18 @@ void BalanceBot::update(const struct sitl_input &input)
     float theta = p; //radians
 
     float ang_vel = gyro.y; //radians/s
-    
+    if (!hal.util->get_soft_armed()) {
+        // simulated fingers uprighting the vehicle
+        const float p_gain = 200;
+        const float pitch_response = -sin(p) * p_gain * delta_time;
+        ang_vel += pitch_response;
+
+        // simulated fingers rotating the vehicle
+        const float y_gain = 100000;
+        const float yaw_response = -sin(wrap_180(y)) * y_gain * delta_time;
+        yaw_rate += yaw_response;
+    }
+
     // t1,t2,t3 are terms in the equation to find vehicle frame x acceleration
     const float t1 = ((2.0f*gear_ratio*k_t*v/(R*r_w)) - (2.0f*gear_ratio*k_t*k_e*velocity_vf_x/(R*r_w*r_w)) - (m_p*l*ang_vel*ang_vel*sin(theta))) * (i_p + m_p*l*l);
     const float t2 = -m_p*l*cos(theta)*((2.0f*gear_ratio*k_t*k_e*velocity_vf_x/(R*r_w)) - (2.0f*gear_ratio*k_t*v/(R)) + (m_p*GRAVITY_MSS*l*sin(theta)));
@@ -107,10 +119,9 @@ void BalanceBot::update(const struct sitl_input &input)
     // accel in body frame due to motor
     accel_body = Vector3f(accel_vf_x*cos(theta), 0, -accel_vf_x*sin(theta));
 
-    // update theta and angular velocity
+    // update angular velocity (theta is re-derived from the attitude each
+    // step via the DCM below, so it is not integrated here)
     ang_vel += angular_accel_bf_y * delta_time;
-    theta += ang_vel * delta_time;
-    theta = fmod(theta, radians(360));
 
     gyro = Vector3f(0, ang_vel, radians(yaw_rate));
 
@@ -131,15 +142,20 @@ void BalanceBot::update(const struct sitl_input &input)
     // we are on the ground, so our vertical accel is zero
     accel_earth.z = 0;
 
-    if (!hal.util->get_soft_armed()) {
+    if (!hal.util->get_soft_armed() &&
+        p < radians(2)) {
         // reset to vertical when not armed for faster testing
         accel_earth.zero();
         velocity_ef.zero();
-        dcm.identity();
-        gyro.zero();
         velocity_vf_x =0;
+        gyro[1] = 0; // no pitch rate
+        if (y < radians(2)) {
+            // no rates at all:
+            dcm.identity();
+            gyro.zero();
+        }
     }
-    
+
     // work out acceleration as seen by the accelerometers. It sees the kinematic
     // acceleration (ie. real movement), plus gravity
     accel_body += dcm.transposed() * (Vector3f(0, 0, -GRAVITY_MSS));
@@ -148,7 +164,7 @@ void BalanceBot::update(const struct sitl_input &input)
     velocity_ef += accel_earth * delta_time;
 
     // new position vector
-    position += (velocity_ef * delta_time);
+    position += (velocity_ef * delta_time).todouble();
 
     // neglect roll
     dcm.to_euler(&r, &p, &y);
@@ -156,11 +172,16 @@ void BalanceBot::update(const struct sitl_input &input)
     use_smoothing = true;
 
     // update lat/lon/altitude
+    // allow for changes in physics step
+    adjust_frame_time(constrain_float(sitl->loop_rate_hz, rate_hz-1, rate_hz+1));
+
     update_position();
     time_advance();
 
     // update magnetic field
     update_mag_field_bf();
+
+    update_battery();
 }
 
 }// namespace SITL

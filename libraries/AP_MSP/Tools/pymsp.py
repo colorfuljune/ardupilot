@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
+
+# flake8: noqa
 
 """
  author: Alex Apostoli
@@ -218,7 +219,7 @@ class PyMSP:
         MSP_ATTITUDE:  MSPItem('ATTITUDE', "hhh", "roll,pitch,yaw"),
         MSP_ALTITUDE:  MSPItem('ALTITUDE', "ih", "alt,vspeed"),
         MSP_RC_TUNING: MSPItem('RC_TUNING', "BBBBBBB", "RC_Rate,RC_Expo,RollPitchRate,YawRate,DynThrPID,ThrottleMID,ThrottleExpo"),
-        MSP_BATTERY_STATE: MSPItem('BATTERY_STATE', "BHBHh", "cellCount,capacity,voltage,mah,current"),
+        MSP_BATTERY_STATE: MSPItem('BATTERY_STATE', "BHBHhBh", "cellCount,capacity,voltage,mah,current,state,voltage_cv"),
         MSP_RTC:       MSPItem('RTC', "HBBBBBH", "year,mon,mday,hour,min,sec,millis"),
         MSP_OSD_CONFIG: MSPItem("OSD_CONFIG",
                                 ["BBBBHBBH",
@@ -236,12 +237,13 @@ class PyMSP:
         MSP_MOTOR_PINS: MSPItem("MOTOR_PINS", "8H","MP"),
         MSP_ANALOG:    MSPItem("ANALOG", "BHHHH", "dV,consumed_mah,rssi,current,volt"),
         MSP_STATUS:    MSPItem("STATUS", "HHHIBHHBBIB", "task_delta,i2c_err_count,sensor_status,mode_flags,nop_1,system_load,gyro_time,nop_2,nop_3,armed,extra"),
+        MSP_ESC_SENSOR_DATA:    MSPItem('ESC', "BH", "temp1,rpm1"),
         }
 
     def __init__(self):
 
         self.msp_name = {
-            'name':None 
+            'name':None
             }
         self.msp_osd_config = {}
 
@@ -275,7 +277,7 @@ class PyMSP:
         msgName = a[0]
         fieldName = a[1]
         if not msgName in self.by_name:
-            # default to zero for simplicty of display
+            # default to zero for simplicity of display
             return 0
         msg = self.by_name[msgName]
         if not fieldName in msg.values:
@@ -293,7 +295,7 @@ class PyMSP:
         value, = struct.unpack("<I", self.inBuf[self.p:self.p+4])
         self.p += 4
         return value
-    
+
     def read16(self):
         '''signed 16 bit number'''
         value, = struct.unpack("<h", self.inBuf[self.p:self.p+2])
@@ -305,7 +307,7 @@ class PyMSP:
         value, = struct.unpack("<H", self.inBuf[self.p:self.p+2])
         self.p += 2
         return value
-    
+
     def read8(self):
         '''unsigned 8 bit number'''
         value, = struct.unpack("<B", self.inBuf[self.p:self.p+1])
@@ -396,7 +398,7 @@ class PyMSP:
                 self.c_state = self.HEADER_ERR
             else:
                 self.c_state = self.IDLE
-    
+
         elif self.c_state == self.HEADER_ARROW or self.c_state == self.HEADER_ERR:
             self.err_rcvd = (self.c_state == self.HEADER_ERR)
             #print (struct.unpack('<B',c)[0])
